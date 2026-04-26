@@ -559,6 +559,9 @@ class AirgapTransportLayer(object):
         total_chunks = int(manifest["total_chunks"])
         self._downgrade_nonblocking_parity_conflicts(parsed, total_chunks)
         parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
+        received_data_chunks, received_parity_chunks = self._count_chunk_presence(
+            parsed.get("chunks", {}), total_chunks
+        )
 
         missing = parsed["missing_chunks"]
         missing_records = self._build_missing_chunk_records(manifest, missing)
@@ -577,7 +580,8 @@ class AirgapTransportLayer(object):
             "success": recoverable,
             "artifact_id": manifest["artifact_id"],
             "expected_total_chunks": int(manifest["total_chunks"]),
-            "received_unique_chunks": len(parsed["chunks"]),
+            "received_unique_chunks": received_data_chunks,
+            "received_parity_chunks": received_parity_chunks,
             "missing_chunks_count": len(missing),
             "missing_chunks_sample": missing[:cap],
             "missing_chunk_locations_sample": missing_records[:cap],
@@ -2755,6 +2759,22 @@ class AirgapTransportLayer(object):
 
         plan = [chosen[k] for k in sorted(chosen.keys())]
         return plan
+
+    def _count_chunk_presence(self, chunks: object, total_chunks: int) -> Tuple[int, int]:
+        data_count = 0
+        parity_count = 0
+        if not isinstance(chunks, dict):
+            return data_count, parity_count
+        for chunk_idx in chunks.keys():
+            try:
+                idx = int(chunk_idx)
+            except Exception:
+                continue
+            if 0 <= idx < total_chunks:
+                data_count += 1
+            else:
+                parity_count += 1
+        return data_count, parity_count
 
     def _apply_parity_recovery(self, manifest: Dict[str, object], parsed: Dict[str, object]) -> List[int]:
         """

@@ -95,7 +95,8 @@ def safe_identifier(value: str, fallback: str = "protected_mod") -> str:
 def load_scope_config(path):
     if path is None:
         return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # Accept UTF-8 with or without BOM so scope.json works from PowerShell/Notepad defaults.
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError("scope config must be a JSON object")
     normalized = {}  # type: Dict[str, Dict[str, object]]
@@ -124,7 +125,8 @@ def project_python_files(target, excluded_paths):
 
 
 def read_source(path: Path) -> str:
-    source = path.read_text(encoding="utf-8")
+    # Accept UTF-8 source files saved with BOM by Windows editors.
+    source = path.read_text(encoding="utf-8-sig")
     ast.parse(source, filename=str(path))
     return source
 
@@ -148,7 +150,7 @@ def precheck_python_files(files, root):
     issues = []  # type: List[SyntaxIssue]
     for path in files:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = path.read_text(encoding="utf-8-sig")
             compile(source, str(path), "exec")
             valid_files.append(path)
         except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
