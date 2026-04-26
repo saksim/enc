@@ -83,6 +83,7 @@ IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 SIDECAR_BITS_PER_ROW = 50
 SIDECAR_CELL_SIZE = 6
 SIDECAR_CELL_GAP = 2
+HASH_FRAGMENT_LEN = 32
 PAYLOAD_OCR_AMBIGUITIES = {
     "2": "Z",
     "4": "H",
@@ -195,7 +196,30 @@ def _normalize_protocol_signature(line: str) -> str:
         line = line.replace("ATLI", "AT1|")
     if line.startswith("@PAGECRCIP"):
         line = line.replace("@PAGECRCIP", "@PAGECRC|P", 1)
+    if line.startswith("@CFGIAT"):
+        line = line.replace("@CFGI", "@CFG|", 1).replace("ATLI", "AT1|", 1)
+        line = (
+            line.replace("ICC=", "|CC=")
+            .replace("ILP=", "|LP=")
+            .replace("IRC=", "|RC=")
+            .replace("IIL=", "|IL=")
+            .replace("IPG=", "|PG=")
+            .replace("ICS=", "|CS=")
+            .replace("IRS=", "|RS=")
+        )
     line = line.replace("|ATLI|", "|AT1|")
+    if line.startswith("@CHI|"):
+        line = line.replace("@CHI|", "@CH1|", 1)
+    if line.startswith("@CHL|"):
+        line = line.replace("@CHL|", "@CH1|", 1)
+    if line.startswith("@RHI|"):
+        line = line.replace("@RHI|", "@RH1|", 1)
+    if line.startswith("@RHL|"):
+        line = line.replace("@RHL|", "@RH1|", 1)
+    if line.startswith("@CHZ|"):
+        line = line.replace("@CHZ|", "@CH2|", 1)
+    if line.startswith("@RHZ|"):
+        line = line.replace("@RHZ|", "@RH2|", 1)
 
     if line.startswith("P") and len(line) > 8:
         chars = list(line)
@@ -224,6 +248,46 @@ def _normalize_hex_token(token: str) -> str:
         .replace("L", "1")
         .replace("S", "5")
     )
+
+
+def _parse_cfg_line(line: str) -> Optional[Dict[str, int]]:
+    if not line.startswith("@CFG|AT1|"):
+        return None
+    parts = line.split("|")
+    values: Dict[str, int] = {}
+    for item in parts[2:]:
+        if "=" not in item:
+            return None
+        key, value = item.split("=", 1)
+        try:
+            values[key] = int(_normalize_digit_token(value))
+        except Exception:
+            return None
+    required = {"CC", "LP", "RC", "IL", "PG", "CS", "RS"}
+    if not required.issubset(set(values.keys())):
+        return None
+    return values
+
+
+def _parse_hash_fragment_line(line: str) -> Optional[Tuple[str, int, str]]:
+    if not line.startswith("@") or "|" not in line:
+        return None
+    tag, payload = line.split("|", 1)
+    if len(tag) != 4:
+        return None
+    kind = tag[1:3]
+    if kind not in ("RH", "CH"):
+        return None
+    try:
+        part_no = int(_normalize_digit_token(tag[3]))
+    except Exception:
+        return None
+    if part_no not in (1, 2):
+        return None
+    normalized = _normalize_hex_token(payload)
+    if len(normalized) < HASH_FRAGMENT_LEN:
+        return None
+    return kind, part_no, normalized[:HASH_FRAGMENT_LEN]
 
 
 def _levenshtein_distance(left: str, right: str) -> int:
@@ -301,6 +365,15 @@ def _decode_safe_base32(data: str) -> bytes:
     if padding:
         standard = standard + ("=" * padding)
     return base64.b32decode(standard.encode("ascii"))
+
+
+def _safe_base32_encoded_length(byte_len: int) -> int:
+    if byte_len <= 0:
+        return 0
+    full_groups, remainder = divmod(int(byte_len), 5)
+    length = full_groups * 8
+    extra = {0: 0, 1: 2, 2: 4, 3: 5, 4: 7}[remainder]
+    return length + extra
 
 
 def _safe_payload_to_bits(payload: str) -> str:
@@ -391,14 +464,32 @@ class AirgapTransportLayer(object):
         encoded = _encode_safe_base32(compressed)
         chunks = self._split_chunks(encoded, self.chunk_chars)
         parity_info = self._build_parity_info(chunks=chunks, parity_group_size=parity_group_size)
+        raw_sha256 = _sha256_hex(raw)
+        compressed_sha256 = _sha256_hex(compressed)
 
         base_entries = [(idx, payload) for idx, payload in enumerate(chunks)]
         base_entries.extend(parity_info["entries"])
         chunk_entries = self._build_chunk_entries(
             base_entries=base_entries, redundancy_copies=redundancy_copies, interleave=interleave
         )
+        total_pages = int(math.ceil(float(len(chunk_entries)) / float(self.lines_per_page))) if self.lines_per_page > 0 else 0
+        metadata_lines = self._build_embedded_metadata_lines(
+            artifact_id=artifact_id,
+            total_chunks=len(chunks),
+            total_pages=total_pages,
+            raw_size=len(raw),
+            compressed_size=len(compressed),
+            raw_sha256=raw_sha256,
+            compressed_sha256=compressed_sha256,
+            redundancy_copies=redundancy_copies,
+            interleave=bool(interleave),
+            parity_group_size=parity_group_size,
+        )
         pages, chunk_locations = self._build_pages(
-            artifact_id=artifact_id, chunk_entries=chunk_entries, total_chunks=len(chunks)
+            artifact_id=artifact_id,
+            chunk_entries=chunk_entries,
+            total_chunks=len(chunks),
+            metadata_lines=metadata_lines,
         )
 
         manifest_path = out_dir / "{}.manifest.json".format(artifact_id)
@@ -430,8 +521,8 @@ class AirgapTransportLayer(object):
             "alphabet": SAFE_BASE32_ALPHABET,
             "raw_size": len(raw),
             "compressed_size": len(compressed),
-            "raw_sha256": _sha256_hex(raw),
-            "compressed_sha256": _sha256_hex(compressed),
+            "raw_sha256": raw_sha256,
+            "compressed_sha256": compressed_sha256,
             "chunk_chars": self.chunk_chars,
             "chunk_lengths": [len(chunk) for chunk in chunks],
             "total_chunks": len(chunks),
@@ -477,16 +568,39 @@ class AirgapTransportLayer(object):
             "page_texts": exported_page_texts,
             "images": exported_images,
         }
+        if not PIL_AVAILABLE:
+            result["warning"] = "Pillow is not available; exported pages_txt only and skipped PNG page rendering"
         return result
 
     def recover_artifact(
         self,
-        manifest_path: str,
+        manifest_path: Optional[str],
         ocr_input_path: str,
         output_file: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
+        if not manifest_path:
+            return self._recover_artifact_without_manifest(
+                ocr_input_path=ocr_input_path,
+                output_file=output_file,
+                strict_payload_chars=strict_payload_chars,
+            )
+
         manifest = self._load_manifest(manifest_path)
+        return self._recover_artifact_against_manifest(
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            output_file=output_file,
+            strict_payload_chars=strict_payload_chars,
+        )
+
+    def _recover_artifact_against_manifest(
+        self,
+        manifest: Dict[str, object],
+        ocr_input_path: str,
+        output_file: str,
+        strict_payload_chars: bool = False,
+    ) -> Dict[str, object]:
         encoded = self._recover_encoded_payload(manifest, ocr_input_path, strict_payload_chars)
         compressed = _decode_safe_base32(encoded)
         compressed_sha = _sha256_hex(compressed)
@@ -523,11 +637,29 @@ class AirgapTransportLayer(object):
 
     def verify_ocr_text(
         self,
-        manifest_path: str,
+        manifest_path: Optional[str],
         ocr_input_path: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
+        if not manifest_path:
+            return self._verify_ocr_text_without_manifest(
+                ocr_input_path=ocr_input_path,
+                strict_payload_chars=strict_payload_chars,
+            )
+
         manifest = self._load_manifest(manifest_path)
+        return self._verify_ocr_text_against_manifest(
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
+
+    def _verify_ocr_text_against_manifest(
+        self,
+        manifest: Dict[str, object],
+        ocr_input_path: str,
+        strict_payload_chars: bool = False,
+    ) -> Dict[str, object]:
         encoded = self._recover_encoded_payload(manifest, ocr_input_path, strict_payload_chars)
         compressed = _decode_safe_base32(encoded)
         compressed_sha = _sha256_hex(compressed)
@@ -544,14 +676,35 @@ class AirgapTransportLayer(object):
 
     def analyze_ocr_text(
         self,
-        manifest_path: str,
+        manifest_path: Optional[str],
         ocr_input_path: str,
         strict_payload_chars: bool = False,
         max_list: int = 200,
         save_report_path: Optional[str] = None,
         emit_missing_file: Optional[str] = None,
     ) -> Dict[str, object]:
-        manifest = self._load_manifest(manifest_path)
+        if manifest_path:
+            manifest = self._load_manifest(manifest_path)
+        else:
+            manifest = self._build_inferred_manifest_from_ocr(ocr_input_path)
+        return self._analyze_ocr_text_against_manifest(
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+            max_list=max_list,
+            save_report_path=save_report_path,
+            emit_missing_file=emit_missing_file,
+        )
+
+    def _analyze_ocr_text_against_manifest(
+        self,
+        manifest: Dict[str, object],
+        ocr_input_path: str,
+        strict_payload_chars: bool = False,
+        max_list: int = 200,
+        save_report_path: Optional[str] = None,
+        emit_missing_file: Optional[str] = None,
+    ) -> Dict[str, object]:
         parsed = self._parse_ocr_chunks(manifest, ocr_input_path, strict_payload_chars)
         parity_recovered = self._apply_parity_recovery(manifest, parsed)
         hash_resolved = self._resolve_conflicts_by_package_hash(manifest, parsed)
@@ -730,7 +883,7 @@ class AirgapTransportLayer(object):
 
     def recover_from_images(
         self,
-        manifest_path: str,
+        manifest_path: Optional[str],
         image_input_path: str,
         output_file: str,
         backend: str = "tesseract",
@@ -745,10 +898,10 @@ class AirgapTransportLayer(object):
         backend = backend.lower().strip()
         temp_dir = Path(output_file).parent / ".airgap_tmp"
         temp_dir.mkdir(parents=True, exist_ok=True)
-        manifest = self._load_manifest(manifest_path)
-        page_layouts = self._get_render_layout_pages(manifest)
-        render_layout_sidecar_supported = self._page_layouts_support_sidecar(page_layouts)
-        manifest_sidecar_supported = PIL_AVAILABLE and self._manifest_has_page_entries(manifest)
+        manifest = self._load_manifest(manifest_path) if manifest_path else None
+        page_layouts = self._get_render_layout_pages(manifest) if manifest else []
+        render_layout_sidecar_supported = self._page_layouts_support_sidecar(page_layouts) if manifest else False
+        manifest_sidecar_supported = PIL_AVAILABLE and bool(manifest) and self._manifest_has_page_entries(manifest)
         sidecar_supported = render_layout_sidecar_supported or manifest_sidecar_supported
 
         candidates: List[str]
@@ -989,6 +1142,76 @@ class AirgapTransportLayer(object):
     def _split_chunks(self, encoded: str, chunk_chars: int) -> List[str]:
         return [encoded[i : i + chunk_chars] for i in range(0, len(encoded), chunk_chars)]
 
+    def _build_embedded_metadata_lines(
+        self,
+        artifact_id: str,
+        total_chunks: int,
+        total_pages: int,
+        raw_size: int,
+        compressed_size: int,
+        raw_sha256: str,
+        compressed_sha256: str,
+        redundancy_copies: int,
+        interleave: bool,
+        parity_group_size: int,
+    ) -> List[str]:
+        raw_sha256 = raw_sha256.upper()
+        compressed_sha256 = compressed_sha256.upper()
+        return [
+            "@CFG|AT1|CC={}|LP={}|RC={}|IL={}|PG={}|CS={}|RS={}".format(
+                self.chunk_chars,
+                self.lines_per_page,
+                int(redundancy_copies),
+                1 if interleave else 0,
+                int(parity_group_size),
+                int(compressed_size),
+                int(raw_size),
+            ),
+            "@RH1|{}".format(raw_sha256[:HASH_FRAGMENT_LEN]),
+            "@RH2|{}".format(raw_sha256[HASH_FRAGMENT_LEN: HASH_FRAGMENT_LEN * 2]),
+            "@CH1|{}".format(compressed_sha256[:HASH_FRAGMENT_LEN]),
+            "@CH2|{}".format(compressed_sha256[HASH_FRAGMENT_LEN: HASH_FRAGMENT_LEN * 2]),
+        ]
+
+    def _rebuild_parity_manifest(
+        self, total_chunks: int, chunk_lengths: List[int], parity_group_size: int
+    ) -> Dict[str, object]:
+        if int(parity_group_size) <= 1 or int(total_chunks) <= 0:
+            return {
+                "enabled": False,
+                "group_size": 0,
+                "group_count": 0,
+                "index_base": 0,
+                "groups": [],
+            }
+
+        group_size = int(parity_group_size)
+        index_base = 90000
+        groups = []
+        group_id = 0
+        for start in range(0, int(total_chunks), group_size):
+            data_indices = list(range(start, min(start + group_size, int(total_chunks))))
+            if not data_indices:
+                continue
+            parity_len = max(int(chunk_lengths[idx]) for idx in data_indices)
+            groups.append(
+                {
+                    "group_id": group_id,
+                    "data_chunk_indices": data_indices,
+                    "parity_chunk_index": index_base + group_id,
+                    "parity_len": parity_len,
+                }
+            )
+            group_id += 1
+
+        return {
+            "enabled": True,
+            "group_size": group_size,
+            "group_count": len(groups),
+            "index_base": index_base,
+            "groups": groups,
+        }
+
     def _build_parity_info(self, chunks: List[str], parity_group_size: int) -> Dict[str, object]:
         """
         Build optional parity chunks over SAFE_BASE32 symbols.
@@ -1079,7 +1302,11 @@ class AirgapTransportLayer(object):
         return entries
 
     def _build_pages(
-        self, artifact_id: str, chunk_entries: List[Tuple[int, str, int]], total_chunks: int
+        self,
+        artifact_id: str,
+        chunk_entries: List[Tuple[int, str, int]],
+        total_chunks: int,
+        metadata_lines: Optional[List[str]] = None,
     ) -> Tuple[List[List[str]], Dict[str, List[Dict[str, int]]]]:
         pages = []
         total_lines = len(chunk_entries)
@@ -1088,6 +1315,7 @@ class AirgapTransportLayer(object):
             total_lines = 1
         if total_chunks <= 0:
             total_chunks = 1
+        metadata_lines = list(metadata_lines or [])
 
         chunk_locations = {}
         cursor = 0
@@ -1098,6 +1326,7 @@ class AirgapTransportLayer(object):
                 artifact_id, page_index, len(page_entries), total_chunks
             )
             lines = [header]
+            lines.extend(metadata_lines)
             for line_idx, entry in enumerate(page_entries, 1):
                 chunk_index, payload, copy_no = entry
                 core = "C{:05d}|{}".format(chunk_index, payload)
@@ -1431,7 +1660,11 @@ class AirgapTransportLayer(object):
             )
 
         working = list(bands)
-        if len(working) >= expected_count + 2:
+        if len(working) >= expected_count + 7:
+            middle = working[6:-1]
+            if len(middle) >= expected_count:
+                working = middle
+        elif len(working) >= expected_count + 2:
             middle = working[1:-1]
             if len(middle) >= expected_count:
                 working = middle
@@ -2469,16 +2702,26 @@ class AirgapTransportLayer(object):
 
         raise ValueError("unsupported backend: {}".format(backend))
 
-    def _parse_ocr_chunks(
-        self, manifest: Dict[str, object], ocr_input_path: str, strict_payload_chars: bool
+    def _parse_ocr_chunks(self, manifest: Dict[str, object], ocr_input_path: str, strict_payload_chars: bool) -> Dict[str, object]:
+        total_chunks = int(manifest["total_chunks"])
+        return self._parse_ocr_chunks_with_total(
+            total_chunks=total_chunks,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
+
+    def _parse_ocr_chunks_with_total(
+        self, total_chunks: int, ocr_input_path: str, strict_payload_chars: bool
     ) -> Dict[str, object]:
         raw_lines = self._read_ocr_lines(ocr_input_path)
         chunk_votes = {}
         page_lines_for_crc = {}
+        page_meta_extra_for_crc = {}
         page_meta = {}
         page_crc_expect = {}
         line_errors = []
         line_warnings = []
+        current_page_no = 0
 
         for source_line_no, raw in enumerate(raw_lines, 1):
             line = _normalize_ocr_line(raw)
@@ -2490,12 +2733,24 @@ class AirgapTransportLayer(object):
             if meta_match:
                 page_no = int(meta_match.group(2))
                 page_meta[page_no] = line
+                current_page_no = page_no
+                continue
+
+            if _parse_cfg_line(line):
+                if current_page_no > 0:
+                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
+                continue
+
+            if _parse_hash_fragment_line(line):
+                if current_page_no > 0:
+                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
                 continue
 
             page_crc_match = PAGECRC_PATTERN.match(line)
             if page_crc_match:
                 page_no = int(page_crc_match.group(1))
                 page_crc_expect[page_no] = page_crc_match.group(2)
+                current_page_no = 0
                 continue
 
             match = LINE_PATTERN.match(line)
@@ -2634,6 +2889,15 @@ class AirgapTransportLayer(object):
             if not header or not lines:
                 continue
             base = [header]
+            base.extend(
+                sorted(
+                    page_meta_extra_for_crc.get(page_no, []),
+                    key=lambda item: (
+                        0 if item.startswith("@CFG|") else 1 if item.startswith("@RH1|") else 2 if item.startswith("@RH2|") else 3 if item.startswith("@CH1|") else 4 if item.startswith("@CH2|") else 9,
+                        item,
+                    ),
+                )
+            )
             base.extend(sorted(lines))
             actual_crc = _crc16_hex("\n".join(base))
             if actual_crc != expect_crc:
@@ -2645,7 +2909,6 @@ class AirgapTransportLayer(object):
                     }
                 )
 
-        total_chunks = int(manifest["total_chunks"])
         missing_chunks = [idx for idx in range(total_chunks) if idx not in chunks]
         ordered_chunks = [chunks[idx] for idx in range(total_chunks) if idx in chunks]
 
@@ -2660,6 +2923,302 @@ class AirgapTransportLayer(object):
             "page_meta_count": len(page_meta),
             "page_crc_count": len(page_crc_expect),
             "chunk_votes": chunk_votes,
+        }
+
+    def _choose_majority_metadata_value(self, label: str, votes: Dict[object, int]) -> Optional[object]:
+        if not votes:
+            return None
+        ranked = sorted(votes.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+        if len(ranked) > 1 and int(ranked[0][1]) == int(ranked[1][1]) and ranked[0][0] != ranked[1][0]:
+            raise ValueError("conflicting {} values in OCR metadata: {}".format(label, [item[0] for item in ranked[:5]]))
+        return ranked[0][0]
+
+    def _scan_transport_metadata(self, ocr_input_path: str) -> Dict[str, object]:
+        raw_lines = self._read_ocr_lines(ocr_input_path)
+        artifact_votes: Dict[str, int] = {}
+        total_chunk_votes: Dict[int, int] = {}
+        total_page_votes: Dict[int, int] = {}
+        cfg_votes: Dict[str, Dict[int, int]] = {
+            "CC": {},
+            "LP": {},
+            "RC": {},
+            "IL": {},
+            "PG": {},
+            "CS": {},
+            "RS": {},
+        }
+        hash_votes: Dict[str, Dict[str, int]] = {
+            "RH1": {},
+            "RH2": {},
+            "CH1": {},
+            "CH2": {},
+        }
+        max_data_chunk_idx = -1
+
+        def _add_vote(bucket: Dict[object, int], value: object) -> None:
+            bucket[value] = bucket.get(value, 0) + 1
+
+        for raw in raw_lines:
+            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
+            if not line:
+                continue
+
+            meta_match = META_PATTERN.match(line)
+            if meta_match:
+                _add_vote(artifact_votes, meta_match.group(1))
+                _add_vote(total_page_votes, int(meta_match.group(3)))
+                _add_vote(total_chunk_votes, int(meta_match.group(5)))
+                continue
+
+            cfg = _parse_cfg_line(line)
+            if cfg:
+                for key, value in cfg.items():
+                    _add_vote(cfg_votes[key], int(value))
+                continue
+
+            hash_fragment = _parse_hash_fragment_line(line)
+            if hash_fragment:
+                kind, part_no, fragment = hash_fragment
+                _add_vote(hash_votes["{}{}".format(kind, part_no)], fragment)
+                continue
+
+            match = LINE_PATTERN.match(line)
+            if match:
+                chunk_idx = int(match.group(3))
+                if 0 <= chunk_idx < 90000:
+                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
+                continue
+
+            fallback = LINE_PATTERN_FALLBACK.match(line)
+            if fallback:
+                try:
+                    chunk_idx = int(_normalize_digit_token(fallback.group(3)))
+                except Exception:
+                    continue
+                if 0 <= chunk_idx < 90000:
+                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
+
+        artifact_id = self._choose_majority_metadata_value("artifact_id", artifact_votes)
+        total_chunks = self._choose_majority_metadata_value("total_chunks", total_chunk_votes)
+        total_pages = self._choose_majority_metadata_value("total_pages", total_page_votes)
+
+        metadata_source = "meta_header"
+        if total_chunks is None:
+            if max_data_chunk_idx >= 0:
+                total_chunks = max_data_chunk_idx + 1
+                metadata_source = "chunk_index_inference"
+            else:
+                raise ValueError("cannot infer total chunks from OCR input without manifest")
+
+        if artifact_id is None:
+            artifact_id = "UNKNOWN"
+
+        metadata = {
+            "artifact_id": str(artifact_id),
+            "total_chunks": int(total_chunks),
+            "total_pages": int(total_pages) if total_pages is not None else 0,
+            "metadata_source": metadata_source,
+        }
+
+        for key, bucket in cfg_votes.items():
+            value = self._choose_majority_metadata_value(key, bucket)
+            if value is not None:
+                metadata[key] = int(value)
+
+        for key, bucket in hash_votes.items():
+            value = self._choose_majority_metadata_value(key, bucket)
+            if value is not None:
+                metadata[key] = str(value)
+
+        if all(key in metadata for key in ("RH1", "RH2", "CH1", "CH2", "CC", "LP", "RC", "IL", "PG", "CS", "RS")):
+            metadata["metadata_source"] = "embedded_headers"
+        return metadata
+
+    def _build_inferred_manifest_from_ocr(self, ocr_input_path: str) -> Dict[str, object]:
+        metadata = self._scan_transport_metadata(ocr_input_path)
+        manifest: Dict[str, object] = {
+            "protocol_version": PROTOCOL_VERSION,
+            "artifact_id": metadata["artifact_id"],
+            "total_chunks": int(metadata["total_chunks"]),
+            "total_pages": int(metadata.get("total_pages", 0) or 0),
+            "lines_per_page": int(metadata.get("LP", self.lines_per_page) or self.lines_per_page),
+            "_metadata_source": metadata["metadata_source"],
+            "_embedded_metadata_complete": False,
+        }
+
+        required = ("RH1", "RH2", "CH1", "CH2", "CC", "LP", "RC", "IL", "PG", "CS", "RS")
+        if not all(key in metadata for key in required):
+            return manifest
+
+        chunk_chars = int(metadata["CC"])
+        compressed_size = int(metadata["CS"])
+        encoded_len = _safe_base32_encoded_length(compressed_size)
+        total_chunks = int(metadata["total_chunks"])
+        if chunk_chars <= 0:
+            return manifest
+
+        expected_total_chunks = int(math.ceil(float(encoded_len) / float(chunk_chars))) if encoded_len > 0 else 0
+        if expected_total_chunks != total_chunks:
+            manifest["_metadata_error"] = "embedded metadata chunk count mismatch"
+            return manifest
+
+        if total_chunks <= 0:
+            manifest["_metadata_error"] = "embedded metadata total_chunks must be > 0"
+            return manifest
+
+        last_chunk_len = encoded_len - (chunk_chars * (total_chunks - 1))
+        if last_chunk_len <= 0:
+            last_chunk_len = chunk_chars
+        chunk_lengths = [chunk_chars] * max(0, total_chunks - 1)
+        chunk_lengths.append(last_chunk_len)
+
+        parity_group_size = int(metadata["PG"])
+        manifest.update(
+            {
+                "compressed_sha256": (str(metadata["CH1"]) + str(metadata["CH2"])).lower(),
+                "raw_sha256": (str(metadata["RH1"]) + str(metadata["RH2"])).lower(),
+                "raw_size": int(metadata["RS"]),
+                "compressed_size": compressed_size,
+                "chunk_chars": chunk_chars,
+                "chunk_lengths": chunk_lengths,
+                "redundancy_copies": int(metadata["RC"]),
+                "interleave_enabled": bool(int(metadata["IL"])),
+                "parity": self._rebuild_parity_manifest(
+                    total_chunks=total_chunks,
+                    chunk_lengths=chunk_lengths,
+                    parity_group_size=parity_group_size,
+                ),
+                "_embedded_metadata_complete": True,
+            }
+        )
+        return manifest
+
+    def _verify_ocr_text_without_manifest(
+        self,
+        ocr_input_path: str,
+        strict_payload_chars: bool = False,
+    ) -> Dict[str, object]:
+        manifest = self._build_inferred_manifest_from_ocr(ocr_input_path)
+        metadata_source = str(manifest.get("_metadata_source", "unknown"))
+        if manifest.get("_embedded_metadata_complete"):
+            encoded = self._recover_encoded_payload(manifest, ocr_input_path, strict_payload_chars)
+            compressed = _decode_safe_base32(encoded)
+            compressed_sha = _sha256_hex(compressed)
+            ok = compressed_sha == manifest["compressed_sha256"]
+            if not ok:
+                return {
+                    "success": False,
+                    "artifact_id": manifest["artifact_id"],
+                    "expected_compressed_sha256": manifest["compressed_sha256"],
+                    "actual_compressed_sha256": compressed_sha,
+                    "expected_total_chunks": int(manifest["total_chunks"]),
+                    "metadata_source": metadata_source,
+                    "verification_mode": "embedded_metadata",
+                    "message": "verify failed via embedded page metadata",
+                }
+
+            raw = zlib.decompress(compressed)
+            raw_sha = _sha256_hex(raw)
+            if raw_sha != manifest["raw_sha256"]:
+                raise ValueError(
+                    "raw sha256 mismatch from embedded metadata: expected {}, got {}".format(
+                        manifest["raw_sha256"], raw_sha
+                    )
+                )
+            if len(raw) != int(manifest["raw_size"]):
+                raise ValueError(
+                    "raw size mismatch from embedded metadata: expected {}, got {}".format(
+                        manifest["raw_size"], len(raw)
+                    )
+                )
+
+            return {
+                "success": True,
+                "artifact_id": manifest["artifact_id"],
+                "expected_total_chunks": int(manifest["total_chunks"]),
+                "raw_size": len(raw),
+                "raw_sha256": raw_sha,
+                "expected_compressed_sha256": manifest["compressed_sha256"],
+                "actual_compressed_sha256": compressed_sha,
+                "metadata_source": metadata_source,
+                "verification_mode": "embedded_metadata",
+                "message": "verify ok via embedded page metadata",
+            }
+
+        total_chunks = int(manifest["total_chunks"])
+        parsed = self._parse_ocr_chunks_with_total(
+            total_chunks=total_chunks,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
+        parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
+        self._raise_parse_errors(parsed, total_chunks)
+
+        encoded = "".join(parsed["chunks"][i] for i in range(total_chunks))
+        compressed = _decode_safe_base32(encoded)
+        raw = zlib.decompress(compressed)
+
+        return {
+            "success": True,
+            "artifact_id": manifest["artifact_id"],
+            "expected_total_chunks": total_chunks,
+            "received_unique_chunks": len(parsed["chunks"]),
+            "raw_size": len(raw),
+            "raw_sha256": _sha256_hex(raw),
+            "metadata_source": metadata_source,
+            "verification_mode": "structural_only",
+            "message": "structural verify ok without manifest; sha comparison unavailable",
+            "warning": "manifest not provided and embedded metadata was incomplete; verification is structural only",
+        }
+
+    def _recover_artifact_without_manifest(
+        self,
+        ocr_input_path: str,
+        output_file: str,
+        strict_payload_chars: bool = False,
+    ) -> Dict[str, object]:
+        manifest = self._build_inferred_manifest_from_ocr(ocr_input_path)
+        metadata_source = str(manifest.get("_metadata_source", "unknown"))
+        if manifest.get("_embedded_metadata_complete"):
+            result = self._recover_artifact_against_manifest(
+                manifest=manifest,
+                ocr_input_path=ocr_input_path,
+                output_file=output_file,
+                strict_payload_chars=strict_payload_chars,
+            )
+            result["metadata_source"] = metadata_source
+            result["verification_mode"] = "embedded_metadata"
+            result["message"] = "recovered without manifest via embedded page metadata"
+            return result
+
+        total_chunks = int(manifest["total_chunks"])
+        parsed = self._parse_ocr_chunks_with_total(
+            total_chunks=total_chunks,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
+        parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
+        self._raise_parse_errors(parsed, total_chunks)
+
+        encoded = "".join(parsed["chunks"][i] for i in range(total_chunks))
+        compressed = _decode_safe_base32(encoded)
+        raw = zlib.decompress(compressed)
+
+        out_path = Path(output_file)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(raw)
+
+        return {
+            "success": True,
+            "artifact_id": manifest["artifact_id"],
+            "output_file": str(out_path),
+            "raw_size": len(raw),
+            "raw_sha256": _sha256_hex(raw),
+            "compressed_sha256": _sha256_hex(compressed),
+            "metadata_source": metadata_source,
+            "verification_mode": "structural_only",
+            "message": "recovered without manifest",
+            "warning": "manifest not provided and embedded metadata was incomplete; parity recovery and end-to-end sha verification were unavailable",
         }
 
     def _build_missing_chunk_records(
@@ -3233,8 +3792,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # Python 3.6 does not support add_subparsers(..., required=True)
     sub.required = True
 
-    p_export = sub.add_parser("export", help="export encrypted artifact to OCR package")
-    p_export.add_argument("-i", "--input-file", required=True, help="already-encrypted artifact path")
+    p_export = sub.add_parser("export", help="export artifact bytes to OCR package")
+    p_export.add_argument(
+        "-i",
+        "--input-file",
+        required=True,
+        help="input artifact path; encrypt first if confidentiality matters",
+    )
     p_export.add_argument("-o", "--output-dir", required=True, help="output package directory")
     p_export.add_argument("--artifact-id", default=None, help="optional artifact id")
     p_export.add_argument("--filename-prefix", default="page", help="output page prefix")
@@ -3260,18 +3824,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p_recover = sub.add_parser("recover", help="recover artifact from OCR text")
-    p_recover.add_argument("-m", "--manifest", required=True, help="manifest json path")
+    p_recover.add_argument(
+        "-m",
+        "--manifest",
+        default=None,
+        help="manifest json path; optional when OCR text contains embedded export metadata",
+    )
     p_recover.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
     p_recover.add_argument("-o", "--output-file", required=True, help="recovered artifact path")
     p_recover.add_argument("--strict-payload-chars", action="store_true")
 
     p_verify = sub.add_parser("verify", help="verify OCR text against manifest")
-    p_verify.add_argument("-m", "--manifest", required=True, help="manifest json path")
+    p_verify.add_argument(
+        "-m",
+        "--manifest",
+        default=None,
+        help="manifest json path; optional when OCR text contains embedded export metadata",
+    )
     p_verify.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
     p_verify.add_argument("--strict-payload-chars", action="store_true")
 
     p_analyze = sub.add_parser("analyze", help="analyze OCR text quality and missing chunks")
-    p_analyze.add_argument("-m", "--manifest", required=True, help="manifest json path")
+    p_analyze.add_argument(
+        "-m",
+        "--manifest",
+        default=None,
+        help="manifest json path; optional when OCR text contains embedded export metadata",
+    )
     p_analyze.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
     p_analyze.add_argument("--strict-payload-chars", action="store_true")
     p_analyze.add_argument("--max-list", type=int, default=200, help="max list size in output")
@@ -3298,7 +3877,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_recover_images = sub.add_parser(
         "recover-images", help="ocr images then analyze+recover artifact in one command"
     )
-    p_recover_images.add_argument("-m", "--manifest", required=True, help="manifest json path")
+    p_recover_images.add_argument(
+        "-m",
+        "--manifest",
+        default=None,
+        help="manifest json path; optional when page photos are from exports with embedded metadata",
+    )
     p_recover_images.add_argument("-i", "--image-input", required=True, help="image file/dir")
     p_recover_images.add_argument("-o", "--output-file", required=True, help="recovered artifact path")
     p_recover_images.add_argument(

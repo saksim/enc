@@ -27,6 +27,243 @@ class WorkspaceTempMixin(object):
 
 
 class TransportCoreTests(WorkspaceTempMixin, unittest.TestCase):
+    def test_verify_without_manifest_uses_embedded_metadata(self) -> None:
+        root = self.make_case_root("verify_nomani")
+        src = root / "payload_verify.bin"
+        src.write_bytes((b"verify-no-manifest\n" * 12) + bytes(range(16)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=6,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_verify"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=1,
+            parity_group_size=0,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        verify = transport.verify_ocr_text(
+            manifest_path=None,
+            ocr_input_path=str(manifest_path.parent / "pages_txt"),
+            strict_payload_chars=False,
+        )
+
+        self.assertTrue(verify["success"])
+        self.assertEqual(verify["artifact_id"], result["artifact_id"])
+        self.assertEqual(verify["verification_mode"], "embedded_metadata")
+        self.assertEqual(verify["message"], "verify ok via embedded page metadata")
+        self.assertNotIn("warning", verify)
+
+    def test_recover_without_manifest_uses_embedded_metadata(self) -> None:
+        root = self.make_case_root("recover_nomani")
+        src = root / "payload_recover.bin"
+        src.write_bytes((b"recover-no-manifest\n" * 12) + bytes(range(16)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=6,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_recover"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=1,
+            parity_group_size=0,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        restored = root / "restored_no_manifest.bin"
+        recover = transport.recover_artifact(
+            manifest_path=None,
+            ocr_input_path=str(manifest_path.parent / "pages_txt"),
+            output_file=str(restored),
+            strict_payload_chars=False,
+        )
+
+        self.assertTrue(recover["success"])
+        self.assertEqual(recover["artifact_id"], result["artifact_id"])
+        self.assertEqual(restored.read_bytes(), src.read_bytes())
+        self.assertEqual(recover["verification_mode"], "embedded_metadata")
+        self.assertNotIn("warning", recover)
+
+    def test_verify_without_manifest_falls_back_for_legacy_text_pages(self) -> None:
+        root = self.make_case_root("legacy_verify_nomani")
+        src = root / "payload_legacy_verify.bin"
+        src.write_bytes((b"legacy-verify-no-manifest\n" * 12) + bytes(range(16)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=6,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_legacy_verify"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=1,
+            parity_group_size=0,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        legacy_text = root / "legacy_ocr.txt"
+        lines = []
+        for path in sorted((manifest_path.parent / "pages_txt").glob("*.txt")):
+            for line in path.read_text(encoding="ascii").splitlines():
+                if line.startswith("@CFG|") or line.startswith("@RH") or line.startswith("@CH"):
+                    continue
+                lines.append(line)
+        legacy_text.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        verify = transport.verify_ocr_text(
+            manifest_path=None,
+            ocr_input_path=str(legacy_text),
+            strict_payload_chars=False,
+        )
+
+        self.assertTrue(verify["success"])
+        self.assertEqual(verify["verification_mode"], "structural_only")
+        self.assertIn("warning", verify)
+
+    def test_recover_without_manifest_can_use_embedded_parity(self) -> None:
+        root = self.make_case_root("recover_nomani_parity")
+        src = root / "payload_recover_parity.bin"
+        src.write_bytes((b"recover-parity-no-manifest\n" * 48) + bytes(range(32)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_recover_parity"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=1,
+            parity_group_size=4,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        damaged_text = root / "ocr_missing_one_line.txt"
+        written = False
+        with damaged_text.open("w", encoding="utf-8") as handle:
+            for path in sorted((manifest_path.parent / "pages_txt").glob("*.txt")):
+                for line in path.read_text(encoding="ascii").splitlines():
+                    if (not written) and line.startswith("P") and "|C00000|" in line:
+                        written = True
+                        continue
+                    handle.write(line + "\n")
+
+        restored = root / "restored_no_manifest_parity.bin"
+        recover = transport.recover_artifact(
+            manifest_path=None,
+            ocr_input_path=str(damaged_text),
+            output_file=str(restored),
+            strict_payload_chars=False,
+        )
+
+        self.assertTrue(recover["success"])
+        self.assertEqual(restored.read_bytes(), src.read_bytes())
+
+    def test_recover_images_without_manifest(self) -> None:
+        root = self.make_case_root("recover_images_nomani")
+        src = root / "payload_recover_images.bin"
+        src.write_bytes((b"recover-images-no-manifest\n" * 12) + bytes(range(16)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=6,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_recover_images"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=1,
+            parity_group_size=0,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        pages_txt_dir = manifest_path.parent / "pages_txt"
+        images_dir = root / "photos"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (images_dir / "photo_0001.png").write_bytes(b"fake")
+
+        def fake_extract(self_obj, image_input_path, output_text_path, backend="tesseract", lang="eng", psm=6, manifest_path=None):
+            merged = []
+            for path in sorted(pages_txt_dir.glob("*.txt")):
+                merged.append(path.read_text(encoding="ascii"))
+            Path(output_text_path).write_text("".join(merged), encoding="utf-8")
+            return {
+                "success": True,
+                "backend": backend,
+                "language": lang,
+                "ocr_languages": [lang],
+                "psm": psm,
+                "manifest_path": manifest_path,
+                "image_count": 1,
+                "image_files": [str(images_dir / "photo_0001.png")],
+                "output_text_path": str(output_text_path),
+                "structured_layout_used": False,
+                "structured_page_count": 0,
+                "sidecar_supported": False,
+                "tesseract_mode": "mock",
+                "tesseract_command": None,
+                "text_length": len("".join(merged)),
+            }
+
+        restored = root / "restored_from_images_no_manifest.bin"
+        with mock.patch.object(qrcode_helper.AirgapTransportLayer, "extract_text_from_images", autospec=True, side_effect=fake_extract):
+            recover = transport.recover_from_images(
+                manifest_path=None,
+                image_input_path=str(images_dir),
+                output_file=str(restored),
+                backend="tesseract",
+                ocr_text_output=str(root / "ocr_raw.txt"),
+                save_analyze_report=str(root / "analyze.json"),
+                emit_missing_file=str(root / "missing.csv"),
+                max_list=20,
+            )
+
+        self.assertTrue(recover["success"])
+        self.assertEqual(restored.read_bytes(), src.read_bytes())
+        self.assertEqual(recover["backend_selected"], "tesseract")
+
+    def test_export_reports_when_pillow_is_unavailable(self) -> None:
+        root = self.make_case_root("no_pillow")
+        src = root / "payload_no_pillow.bin"
+        src.write_bytes((b"no-pillow\n" * 12) + bytes(range(16)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=6,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_no_pillow"
+        with mock.patch.object(qrcode_helper, "PIL_AVAILABLE", False):
+            result = transport.export_artifact(
+                input_file=str(src),
+                output_dir=str(pkg),
+                filename_prefix="case",
+                redundancy_copies=1,
+                parity_group_size=0,
+            )
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["pillow_enabled"])
+        self.assertEqual(result["image_count"], 0)
+        self.assertGreater(result["page_text_count"], 0)
+        self.assertIn("warning", result)
+
     def test_text_roundtrip_without_image_dependencies(self) -> None:
         root = self.make_case_root("core")
         src = root / "payload_core.bin"
