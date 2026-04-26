@@ -1,0 +1,13 @@
+__pycache__/
+.tmp_airgap*/
+.tmp_compile*/
+.tmp_run*/
+.tmp_test_*/
+.tmp_verify*/
+.tmp_debug_*.png
+.pytest_cache/
+pytest-cache-files-*/
+ocr_cli_*/
+ocr_full_smoke_*/
+ocr_live_smoke_*/
+ocr_tess_*/
