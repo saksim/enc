@@ -117,6 +117,122 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(protected_by_file["pkg/mod2.py"], ["function:use_it"])
         self.assertTrue((output_dir / "pkg" / "mod2.py").exists())
 
+    def test_namespace_root_separates_output_path_from_package_namespace(self):
+        root = self.make_case_root("namespace_root")
+        project_root = root / "A_py"
+        pkg_root = project_root / "pkg"
+        pkg_root.mkdir(parents=True, exist_ok=True)
+        (project_root / "__init__.py").write_text("", encoding="utf-8")
+        (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+        (pkg_root / "mod.py").write_text(
+            "\n".join(
+                [
+                    "def hello():",
+                    "    return 'ok'",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        output_dir = root / "other_enc_middle"
+        exit_code = encryption_helper.main(
+            [
+                "-t",
+                str(project_root),
+                "-o",
+                str(output_dir),
+                "--namespace-root",
+                "A",
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+
+        protected_module = output_dir / "A" / "pkg" / "mod.py"
+        self.assertTrue(protected_module.exists())
+
+        protected_source = protected_module.read_text(encoding="utf-8")
+        self.assertIn('if __package__ else "enc_rt_pkg_', protected_source)
+
+        manifest_path = output_dir / "build_manifest.json"
+        self.assertTrue(manifest_path.exists())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest.get("namespace_package"), "A")
+        rels = {item["relative_path"] for item in manifest["processed_files"]}
+        self.assertIn("A/pkg/mod.py", rels)
+
+    def test_infer_namespace_maps_a_py_to_a(self):
+        root = self.make_case_root("infer_namespace")
+        project_root = root / "A_py"
+        pkg_root = project_root / "pkg"
+        pkg_root.mkdir(parents=True, exist_ok=True)
+        (project_root / "__init__.py").write_text("", encoding="utf-8")
+        (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+        (pkg_root / "mod.py").write_text(
+            "\n".join(
+                [
+                    "def hello():",
+                    "    return 'ok'",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        output_dir = root / "other_enc_middle"
+        exit_code = encryption_helper.main(
+            [
+                "-t",
+                str(project_root),
+                "-o",
+                str(output_dir),
+                "--infer-namespace",
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((output_dir / "A" / "pkg" / "mod.py").exists())
+
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest.get("namespace_package"), "A")
+
+    def test_directory_target_a_keeps_namespace_a_by_default(self):
+        root = self.make_case_root("direct_a")
+        project_root = root / "A"
+        pkg_root = project_root / "b" / "c" / "d"
+        pkg_root.mkdir(parents=True, exist_ok=True)
+        for rel in (
+            "__init__.py",
+            "b/__init__.py",
+            "b/c/__init__.py",
+            "b/c/d/__init__.py",
+        ):
+            (project_root / rel).write_text("", encoding="utf-8")
+        (pkg_root / "e.py").write_text(
+            "\n".join(
+                [
+                    "def ping():",
+                    "    return 'ok'",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        output_dir = root / "other_enc_middle"
+        exit_code = encryption_helper.main(
+            [
+                "-t",
+                str(project_root),
+                "-o",
+                str(output_dir),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((output_dir / "A" / "b" / "c" / "d" / "e.py").exists())
+
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest.get("namespace_package"), "A")
+
 
 if __name__ == "__main__":
     unittest.main()

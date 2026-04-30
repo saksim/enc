@@ -142,11 +142,46 @@ Pillow
 当前 CLI 子命令有：
 
 1. `export`
-2. `ocr-extract`
-3. `analyze`
-4. `verify`
-5. `recover`
-6. `recover-images`
+2. `estimate`
+3. `ocr-extract`
+4. `analyze`
+5. `verify`
+6. `recover`
+7. `recover-images`
+
+## 5.2 `estimate` 预估命令
+
+如果你不想反复盲试参数，先跑 `estimate`。
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py estimate `
+  -i .\final_try.rar `
+  --chunk-chars 40 `
+  --lines-per-page 80 `
+  --max-compressed-kib 512
+```
+
+它不会生成任何文件，只会告诉你：
+
+1. 原始大小
+2. 压缩后大小
+3. 当前上限是否足够
+4. 至少需要多大的 `--max-compressed-kib`
+5. 数据块数量
+6. parity 块数量
+7. 总传输行数
+8. 预计总页数
+9. 风险提示
+
+例如对你当前的 `final_try.rar`，实测结果是：
+
+1. `compressed_size = 48708`
+2. `fits_current_limit = true`
+3. `minimum_recommended_max_compressed_kib = 48`
+4. `estimated_total_pages = 25`
+5. 当前风险提示是：
+   - `--lines-per-page 80` 太密
+   - 你没开 redundancy，也没开 parity，单页 OCR 损坏就可能卡死恢复
 
 ## 5.1 完全不能带 manifest 的场景
 
@@ -282,7 +317,7 @@ Pillow
 4. `--backend`
    - 可选
    - 默认：`tesseract`
-   - 可选值：`tesseract`、`easyocr`、`sidecar`
+   - 可选值：`tesseract`、`easyocr`、`sidecar`、`auto`
 5. `--lang`
    - 可选
    - 默认：`eng`
@@ -295,8 +330,10 @@ Pillow
 实际建议：
 
 1. 自己导出的页面，优先 `sidecar`。
-2. `--manifest` 一旦提供，`sidecar` 和结构化 OCR 的恢复率会明显更高。
-3. 老包没有 sidecar 时，再考虑 `tesseract` 或 `easyocr`。
+2. 现在即使没有 `manifest`，新版导出页也会先尝试读取页内嵌元信息，再走结构化提取。
+3. `--backend auto` 会优先试无 manifest 结构化提取，再退回普通 OCR。
+4. `--manifest` 一旦提供，`sidecar` 和结构化 OCR 的恢复率仍然最高。
+5. 老包没有 sidecar 或没有嵌入元信息时，再退回普通 `tesseract` / `easyocr`。
 
 ## 8. `analyze` 全参数说明
 
@@ -748,3 +785,271 @@ compressed artifact 367062 bytes exceeds limit 65536 bytes
 2. 再决定你是要“少页”还是“稳”
 3. 真要拍照传输，优先选稳，不要贪少页
 4. 如果页数已经多到难以操作，别硬撑，直接拆分文件
+
+## 16. OCR 低识别率强化（2026-04 更新）
+
+这一版新增了三项直接针对“拍照 OCR 误识率高”的能力：
+
+1. 动态大字体渲染。
+`export` 生成 PNG 时会在当前页可容纳的前提下自动放大内容字体；当你降低 `--lines-per-page` 时，内容区字体会更大。
+
+2. 页内控制信息压缩。
+每页嵌入元信息从 5 行压缩为 3 行：`@CFG` + `@HS1` + `@HS2`。旧格式 `@RH1/@RH2/@CH1/@CH2` 仍然兼容。
+
+3. 统一 OCR Provider 接口。
+`ocr-extract` 与 `recover-images` 支持 `--backend external` + `--ocr-provider-cmd`，可以接入外部 OCR/大模型。
+
+### 16.1 先保识别率的导出模板
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py export `
+  -i .\payload.bin `
+  -o .\airgap_pkg `
+  --chunk-chars 24 `
+  --lines-per-page 8 `
+  --redundancy-copies 2 `
+  --parity-group-size 4 `
+  --max-compressed-kib 512
+```
+
+建议：
+
+1. `--lines-per-page` 降低后，字体会自动变大。
+2. `--chunk-chars` 控制在 24~32，避免单行太长。
+3. 同时开启 redundancy 与 parity 提高容错。
+
+### 16.2 external OCR 统一接口
+
+`ocr-extract` 额外参数：
+
+1. `--backend external`
+2. `--ocr-provider-cmd "<命令模板>"`
+3. `--ocr-provider-timeout-sec <秒>`
+
+可用占位符：
+
+1. `{image_path}`
+2. `{image_name}`
+3. `{page_no}`
+4. `{lang}`
+5. `{psm}`
+6. `{manifest_path}`
+
+示例：
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py ocr-extract `
+  -i .\airgap_pkg\pages `
+  -o .\airgap_pkg\ocr_raw.txt `
+  --backend external `
+  --ocr-provider-cmd "my_ocr_runner --image \"{image_path}\" --page {page_no}" `
+  --ocr-provider-timeout-sec 180
+```
+
+外部命令输出约定（任一即可）：
+
+1. `stdout` 直接输出 OCR 文本。
+2. `stdout` 输出 JSON：`{"text":"..."}` 或 `{"lines":["...","..."]}`。
+3. `stdout` 输出 JSON：`{"output_text_path":"..."}`，工具会读取该文件。
+
+### 16.3 recover-images 一步接入 external OCR
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py recover-images `
+  -i .\airgap_pkg\pages `
+  -o .\restored.bin `
+  --backend external `
+  --ocr-provider-cmd "my_ocr_runner --image \"{image_path}\" --page {page_no}" `
+  --ocr-provider-timeout-sec 180 `
+  --ocr-text-output .\airgap_pkg\ocr_raw.txt `
+  --save-analyze-report .\airgap_pkg\analyze_report.json `
+  --emit-missing-file .\airgap_pkg\missing_chunks.csv
+```
+
+如果你希望“外部失败后自动回退”，使用：
+
+```text
+--backend auto --ocr-provider-cmd "<命令模板>"
+```
+
+## 17. 用户可控开关（字体 / 元信息 / 分隔符）
+
+这组参数用于直接控制你关心的三件事：
+
+1. 字体大小
+2. 每页无关信息占比
+3. 字段分隔符
+
+### 17.1 字体控制参数
+
+`export` 新增：
+
+1. `--font-size`：基础字体大小（默认 44）
+2. `--font-max-size`：仅在 `--font-fit-mode fit` 下生效（默认 132）
+3. `--font-fit-mode`：字号策略（`target|fit|fixed`，默认 `target`）
+4. `--fixed-font-size`：`--font-fit-mode fixed` 的兼容别名
+
+推荐：
+
+1. 想“严格可控”：用 `--font-fit-mode target`（默认）或 `--font-fit-mode fixed`。
+2. 想“尽量铺满页面”：用 `--font-fit-mode fit` + `--font-max-size`。
+
+示例：
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py export `
+  -i .\final_try.rar `
+  -o .\airgap_demo `
+  --font-size 56 `
+  --font-max-size 80 `
+  --font-fit-mode target
+```
+
+说明：
+
+1. `target`：尽量使用 `--font-size`；只有放不下才缩小。
+2. `fit`：会自动放大到不超过 `--font-max-size` 的最大可容纳字号。
+3. `fixed`：严格使用 `--font-size`，即使可能超出页面。
+
+### 17.2 页内元信息开关
+
+`export` 新增：`--metadata-level`
+
+1. `compact`（默认）：保留控制信息（`@META/@CFG/@HS/@PAGECRC`）
+2. `none`：只导出数据行（去掉页头/页尾/控制行）
+
+你要的“页头页尾都不要”就是：
+
+```text
+--metadata-level none
+```
+
+风险提示：
+
+1. `none` 模式下，诊断能力会下降（无 page CRC / 无页级元信息）。
+2. 无 manifest 时会退化为结构恢复，建议同时提高 redundancy/parity 或保持 manifest 可用。
+
+### 17.3 行分隔符开关
+
+`export` 新增：`--line-separator`
+
+可选值：
+
+1. `|`
+2. `$`
+3. `@`
+
+示例（按你建议改成 `$`）：
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py export `
+  -i .\final_try.rar `
+  -o .\airgap_demo `
+  --metadata-level none `
+  --line-separator '$'
+```
+
+对应数据行形式：
+
+```text
+P001L001$C00000$RDPAAJLA549XE2MUEEPAQAJA9C36NA$2F5E
+```
+
+### 17.4 低误识率实战模板（你这个场景）
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py export `
+  -i .\final_try.rar `
+  -o .\airgap_demo `
+  --chunk-chars 24 `
+  --lines-per-page 8 `
+  --redundancy-copies 2 `
+  --parity-group-size 4 `
+  --metadata-level none `
+  --line-separator '$' `
+  --font-size 56 `
+  --font-max-size 88 `
+  --font-fit-mode target `
+  --max-compressed-kib 512
+```
+
+### 17.5 去掉每行 CRC 和右侧点阵（你这次诉求）
+
+两个开关：
+
+1. `--line-crc-mode off`：每行不再追加末尾 CRC 字段。
+2. `--no-sidecar`：PNG 右侧不再绘制 sidecar 点阵块。
+
+示例：
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\qrcode_helper.py export `
+  -i .\final_try.rar `
+  -o .\airgap_demo `
+  --metadata-level none `
+  --line-separator '$' `
+  --line-crc-mode off `
+  --no-sidecar `
+  --font-size 56 `
+  --font-fit-mode fixed
+```
+
+输出行会变成：
+
+```text
+P001L001$C00000$RDPAAJLA549XE2MUEEPAQAJA9C36NA
+```
+
+### 17.6 页号/行号 OCR 混淆自动归一（新）
+
+在 `ocr-extract / verify / recover / analyze` 解析数据行时，`Pxxx/Lxxx` 会做更激进归一：
+
+1. `0` 类：`0/O/Q/D/@/G/C` 统一按 `0` 处理。
+2. `1` 类：`1/I/L` 统一按 `1` 处理。
+3. `4` 类：`4/H/M` 统一按 `4` 处理。
+
+说明：
+
+1. 这组归一只针对 `page/line` 前缀，不会改变 `chunk_idx` 的主归一策略（避免把真实 `6` 大量误判成 `0`）。
+2. 该能力用于降低 `P001` 被识别成 `POO1/PGG1`、`L004` 被识别成 `L00H` 时的解析失败概率。
+
+### 17.7 行前缀精简开关（可去掉 `P/L/C`）
+
+`export` 新增：`--line-index-mode`
+
+1. `full`（默认）：保留 `PxxxLxxx + Cxxxxx + payload`。
+2. `chunk`：保留 `Cxxxxx + payload`（去掉 `P/L`）。
+3. `off`：仅保留 `payload`（同时去掉 `P/L/C`）。
+
+示例（`chunk` 模式）：
+
+```text
+C00000$RDPAAJLA549XE2MUEEPAQAJA9C36NA
+```
+
+示例（`off` 模式）：
+
+```text
+RDPAAJLA549XE2MUEEPAQAJA9C36NA
+```
+
+注意：
+
+1. `--line-index-mode off` 必须配合 `--no-sidecar`。
+2. `off` 模式下，`verify/recover` 无法在“没有 manifest”的情况下推断总块数；必须提供 `manifest.json`。
+3. `chunk` 模式下，解析器会对前缀做额外归一：`C` 被 OCR 误读为 `G/Q/O/D/@` 时会自动回归为 `C` 再解析。
+
+### 17.8 “全部归一化”的边界说明（重要）
+
+你提到“把所有相似字符都归一到同一类”。这对**索引字段**可行，但对**payload 字段**不能盲目硬归一，否则会丢失真实信息。
+
+当前策略是：
+
+1. 索引字段（`P/L/C + 数字`）做强归一，优先保障可解析性。
+2. payload 使用安全字母表（已避开 `I/O/0/1`）并做保守归一（如 `O/0 -> Q`、`I/1 -> L`）。
+3. 通过每行 CRC 进行冲突裁决与纠错（包含常见混淆对：`2/Z`、`4/H`、`5/S`、`6/G`、`7/T`、`8/B`）。
+
+建议：
+
+1. 要降误判，又不丢恢复能力，优先用 `--line-index-mode chunk`。
+2. 若必须极简内容（`off`），请务必保留并同步 `manifest.json`。

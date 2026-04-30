@@ -149,6 +149,60 @@ Do not mix directory mode with `--function` or `--class`. Use `--scope-config`.
   --python-exe 'D:\code_environment\anaconda_all_css\py36\python.exe'
 ```
 
+### 5.4 Keep original package namespace while using any output folder
+
+Use this when your source folder name and runtime namespace must be different.
+
+Scenario:
+
+1. source directory name is `A_py`
+2. runtime/import namespace must stay `A`
+3. staging physical folder can be any name, e.g. `other_enc_middle`
+
+Command:
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\encryption_helper.py `
+  -t .\A_py `
+  -o .\other_enc_middle `
+  --namespace-root A `
+  --scope-config .\A_py\scope.json `
+  --compile `
+  --dist-dir .\release_A `
+  --python-exe 'D:\code_environment\anaconda_all_css\py36\python.exe'
+```
+
+Effect:
+
+1. files are written under `other_enc_middle\A\...`
+2. compiled outputs are generated under `release_A\A\...`
+3. import namespace remains `A.xxx`, independent from `other_enc_middle`
+
+### 5.5 One-switch namespace inference (A_py -> A)
+
+If your folder naming convention is like `A_py`, you can avoid manually passing `--namespace-root A`.
+
+Command:
+
+```powershell
+& 'D:\code_environment\anaconda_all_css\py36\python.exe' .\encryption_helper.py `
+  -t .\A_py `
+  -o .\other_enc_middle `
+  --infer-namespace `
+  --scope-config .\A_py\scope.json `
+  --compile `
+  --dist-dir .\release_A `
+  --python-exe 'D:\code_environment\anaconda_all_css\py36\python.exe'
+```
+
+Current inference strips common suffixes:
+
+1. `_py`, `-py`, `.py`
+2. `_src`, `-src`
+3. `_source`, `-source`
+
+If inference is not what you want, pass explicit `--namespace-root`.
+
 ## 6. How `scope.json` Works
 
 Example:
@@ -224,6 +278,19 @@ my_project_enc/
     enc_rt_xxxxxxxx.py
 ```
 
+With `--namespace-root A`, layout becomes:
+
+```text
+other_enc_middle/
+  build_manifest.json
+  A/
+    __init__.py
+    pkg/
+      mod1.py
+      mod2.py
+      enc_rt_xxxxxxxx.py
+```
+
 ### Release output
 
 Typical `--dist-dir`:
@@ -245,6 +312,8 @@ my_project_release/
 3. `--dist-dir` requires `--compile`
 4. `--precheck-only` cannot be combined with `--compile` or `--dist-dir`
 5. directory mode must use `--scope-config`, not `--function` or `--class`
+6. `--namespace-root` only supports directory targets
+7. `--infer-namespace` only supports directory targets
 
 ## 10. Common Errors
 
