@@ -92,10 +92,68 @@ def safe_identifier(value: str, fallback: str = "protected_mod") -> str:
     return value
 
 
+def parse_namespace_package(value):
+    if value is None:
+        return tuple()
+    text = str(value).strip()
+    if not text:
+        return tuple()
+    text = text.replace("\\", "/").replace(".", "/")
+    parts = [part.strip() for part in text.split("/") if part.strip()]
+    if not parts:
+        return tuple()
+    normalized = []
+    for part in parts:
+        if not part.isidentifier():
+            raise ValueError("invalid namespace segment: {0}".format(part))
+        normalized.append(part)
+    return tuple(normalized)
+
+
+def default_namespace_package_parts(target):
+    if target.is_file():
+        return tuple()
+    init_file = target / "__init__.py"
+    if init_file.exists():
+        if not target.name.isidentifier():
+            raise ValueError("target package directory name is not a valid identifier: {0}".format(target.name))
+        return (target.name,)
+    return tuple()
+
+
+def infer_namespace_package_parts(target):
+    """
+    Best-effort namespace inference for directory targets.
+    Examples:
+      A_py -> A
+      A-src -> A
+      A.enc -> A
+    """
+    base = default_namespace_package_parts(target)
+    if not base:
+        return tuple()
+    name = base[0]
+    candidates = []
+
+    # Strip common suffixes from right side.
+    lowered = name.lower()
+    for suffix in ("_py", "-py", ".py", "_src", "-src", "_source", "-source"):
+        if lowered.endswith(suffix):
+            candidates.append(name[: -len(suffix)])
+    candidates.append(name)
+
+    for item in candidates:
+        cleaned = re.sub(r"[^0-9A-Za-z_]", "_", item).strip("_")
+        if cleaned and cleaned.isidentifier():
+            return (cleaned,)
+    return base
+
+
 def load_scope_config(path):
     if path is None:
         return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # Accept UTF-8 with or without BOM so scope.json works from PowerShell/Notepad defaults.
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError("scope config must be a JSON object")
     normalized = {}  # type: Dict[str, Dict[str, object]]
@@ -124,7 +182,8 @@ def project_python_files(target, excluded_paths):
 
 
 def read_source(path: Path) -> str:
-    source = path.read_text(encoding="utf-8")
+    # Accept UTF-8 source files saved with BOM by Windows editors.
+    source = path.read_text(encoding="utf-8-sig")
     ast.parse(source, filename=str(path))
     return source
 
@@ -148,7 +207,7 @@ def precheck_python_files(files, root):
     issues = []  # type: List[SyntaxIssue]
     for path in files:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = path.read_text(encoding="utf-8-sig")
             compile(source, str(path), "exec")
             valid_files.append(path)
         except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
@@ -464,6 +523,12 @@ def runtime_module_map(files, root):
     return mapping
 
 
+def namespaced_relative_path(relative, namespace_package_parts):
+    if not namespace_package_parts:
+        return relative
+    return Path(*namespace_package_parts) / relative
+
+
 def protect_project(
     target,
     output_dir,
@@ -473,6 +538,7 @@ def protect_project(
     valid_files,
     syntax_issues,
     skip_bad_files,
+    namespace_package_parts,
 ):
     output_dir = reset_directory(output_dir)
 
@@ -483,6 +549,7 @@ def protect_project(
     for source_path in valid_files:
         relative = source_path.relative_to(root)
         relative_text = str(relative).replace("\\", "/")
+        relative_for_output = namespaced_relative_path(relative, namespace_package_parts)
         source = read_source(source_path)
         symbols = top_level_symbols(source)
         entry = file_scope_entry(relative_text, scope_config, cli_functions, cli_classes, target.is_file())
@@ -490,7 +557,7 @@ def protect_project(
 
         runtime_name = runtimes[source_path.parent]
         protected_source = protect_source(source, runtime_name, chosen)
-        destination = output_dir / relative
+        destination = output_dir / relative_for_output
         ensure_parent(destination)
         try:
             validate_generated_source(protected_source, str(destination))
@@ -512,7 +579,7 @@ def protect_project(
 
         results.append(
             FileProcessResult(
-                relative_path=relative_text,
+                relative_path=str(relative_for_output).replace("\\", "/"),
                 protected_symbols=tuple(f"{item.kind}:{item.name}" for item in chosen),
                 runtime_module=runtime_name if chosen else None,
             )
@@ -521,7 +588,8 @@ def protect_project(
     # Write runtime files into mirrored output tree after encrypted modules exist.
     output_runtimes = []  # type: List[str]
     for directory, module_name in runtimes.items():
-        runtime_destination = output_dir / directory.relative_to(root) / f"{module_name}.py"
+        runtime_relative = namespaced_relative_path(directory.relative_to(root), namespace_package_parts)
+        runtime_destination = output_dir / runtime_relative / f"{module_name}.py"
         ensure_parent(runtime_destination)
         runtime_destination.write_text(runtime_py_source(), encoding="utf-8")
         output_runtimes.append(str(runtime_destination.relative_to(output_dir)).replace("\\", "/"))
@@ -529,6 +597,7 @@ def protect_project(
     manifest = {
         "target": str(target),
         "mode": "file" if target.is_file() else "directory",
+        "namespace_package": ".".join(namespace_package_parts) if namespace_package_parts else "",
         "processed_files": [
             {
                 "relative_path": result.relative_path,
@@ -663,6 +732,15 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Generate encrypted .py staging files and batch-compile them with Cython.")
     parser.add_argument("--target", "-t", required=True, help="Target Python file or directory.")
     parser.add_argument("--output-dir", "-o", default="protected_build", help="Encrypted staging output directory.")
+    parser.add_argument(
+        "--namespace-root",
+        help="Logical package root name for output namespace (e.g. A). If omitted, directory target defaults to its own package name when __init__.py exists.",
+    )
+    parser.add_argument(
+        "--infer-namespace",
+        action="store_true",
+        help="Infer namespace from target directory name (e.g. A_py -> A) when --namespace-root is not provided.",
+    )
     parser.add_argument("--python-exe", default=DEFAULT_WINDOWS_PYTHON, help="Python interpreter used for optional batch compile.")
     parser.add_argument("--precheck-only", action="store_true", help="Only scan Python syntax issues and print a report.")
     parser.add_argument("--skip-bad-files", action="store_true", help="Skip syntax-invalid .py files instead of aborting the whole run.")
@@ -706,6 +784,16 @@ def main(argv=None):
         raise ValueError("--precheck-only cannot be combined with --dist-dir")
     if args.compile and not python_exe.exists():
         raise FileNotFoundError(f"python executable not found: {python_exe}")
+    if target.is_file() and args.namespace_root:
+        raise ValueError("--namespace-root only supports directory target")
+    if target.is_file() and args.infer_namespace:
+        raise ValueError("--infer-namespace only supports directory target")
+    if args.namespace_root is not None:
+        namespace_package_parts = parse_namespace_package(args.namespace_root)
+    elif args.infer_namespace:
+        namespace_package_parts = infer_namespace_package_parts(target)
+    else:
+        namespace_package_parts = default_namespace_package_parts(target)
 
     script_dir = Path(__file__).resolve().parent
     excluded_paths = {
@@ -735,6 +823,7 @@ def main(argv=None):
         valid_files=valid_files,
         syntax_issues=syntax_issues,
         skip_bad_files=args.skip_bad_files,
+        namespace_package_parts=namespace_package_parts,
     )
 
     build_dir = None  # type: Optional[Path]
@@ -756,7 +845,9 @@ def main(argv=None):
         native_files=native_files,
     )
 
+    namespace_text = ".".join(namespace_package_parts)
     print(f"output_dir={result.output_dir}")
+    print("namespace_package={0}".format(namespace_text if namespace_text else "<root>"))
     print(f"processed_files={len(result.processed_files)}")
     print("skipped_files={0}".format(len(syntax_issues)))
     for item in result.processed_files:
