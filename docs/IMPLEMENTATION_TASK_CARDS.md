@@ -23,7 +23,7 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ### CARD `ENC-P0-001`
 
-- Status: `todo`
+- Status: `done`
 - Goal: lazily load OCR dependencies and stop import-time coupling between core transport logic and heavy OCR backends
 - Type: refactor + stability
 - Depends on: none
@@ -37,10 +37,14 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Acceptance:
   - importing the transport core does not import `easyocr`
   - focused tests cover backend selection and lazy loading
+ - Notes (2026-05-06):
+   - `qrcode_helper.py` now uses lazy module loaders for `pytesseract`, `easyocr`, and `numpy`.
+   - Core import no longer imports `easyocr` at module load time.
+   - Added focused tests for import-time isolation and easyocr lazy-reader initialization.
 
 ### CARD `ENC-P0-002`
 
-- Status: `todo`
+- Status: `in_progress`
 - Goal: split `qrcode_helper.py` into bounded modules so protocol, render, OCR, recovery, and CLI are independently maintainable
 - Type: architectural refactor
 - Depends on: `ENC-P0-001`
@@ -56,10 +60,20 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Acceptance:
   - legacy CLI behavior still works or compatibility shim exists
   - each module has focused tests
+- Notes (2026-05-07):
+  - Delivered a compatibility-safe vertical slice that extracts shared transport boundaries into `enc2sop.transport` while preserving legacy `qrcode_helper.py` CLI/runtime behavior.
+  - Added `enc2sop/transport/protocol.py` for protocol constants, regex patterns, OCR normalization, and base32/CRC/hash helpers.
+  - Added `enc2sop/transport/ocr_adapters.py` for lazy OCR backend discovery/loading (`pytesseract`, `easyocr`, `numpy`) and language mapping.
+  - Rewired `qrcode_helper.py` to consume extracted modules via explicit aliases while keeping existing symbol names stable for backward compatibility.
+  - Added focused regression coverage in `tests/test_transport_modules.py` to verify module extraction contracts and compatibility alias wiring.
+  - Remaining sub-scope to complete card:
+    - extract render pipeline from `qrcode_helper.py` into `enc2sop.transport.render`
+    - extract recover/analyze path into `enc2sop.transport.recover`
+    - introduce a thin transport CLI entrypoint module and reduce `qrcode_helper.py` to compatibility shim
 
 ### CARD `ENC-P0-003`
 
-- Status: `todo`
+- Status: `done`
 - Goal: fix the decrypt runtime compilation chain so the runtime used by protected modules is actually compiled or intentionally packaged
 - Type: correctness + security
 - Depends on: none
@@ -74,10 +88,15 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Acceptance:
   - compiled output contains or correctly packages the required runtime path
   - regression test proves the intended behavior
+- Notes (2026-05-07):
+  - Runtime module names now use `enc_rt_*` (non-dunder), avoiding batch-compiler skip rules for `__*`.
+  - `build_manifest.json` now records `runtime_delivery` metadata with explicit delivery mode and validation contract.
+  - Build flow now validates that each staged runtime `.py` has a compiled native artifact in `build/`, and fails fast if missing.
+  - Added focused tests for compile-eligible runtime naming and runtime-delivery validation failure/success paths.
 
 ### CARD `ENC-P0-004`
 
-- Status: `todo`
+- Status: `done`
 - Goal: add true end-to-end tests for `protect -> compile -> import compiled artifact -> execute protected code`
 - Type: testing
 - Depends on: `ENC-P0-003`
@@ -90,10 +109,18 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Acceptance:
   - test fails on broken runtime chain
   - test passes on corrected implementation
+- Notes (2026-05-07):
+  - Added end-to-end compile/import execution harness in `tests/test_encryption_helper.py`:
+    - `test_e2e_compiled_flow_imports_and_executes_protected_symbols`
+    - `test_e2e_compiled_flow_detects_broken_runtime_chain`
+  - Tests are dependency-gated when `Cython` is unavailable in the active interpreter.
+  - Verified pass in a toolchain-provisioned interpreter:
+    - `D:\code_environment\anaconda_all_css\py311\python.exe -m pytest -q -vv tests/test_encryption_helper.py -k e2e_compiled_flow` => 2 passed.
+  - Default environment remains stable and transparently skips compile-path tests when `Cython` is absent.
 
 ### CARD `ENC-P0-005`
 
-- Status: `todo`
+- Status: `done`
 - Goal: replace machine-specific build paths with profile-driven toolchain discovery
 - Type: productization
 - Depends on: none
@@ -108,10 +135,23 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Acceptance:
   - Windows path assumptions are configurable
   - missing toolchain errors are explicit and actionable
+- Notes (2026-05-07):
+  - Added `toolchain_profile.py` with profile abstraction (`auto`, `windows-msvc`, `native`) and discovery helpers.
+  - `encryption_helper.py` now defaults compile interpreter to current `sys.executable` (or `SOENC_PYTHON_EXE`) instead of machine-locked paths.
+  - Added explicit CLI controls:
+    - `--build-profile`
+    - `--vcvars-path`
+  - Windows MSVC environment preparation now discovers `vcvars64.bat` via:
+    - `SOENC_VCVARS64`
+    - `VSINSTALLDIR`
+    - `vswhere.exe`
+    - standard Visual Studio installation paths
+  - `py2_linux_rec_opera.py` now consumes the same build profile inputs and no longer embeds hard-coded INCLUDE/LIB/CL path constants.
+  - Added focused tests in `tests/test_toolchain_profile.py` and extended `tests/test_encryption_helper.py` guard coverage for profile/CLI validation.
 
 ### CARD `ENC-P0-006`
 
-- Status: `todo`
+- Status: `done`
 - Goal: introduce a unified project configuration file for the platform
 - Type: platform skeleton
 - Depends on: `ENC-P0-005`
@@ -124,10 +164,18 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - CLI can load config file and merge command-line overrides
 - Acceptance:
   - one project config can drive the protect/build mainline
+- Notes (2026-05-07):
+  - Added `soenc_config.py` with schema-validated TOML loading for `[project]`, `[build]`, `[keys]`, `[package]`.
+  - `encryption_helper.py` now supports `--config/ -c`, auto-discovers `./soenc.toml`, and merges config defaults with CLI overrides.
+  - Added tri-state CLI toggles (`--compile/--no-compile`, `--skip-bad-files/--no-skip-bad-files`, `--precheck-only/--no-precheck-only`, `--infer-namespace/--no-infer-namespace`) to make override precedence explicit.
+  - Build manifest now records config provenance (`config.source`) plus `key_mode` and package metadata when config is used.
+  - Added focused tests:
+    - `tests/test_soenc_config.py`
+    - new config merge/override coverage in `tests/test_encryption_helper.py`
 
 ### CARD `ENC-P0-007`
 
-- Status: `todo`
+- Status: `done`
 - Goal: add signed artifact manifests to detect tampering
 - Type: security
 - Depends on: `ENC-P0-006`
@@ -141,10 +189,26 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - failure path on signature mismatch
 - Acceptance:
   - modified manifest is rejected
+- Notes (2026-05-07):
+  - Added signed `build_manifest.json` support in `encryption_helper.py` using HMAC-SHA256.
+  - Added explicit signing/verification controls:
+    - `--manifest-sign-key-file`
+    - `--manifest-sign-key-b64`
+    - `--manifest-key-id`
+    - `--require-manifest-signature` / `--no-require-manifest-signature`
+  - Added manifest canonicalization + signature verification path that rejects tampered manifests.
+  - Runtime delivery validation now verifies manifest signatures (when key is provided or required) and re-signs manifest after validation updates.
+  - Extended `soenc.toml` `[keys]` schema for:
+    - `manifest_sign_key_file`
+    - `manifest_key_id`
+    - `require_manifest_signature`
+  - Added focused tests in:
+    - `tests/test_encryption_helper.py`
+    - `tests/test_soenc_config.py`
 
 ### CARD `ENC-P0-008`
 
-- Status: `todo`
+- Status: `done`
 - Goal: introduce the `KeyProvider` abstraction and a first local provider implementation
 - Type: security architecture
 - Depends on: `ENC-P0-006`
@@ -158,6 +222,24 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - wiring that decouples key acquisition from protection logic
 - Acceptance:
   - protection flow runs through provider abstraction instead of ad hoc embedded key reconstruction only
+- Notes (2026-05-07):
+  - Added new key architecture package:
+    - `enc2sop/keys/provider.py`: `KeyProvider` contract + provider registry
+    - `enc2sop/keys/local.py`: `LocalEmbeddedKeyProvider` for local wrapped key references
+    - `enc2sop/keys/__init__.py`: stable import surface
+  - Updated `encryption_helper.py` to route key wrapping through the provider abstraction:
+    - `encrypt_snippet` now returns payload + raw data key bytes
+    - `pack_key_reference` resolves configured provider and emits a structured key reference
+    - protected stubs now call runtime `_x(payload, key_ref, globals())`
+  - Updated `decryption_helper.py` runtime templates (`runtime_py_source`, `runtime_pyx_source`) to resolve key bytes from provider key references:
+    - supports `local-embedded` key references
+    - preserves backward compatibility with historical raw key-parts payloads
+  - Build manifest now records key-control metadata under `key_management`.
+  - Added key-mode normalization alias so legacy config value `local-provider` maps to `local-embedded`.
+  - Added focused tests:
+    - `tests/test_key_provider.py`
+    - extended `tests/test_encryption_helper.py`
+    - updated `tests/test_soenc_config.py`
 
 ## P1 Cards
 

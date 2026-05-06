@@ -9,6 +9,8 @@ New workflow:
 import argparse
 import ast
 import base64
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -31,17 +33,25 @@ from typing import Union
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
+from enc2sop.keys import get_key_provider
 from decryption_helper import runtime_py_source
+from soenc_config import SoencProjectConfig
+from soenc_config import load_project_config
+from toolchain_profile import BUILD_PROFILE_WINDOWS_MSVC
+from toolchain_profile import DEFAULT_BUILD_PROFILE
+from toolchain_profile import SUPPORTED_BUILD_PROFILES
+from toolchain_profile import discover_vcvars64
+from toolchain_profile import prepare_windows_build_env
+from toolchain_profile import resolve_python_executable
 
-DEFAULT_WINDOWS_PYTHON = r"D:\code_environment\anaconda_all_css\py311\python.exe"
 DEFAULT_EXCLUDED_DIRS = {"__pycache__", ".git", ".idea", ".pytest_cache", "build", "dist"}
-WINDOWS_VCVARS_CANDIDATES = (
-    r"D:\code_environment\visual_studio\enterprise\VC\Auxiliary\Build\vcvars64.bat",
-    r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
-    r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
-    r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
-    r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
-)
+DEFAULT_OUTPUT_DIR = "protected_build"
+DEFAULT_KEY_MODE = "local-embedded"
+RUNTIME_MODULE_PREFIX = "enc_rt"
+RUNTIME_DELIVERY_MODE = "compiled_native_extension"
+NATIVE_EXTENSION_SUFFIXES = (".pyd", ".so", ".dll", ".dylib")
+DEFAULT_MANIFEST_KEY_ID = "local-hmac-v1"
+SIGNATURE_ALGORITHM_HMAC_SHA256 = "hmac-sha256"
 
 
 class SymbolRange(NamedTuple):
@@ -90,6 +100,10 @@ def safe_identifier(value: str, fallback: str = "protected_mod") -> str:
     if not value or value[0].isdigit():
         value = fallback
     return value
+
+
+def is_compile_eligible_module_name(name: str) -> bool:
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name)) and not name.startswith("__")
 
 
 def parse_namespace_package(value):
@@ -190,6 +204,89 @@ def read_source(path: Path) -> str:
 
 def validate_generated_source(source, filename):
     compile(source, filename, "exec")
+
+
+def _canonical_json_bytes(payload):
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _load_manifest_sign_key(key_file=None, key_b64=None):
+    if key_file and key_b64:
+        raise ValueError("manifest signing key must be provided by either file or base64 string, not both")
+    raw = None
+    if key_file:
+        raw = key_file.read_bytes()
+    elif key_b64:
+        try:
+            raw = base64.b64decode(key_b64, validate=True)
+        except Exception as exc:
+            raise ValueError("manifest signing key is not valid base64") from exc
+    if raw is None:
+        return None
+    key = raw.strip()
+    if not key:
+        raise ValueError("manifest signing key must not be empty")
+    if len(key) < 16:
+        raise ValueError("manifest signing key must be at least 16 bytes")
+    return key
+
+
+def _manifest_payload_without_signature(manifest):
+    if "signature" not in manifest:
+        return manifest
+    payload = dict(manifest)
+    payload.pop("signature", None)
+    return payload
+
+
+def compute_manifest_signature(manifest, signing_key):
+    payload = _manifest_payload_without_signature(manifest)
+    canonical = _canonical_json_bytes(payload)
+    return hmac.new(signing_key, canonical, hashlib.sha256).hexdigest()
+
+
+def sign_manifest_dict(manifest, signing_key, key_id):
+    signature_hex = compute_manifest_signature(manifest, signing_key)
+    signed = dict(manifest)
+    signed["signature"] = {
+        "algorithm": SIGNATURE_ALGORITHM_HMAC_SHA256,
+        "key_id": key_id or DEFAULT_MANIFEST_KEY_ID,
+        "digest_hex": signature_hex,
+    }
+    return signed
+
+
+def verify_manifest_signature_dict(manifest, signing_key):
+    signature = manifest.get("signature")
+    if not isinstance(signature, dict):
+        raise RuntimeError("manifest signature missing")
+    algorithm = signature.get("algorithm")
+    if algorithm != SIGNATURE_ALGORITHM_HMAC_SHA256:
+        raise RuntimeError("unsupported manifest signature algorithm: {0}".format(algorithm))
+    digest_hex = signature.get("digest_hex")
+    if not isinstance(digest_hex, str) or not digest_hex:
+        raise RuntimeError("manifest signature digest is missing")
+    expected = compute_manifest_signature(manifest, signing_key)
+    if not hmac.compare_digest(expected, digest_hex):
+        raise RuntimeError("manifest signature mismatch")
+    return signature
+
+
+def write_manifest(output_dir, manifest, signing_key=None, key_id=None):
+    manifest_path = output_dir / "build_manifest.json"
+    payload = sign_manifest_dict(manifest, signing_key, key_id) if signing_key is not None else manifest
+    manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest_path
+
+
+def read_manifest(manifest_path):
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def verify_manifest_signature_file(manifest_path, signing_key):
+    manifest = read_manifest(manifest_path)
+    signature = verify_manifest_signature_dict(manifest, signing_key)
+    return manifest, signature
 
 
 def syntax_issue_from_exception(root, path, exc):
@@ -371,14 +468,18 @@ def encrypt_snippet(source):
         base64.b64encode(tag).decode("ascii"),
         base64.b64encode(body).decode("ascii"),
     )
-    shards = [get_random_bytes(len(key)) for _ in range(3)]
-    final = bytearray(key)
-    for shard in shards:
-        for index, value in enumerate(shard):
-            final[index] ^= value
-    shards.append(bytes(final))
-    parts = tuple(base64.b64encode(item).decode("ascii") for item in shards)
-    return payload, parts
+    return payload, key
+
+
+def pack_key_reference(key_bytes, key_mode):
+    provider = get_key_provider(key_mode or "local-embedded")
+    key_ref = provider.pack_key(key_bytes)
+    if not isinstance(key_ref, dict):
+        raise ValueError("key provider must return dict key_ref")
+    mode = str(key_ref.get("mode") or "").strip().lower()
+    if not mode:
+        raise ValueError("key provider key_ref missing mode")
+    return key_ref
 
 
 def file_scope_entry(
@@ -438,11 +539,11 @@ def render_symbol_stub(symbol):
     return "class {0}(object):\n    pass\n".format(symbol.name)
 
 
-def render_exec_block(helper_name, payload, parts):
-    return f"{helper_name}({payload!r}, {parts!r})"
+def render_exec_block(helper_name, payload, key_ref):
+    return f"{helper_name}({payload!r}, {key_ref!r})"
 
 
-def protect_source(source, runtime_module, symbols_to_encrypt):
+def protect_source(source, runtime_module, symbols_to_encrypt, key_mode):
     if not symbols_to_encrypt:
         return source
 
@@ -452,9 +553,10 @@ def protect_source(source, runtime_module, symbols_to_encrypt):
 
     for symbol in symbols_to_encrypt:
         snippet = source[symbol.start_offset:symbol.end_offset]
-        payload, parts = encrypt_snippet(snippet)
+        payload, key_bytes = encrypt_snippet(snippet)
+        key_ref = pack_key_reference(key_bytes, key_mode)
         stubs.append(render_symbol_stub(symbol).rstrip())
-        replacement = render_exec_block(helper_name, payload, parts)
+        replacement = render_exec_block(helper_name, payload, key_ref)
         if snippet.endswith("\n") and not replacement.endswith("\n"):
             replacement += "\n"
         replacements.append((symbol.start_offset, symbol.end_offset, replacement))
@@ -519,7 +621,13 @@ def runtime_module_map(files, root):
     for directory in directories:
         rel = directory.relative_to(root)
         seed = "root" if str(rel) == "." else "_".join(rel.parts)
-        mapping[directory] = safe_identifier(f"__enc_rt_{seed}_{secrets.token_hex(4)}", "__enc_rt")
+        runtime_name = safe_identifier(
+            f"{RUNTIME_MODULE_PREFIX}_{seed}_{secrets.token_hex(4)}",
+            f"{RUNTIME_MODULE_PREFIX}_module",
+        )
+        if not is_compile_eligible_module_name(runtime_name):
+            raise ValueError("generated runtime module name is not compile-eligible: {0}".format(runtime_name))
+        mapping[directory] = runtime_name
     return mapping
 
 
@@ -539,6 +647,7 @@ def protect_project(
     syntax_issues,
     skip_bad_files,
     namespace_package_parts,
+    key_mode,
 ):
     output_dir = reset_directory(output_dir)
 
@@ -556,7 +665,7 @@ def protect_project(
         chosen = selected_symbols(symbols, entry)
 
         runtime_name = runtimes[source_path.parent]
-        protected_source = protect_source(source, runtime_name, chosen)
+        protected_source = protect_source(source, runtime_name, chosen, key_mode=key_mode)
         destination = output_dir / relative_for_output
         ensure_parent(destination)
         try:
@@ -587,12 +696,21 @@ def protect_project(
 
     # Write runtime files into mirrored output tree after encrypted modules exist.
     output_runtimes = []  # type: List[str]
+    runtime_records = []  # type: List[Dict[str, str]]
     for directory, module_name in runtimes.items():
         runtime_relative = namespaced_relative_path(directory.relative_to(root), namespace_package_parts)
         runtime_destination = output_dir / runtime_relative / f"{module_name}.py"
         ensure_parent(runtime_destination)
         runtime_destination.write_text(runtime_py_source(), encoding="utf-8")
-        output_runtimes.append(str(runtime_destination.relative_to(output_dir)).replace("\\", "/"))
+        runtime_source_relative = str(runtime_destination.relative_to(output_dir)).replace("\\", "/")
+        output_runtimes.append(runtime_source_relative)
+        runtime_records.append(
+            {
+                "module_name": module_name,
+                "source_relative_path": runtime_source_relative,
+                "package_relative_path": str(runtime_relative).replace("\\", "/"),
+            }
+        )
 
     manifest = {
         "target": str(target),
@@ -607,6 +725,17 @@ def protect_project(
             for result in results
         ],
         "runtime_files": output_runtimes,
+        "runtime_modules": runtime_records,
+        "runtime_delivery": {
+            "mode": RUNTIME_DELIVERY_MODE,
+            "module_prefix": RUNTIME_MODULE_PREFIX,
+            "compile_skip_rule": "dunder modules are skipped by batch builder; runtime names must not start with '__'",
+            "validation": "build must contain compiled runtime extensions for all runtime_files",
+        },
+        "key_management": {
+            "mode": key_mode,
+            "provider": "enc2sop.keys.{0}".format(key_mode.replace("-", "_")),
+        },
         "skipped_files": [issue.relative_path for issue in generated_issues],
         "syntax_issues": [
             {
@@ -619,64 +748,85 @@ def protect_project(
         ],
         "note": "Encrypted staging files are .py. Batch compilation is delegated to py2_linux_rec_opera.py.",
     }
-    (output_dir / "build_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_manifest(output_dir, manifest)
 
     return output_dir, tuple(results), tuple(sorted(output_runtimes)), tuple(generated_issues)
 
 
+def _runtime_native_candidates(source_relative_path):
+    source_rel = Path(source_relative_path)
+    return tuple(source_rel.with_suffix(suffix) for suffix in NATIVE_EXTENSION_SUFFIXES)
+
+
+def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_manifest_signature=False):
+    manifest_path = staging_dir / "build_manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError("build manifest missing in staging directory: {0}".format(staging_dir))
+
+    manifest = read_manifest(manifest_path)
+    if signing_key is not None:
+        verify_manifest_signature_dict(manifest, signing_key)
+    elif require_manifest_signature:
+        raise RuntimeError("manifest signature is required but no signing key was provided")
+    runtime_files = manifest.get("runtime_files") or []
+    if not runtime_files:
+        return tuple()
+
+    compiled_runtime_files = []  # type: List[str]
+    missing_runtime_files = []  # type: List[str]
+    for runtime_file in runtime_files:
+        matched = None
+        for candidate in _runtime_native_candidates(runtime_file):
+            if (build_dir / candidate).exists():
+                matched = str(candidate).replace("\\", "/")
+                break
+        if matched is None:
+            missing_runtime_files.append(str(runtime_file))
+        else:
+            compiled_runtime_files.append(matched)
+
+    if missing_runtime_files:
+        raise RuntimeError(
+            "compiled runtime modules missing from build output: {0}".format(", ".join(sorted(missing_runtime_files)))
+        )
+
+    runtime_delivery = manifest.get("runtime_delivery") or {}
+    runtime_delivery["compiled_runtime_files"] = sorted(compiled_runtime_files)
+    runtime_delivery["validated"] = True
+    manifest["runtime_delivery"] = runtime_delivery
+    write_manifest(staging_dir, manifest, signing_key=signing_key, key_id=(manifest.get("signature") or {}).get("key_id"))
+    return tuple(Path(path) for path in sorted(compiled_runtime_files))
+
+
 def find_vcvars64():
-    if os.name != "nt":
-        return None
-    for candidate in WINDOWS_VCVARS_CANDIDATES:
-        path = Path(candidate)
-        if path.exists():
-            return path
-    return None
+    return discover_vcvars64()
 
 
-def load_windows_build_env(output_dir):
-    vcvars = find_vcvars64()
-    if vcvars is None:
-        return None
-    dump_cmd = output_dir / "_dump_windows_env.cmd"
-    dump_cmd.write_text(
-        "\r\n".join([
-            "@echo off",
-            f'call "{vcvars}" >nul',
-            "set",
-            "",
-        ]),
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        ["cmd.exe", "/d", "/c", dump_cmd.name],
-        cwd=output_dir,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-    )
-    env = os.environ.copy()
-    for line in completed.stdout.splitlines():
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env[key] = value
-    env["PATH"] = os.environ.get("PATH", "") if "PATH" not in env else env["PATH"]
-    windows_cl = r"D:\code_environment\visual_studio\enterprise\VC\Tools\MSVC\14.29.30133\bin\HostX64\x64"
-    windows_rc = r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64"
-    env["PATH"] = windows_cl + os.pathsep + windows_rc + os.pathsep + env.get("PATH", "")
-    env["DISTUTILS_USE_SDK"] = "1"
-    env["MSSdk"] = "1"
-    env["PY2SO_PREPARED_ENV"] = "1"
-    return env
-
-
-def compile_with_batch_builder(python_exe, output_dir):
+def compile_with_batch_builder(
+    python_exe,
+    output_dir,
+    build_profile,
+    vcvars_path=None,
+    manifest_sign_key=None,
+    require_manifest_signature=False,
+):
     builder = Path(__file__).resolve().parent / "py2_linux_rec_opera.py"
-    env = load_windows_build_env(output_dir) if os.name == "nt" else None
+    env = prepare_windows_build_env(
+        output_dir=output_dir,
+        profile=build_profile,
+        vcvars_path=vcvars_path,
+    ) if os.name == "nt" else None
+    command = [
+        str(python_exe),
+        str(builder),
+        str(output_dir),
+        "--build-profile",
+        build_profile,
+    ]
+    if vcvars_path:
+        command.extend(["--vcvars-path", str(vcvars_path)])
     subprocess.run(
-        [str(python_exe), str(builder), str(output_dir)],
+        command,
         check=True,
         cwd=output_dir.parent,
         env=env or os.environ.copy(),
@@ -685,6 +835,12 @@ def compile_with_batch_builder(python_exe, output_dir):
     if not build_dir.exists():
         raise RuntimeError("batch cython build did not create build directory")
     sync_package_init_files(output_dir, build_dir)
+    validate_runtime_delivery(
+        output_dir,
+        build_dir,
+        signing_key=manifest_sign_key,
+        require_manifest_signature=require_manifest_signature,
+    )
     return build_dir
 
 
@@ -699,8 +855,7 @@ def sync_package_init_files(source_root, build_root):
 
 
 def native_extension_files(root):
-    suffixes = (".pyd", ".so", ".dll", ".dylib")
-    found = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in suffixes]
+    found = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in NATIVE_EXTENSION_SUFFIXES]
     return tuple(sorted(found))
 
 
@@ -728,28 +883,120 @@ def copy_release(build_dir, dist_dir, staging_dir):
     return dist_dir, tuple(copied)
 
 
+def add_tristate_flag(parser, name, enable_help, disable_help):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(f"--{name}", dest=name.replace("-", "_"), action="store_true", help=enable_help)
+    group.add_argument(f"--no-{name}", dest=name.replace("-", "_"), action="store_false", help=disable_help)
+    parser.set_defaults(**{name.replace("-", "_"): None})
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Generate encrypted .py staging files and batch-compile them with Cython.")
-    parser.add_argument("--target", "-t", required=True, help="Target Python file or directory.")
-    parser.add_argument("--output-dir", "-o", default="protected_build", help="Encrypted staging output directory.")
+    parser.add_argument("--config", "-c", help="Path to soenc.toml. Defaults to ./soenc.toml when present.")
+    parser.add_argument("--target", "-t", help="Target Python file or directory (or set [project].target in soenc.toml).")
+    parser.add_argument("--output-dir", "-o", help="Encrypted staging output directory.")
     parser.add_argument(
         "--namespace-root",
         help="Logical package root name for output namespace (e.g. A). If omitted, directory target defaults to its own package name when __init__.py exists.",
     )
-    parser.add_argument(
-        "--infer-namespace",
-        action="store_true",
-        help="Infer namespace from target directory name (e.g. A_py -> A) when --namespace-root is not provided.",
+    add_tristate_flag(
+        parser,
+        "infer-namespace",
+        "Infer namespace from target directory name (e.g. A_py -> A) when --namespace-root is not provided.",
+        "Disable namespace inference even if enabled in soenc.toml.",
     )
-    parser.add_argument("--python-exe", default=DEFAULT_WINDOWS_PYTHON, help="Python interpreter used for optional batch compile.")
-    parser.add_argument("--precheck-only", action="store_true", help="Only scan Python syntax issues and print a report.")
-    parser.add_argument("--skip-bad-files", action="store_true", help="Skip syntax-invalid .py files instead of aborting the whole run.")
-    parser.add_argument("--compile", action="store_true", help="Compile the encrypted staging tree with py2_linux_rec_opera.py.")
+    parser.add_argument(
+        "--python-exe",
+        help="Python interpreter used for optional batch compile. Defaults to current interpreter or SOENC_PYTHON_EXE.",
+    )
+    parser.add_argument(
+        "--build-profile",
+        default=None,
+        choices=SUPPORTED_BUILD_PROFILES,
+        help=(
+            "Build toolchain profile for native compile. "
+            "Use 'auto' for discovery, 'windows-msvc' to require MSVC prep, or 'native' to rely on current shell."
+        ),
+    )
+    parser.add_argument(
+        "--vcvars-path",
+        help="Optional explicit vcvars64.bat path for windows-msvc profile.",
+    )
+    add_tristate_flag(
+        parser,
+        "precheck-only",
+        "Only scan Python syntax issues and print a report.",
+        "Disable precheck-only mode even if enabled in soenc.toml.",
+    )
+    add_tristate_flag(
+        parser,
+        "skip-bad-files",
+        "Skip syntax-invalid .py files instead of aborting the whole run.",
+        "Disable skip-bad-files even if enabled in soenc.toml.",
+    )
+    add_tristate_flag(
+        parser,
+        "compile",
+        "Compile the encrypted staging tree with py2_linux_rec_opera.py.",
+        "Disable compile step even if enabled in soenc.toml.",
+    )
     parser.add_argument("--dist-dir", help="Copy compiled native artifacts and manifest into a clean release directory.")
-    parser.add_argument("--function", action="append", default=[], help="Single-file mode: protect only these top-level function names.")
-    parser.add_argument("--class", dest="classes", action="append", default=[], help="Single-file mode: protect only these top-level class names.")
+    parser.add_argument("--function", action="append", default=None, help="Single-file mode: protect only these top-level function names.")
+    parser.add_argument("--class", dest="classes", action="append", default=None, help="Single-file mode: protect only these top-level class names.")
     parser.add_argument("--scope-config", help="JSON file that maps relative paths to {functions, classes, all}.")
+    parser.add_argument(
+        "--manifest-sign-key-file",
+        help="Path to manifest signing key bytes. Enables signed build_manifest.json (HMAC-SHA256).",
+    )
+    parser.add_argument(
+        "--manifest-sign-key-b64",
+        help="Base64-encoded manifest signing key bytes. Alternative to --manifest-sign-key-file.",
+    )
+    parser.add_argument(
+        "--manifest-key-id",
+        default=None,
+        help="Signature key identifier recorded in build_manifest.json.",
+    )
+    add_tristate_flag(
+        parser,
+        "require-manifest-signature",
+        "Require build_manifest.json to contain a valid signature during compile verification.",
+        "Disable mandatory signature verification even if enabled in soenc.toml.",
+    )
     return parser.parse_args(argv)
+
+
+def merge_args_with_project_config(args, project_config):
+    if project_config is None:
+        return args
+    for field, config_value in project_config.cli_defaults.items():
+        if config_value is None:
+            continue
+        if getattr(args, field, None) is None:
+            setattr(args, field, config_value)
+    return args
+
+
+def finalize_arg_defaults(args):
+    if args.output_dir is None:
+        args.output_dir = DEFAULT_OUTPUT_DIR
+    if args.build_profile is None:
+        args.build_profile = DEFAULT_BUILD_PROFILE
+    if args.compile is None:
+        args.compile = False
+    if args.precheck_only is None:
+        args.precheck_only = False
+    if args.skip_bad_files is None:
+        args.skip_bad_files = False
+    if args.infer_namespace is None:
+        args.infer_namespace = False
+    if args.require_manifest_signature is None:
+        args.require_manifest_signature = False
+    if args.function is None:
+        args.function = []
+    if args.classes is None:
+        args.classes = []
+    return args
 
 
 def is_subpath(path, parent):
@@ -762,11 +1009,26 @@ def is_subpath(path, parent):
 
 def main(argv=None):
     args = parse_args(argv)
+    project_config = load_project_config(config_path=args.config, base_dir=Path.cwd())
+    args = merge_args_with_project_config(args, project_config)
+    args = finalize_arg_defaults(args)
+
+    if not args.target:
+        raise ValueError("target is required (set --target or [project].target in soenc.toml)")
+
     target = normalize_path(args.target)
     output_dir = normalize_path(args.output_dir)
-    python_exe = normalize_path(args.python_exe) if args.python_exe else Path(sys.executable)
+    python_exe = resolve_python_executable(args.python_exe)
     dist_dir = normalize_path(args.dist_dir) if args.dist_dir else None
     scope_config = load_scope_config(normalize_path(args.scope_config) if args.scope_config else None)
+    vcvars_path = normalize_path(args.vcvars_path) if args.vcvars_path else None
+    manifest_sign_key_file = normalize_path(args.manifest_sign_key_file) if args.manifest_sign_key_file else None
+    manifest_sign_key = _load_manifest_sign_key(
+        key_file=manifest_sign_key_file,
+        key_b64=args.manifest_sign_key_b64,
+    )
+    key_mode = (project_config.key_mode if project_config is not None and project_config.key_mode else DEFAULT_KEY_MODE)
+    get_key_provider(key_mode)
 
     if not target.exists():
         raise FileNotFoundError(f"target not found: {target}")
@@ -784,6 +1046,12 @@ def main(argv=None):
         raise ValueError("--precheck-only cannot be combined with --dist-dir")
     if args.compile and not python_exe.exists():
         raise FileNotFoundError(f"python executable not found: {python_exe}")
+    if args.vcvars_path and args.build_profile not in {DEFAULT_BUILD_PROFILE, BUILD_PROFILE_WINDOWS_MSVC}:
+        raise ValueError("--vcvars-path supports only auto/windows-msvc build profiles")
+    if args.require_manifest_signature and manifest_sign_key is None:
+        raise ValueError("--require-manifest-signature requires --manifest-sign-key-file or --manifest-sign-key-b64")
+    if vcvars_path and os.name == "nt" and not vcvars_path.exists():
+        raise FileNotFoundError(f"vcvars path not found: {vcvars_path}")
     if target.is_file() and args.namespace_root:
         raise ValueError("--namespace-root only supports directory target")
     if target.is_file() and args.infer_namespace:
@@ -824,13 +1092,44 @@ def main(argv=None):
         syntax_issues=syntax_issues,
         skip_bad_files=args.skip_bad_files,
         namespace_package_parts=namespace_package_parts,
+        key_mode=key_mode,
     )
+    if project_config is not None:
+        manifest_path = actual_output_dir / "build_manifest.json"
+        manifest = read_manifest(manifest_path)
+        manifest["config"] = {
+            "source": str(project_config.path),
+            "key_mode": key_mode,
+            "package_metadata": project_config.package_metadata,
+        }
+        write_manifest(
+            actual_output_dir,
+            manifest,
+            signing_key=manifest_sign_key,
+            key_id=args.manifest_key_id or DEFAULT_MANIFEST_KEY_ID,
+        )
+    elif manifest_sign_key is not None:
+        manifest_path = actual_output_dir / "build_manifest.json"
+        manifest = read_manifest(manifest_path)
+        write_manifest(
+            actual_output_dir,
+            manifest,
+            signing_key=manifest_sign_key,
+            key_id=args.manifest_key_id or DEFAULT_MANIFEST_KEY_ID,
+        )
 
     build_dir = None  # type: Optional[Path]
     native_files = ()  # type: Tuple[Path, ...]
     actual_dist_dir = dist_dir
     if args.compile:
-        build_dir = compile_with_batch_builder(python_exe, actual_output_dir)
+        build_dir = compile_with_batch_builder(
+            python_exe=python_exe,
+            output_dir=actual_output_dir,
+            build_profile=args.build_profile,
+            vcvars_path=vcvars_path,
+            manifest_sign_key=manifest_sign_key,
+            require_manifest_signature=args.require_manifest_signature,
+        )
         if dist_dir:
             actual_dist_dir, native_files = copy_release(build_dir, dist_dir, actual_output_dir)
         else:
@@ -846,6 +1145,17 @@ def main(argv=None):
     )
 
     namespace_text = ".".join(namespace_package_parts)
+    if project_config is not None:
+        print(f"config={project_config.path}")
+        print(f"key_mode={key_mode}")
+        if project_config.package_metadata:
+            print("package_metadata={0}".format(json.dumps(project_config.package_metadata, ensure_ascii=False)))
+    else:
+        print(f"key_mode={key_mode}")
+    if manifest_sign_key is not None:
+        print("manifest_signature=enabled")
+    else:
+        print("manifest_signature=disabled")
     print(f"output_dir={result.output_dir}")
     print("namespace_package={0}".format(namespace_text if namespace_text else "<root>"))
     print(f"processed_files={len(result.processed_files)}")

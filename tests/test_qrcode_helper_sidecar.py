@@ -1,4 +1,6 @@
+import subprocess
 import shutil
+import sys
 import unittest
 import uuid
 from pathlib import Path
@@ -27,6 +29,63 @@ class WorkspaceTempMixin(object):
 
 
 class TransportCoreTests(WorkspaceTempMixin, unittest.TestCase):
+    def test_transport_import_does_not_import_easyocr(self) -> None:
+        cmd = [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                "sys.modules.pop('easyocr', None);"
+                "import qrcode_helper;"
+                "print('easyocr' in sys.modules)"
+            ),
+        ]
+        completed = subprocess.run(
+            cmd,
+            cwd=str(TEST_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(completed.stdout.strip(), "False")
+
+    def test_easyocr_backend_loads_reader_lazily(self) -> None:
+        root = self.make_case_root("easyocr_lazy")
+        images = root / "images"
+        images.mkdir(parents=True, exist_ok=True)
+        image_path = images / "shot_0001.png"
+        image_path.write_bytes(b"fake")
+
+        class _FakeEasyOCRModule(object):
+            class Reader(object):
+                def __init__(self, langs, gpu=False):
+                    self.langs = list(langs)
+                    self.gpu = bool(gpu)
+
+        transport = qrcode_helper.AirgapTransportLayer()
+        with mock.patch.object(qrcode_helper, "EASYOCR_AVAILABLE", True), mock.patch.object(
+            qrcode_helper,
+            "_load_easyocr_module",
+            autospec=True,
+            return_value=_FakeEasyOCRModule,
+        ) as mocked_loader, mock.patch.object(
+            qrcode_helper.AirgapTransportLayer,
+            "_ocr_single_image",
+            autospec=True,
+            return_value="P001L001|C00000|ABCDEFGH|FF8F\n",
+        ):
+            result = transport.extract_text_from_images(
+                image_input_path=str(images),
+                output_text_path=str(root / "ocr_easyocr.txt"),
+                backend="easyocr",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["backend"], "easyocr")
+        self.assertEqual(result["ocr_languages"], ["en"])
+        self.assertEqual(mocked_loader.call_count, 1)
+
     def test_estimate_export_reports_limits_and_pages(self) -> None:
         root = self.make_case_root("estimate")
         src = root / "payload_estimate.bin"

@@ -34,9 +34,23 @@ def _join_key(parts: Sequence[str]) -> bytes:
     return bytes(out)
 
 
-def _x(payloads: Iterable[Payload], key_parts: Sequence[str], namespace: MutableMapping[str, object]) -> None:
+def _resolve_key(key_ref) -> bytes:
+    """Resolve key bytes from provider key_ref payload."""
+    if isinstance(key_ref, dict):
+        mode = str(key_ref.get("mode") or "").strip().lower()
+        if mode == "local-embedded":
+            parts = key_ref.get("parts")
+            if not isinstance(parts, list):
+                raise ValueError("local-embedded key_ref missing parts")
+            return _join_key(parts)
+        raise ValueError("unsupported key provider mode: {0}".format(mode or "<empty>"))
+    # Backward compatibility for historical protected files that passed raw parts.
+    return _join_key(key_ref)
+
+
+def _x(payloads: Iterable[Payload], key_ref, namespace: MutableMapping[str, object]) -> None:
     """Decrypt payloads and execute them inside the caller module namespace."""
-    key = _join_key(key_parts)
+    key = _resolve_key(key_ref)
     for nonce_b64, tag_b64, body_b64 in payloads:
         cipher = AES.new(key, AES.MODE_GCM, nonce=base64.b64decode(nonce_b64))
         source = cipher.decrypt_and_verify(base64.b64decode(body_b64), base64.b64decode(tag_b64))
@@ -65,8 +79,20 @@ def _j(_parts):
     return bytes(_out)
 
 
-def _x(_payloads, _parts, _ns):
-    _key = _j(_parts)
+def _r(_key_ref):
+    if isinstance(_key_ref, dict):
+        _mode = str(_key_ref.get("mode") or "").strip().lower()
+        if _mode == "local-embedded":
+            _parts = _key_ref.get("parts")
+            if not isinstance(_parts, list):
+                raise ValueError("local-embedded key_ref missing parts")
+            return _j(_parts)
+        raise ValueError("unsupported key provider mode: {0}".format(_mode or "<empty>"))
+    return _j(_key_ref)
+
+
+def _x(_payloads, _key_ref, _ns):
+    _key = _r(_key_ref)
     for _nonce, _tag, _body in _payloads:
         _cipher = _A.new(_key, _A.MODE_GCM, nonce=_b.b64decode(_nonce))
         _src = _cipher.decrypt_and_verify(_b.b64decode(_body), _b.b64decode(_tag))
@@ -97,8 +123,20 @@ def _j(_parts):
     return bytes(_out)
 
 
-def _x(_payloads, _parts, _ns):
-    _key = _j(_parts)
+def _r(_key_ref):
+    if isinstance(_key_ref, dict):
+        _mode = str(_key_ref.get("mode") or "").strip().lower()
+        if _mode == "local-embedded":
+            _parts = _key_ref.get("parts")
+            if not isinstance(_parts, list):
+                raise ValueError("local-embedded key_ref missing parts")
+            return _j(_parts)
+        raise ValueError("unsupported key provider mode: {0}".format(_mode or "<empty>"))
+    return _j(_key_ref)
+
+
+def _x(_payloads, _key_ref, _ns):
+    _key = _r(_key_ref)
     for _nonce, _tag, _body in _payloads:
         _cipher = _A.new(_key, _A.MODE_GCM, nonce=_b.b64decode(_nonce))
         _src = _cipher.decrypt_and_verify(_b.b64decode(_body), _b.b64decode(_tag))

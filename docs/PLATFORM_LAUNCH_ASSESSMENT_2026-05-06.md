@@ -32,11 +32,12 @@ The repository does not yet qualify as a production platform because the deliver
 
 ### 2.2 Verified Local Findings
 
-- `37` tests pass under local `pytest`.
+- `42` tests pass under local default `pytest`, with `2` compile-path tests skipped when `Cython` is unavailable in that interpreter.
+- Compile-path end-to-end tests pass in a toolchain-provisioned interpreter (`D:\code_environment\anaconda_all_css\py311\python.exe`): `2` passed.
 - After test completion, the process still hits a Windows access violation via `easyocr -> torch`.
 - `qrcode_helper.py` is roughly `5442` lines and centralizes protocol, rendering, OCR, recovery, CLI, and provider logic.
 - `encryption_helper.py` uses AES-GCM with XOR-sharded key parts, but the key material is still reconstructable inside the delivered artifact.
-- The generated runtime module name pattern is `__enc_rt_*`.
+- The runtime delivery contract now requires compile-eligible module names (`enc_rt_*`) plus post-build validation that runtime native artifacts are present.
 - `py2_linux_rec_opera.py` skips `__*` modules except `__init__.py`, creating a direct risk that the decrypt runtime is not actually compiled into the protected native delivery path.
 
 ## 3. Accepted Baseline Decisions
@@ -107,6 +108,15 @@ Impact:
 - poor deployability
 - high refactor cost
 
+Progress status (2026-05-07):
+
+- Landed first extraction slice into `enc2sop.transport`:
+  - `enc2sop/transport/protocol.py` (protocol constants + parsing/normalization helpers)
+  - `enc2sop/transport/ocr_adapters.py` (lazy OCR adapter boundary + backend loading)
+- `qrcode_helper.py` now consumes these extracted modules through compatibility aliases.
+- Existing transport tests remain green, including import-time easyocr isolation.
+- Residual blocker remains until render/recover/CLI are also split and `qrcode_helper.py` is reduced to a compatibility facade.
+
 ### [BLOCKER][P0] B-002 Compile Path Risk for Decrypt Runtime
 
 The current generated runtime module naming convention collides with the batch compiler's rule that skips `__*` files. This can invalidate the intended `protected py -> compiled native artifact` path.
@@ -117,7 +127,7 @@ Impact:
 - shipped artifact may rely on plain Python runtime pieces
 - current tests do not prove compiled delivery integrity
 
-### [BLOCKER][P0] B-003 Machine-Specific Toolchain Configuration
+### [DONE][P0] B-003 Machine-Specific Toolchain Configuration
 
 The repository contains hard-coded Python, MSVC, SDK, INCLUDE, and LIB paths.
 
@@ -127,36 +137,78 @@ Impact:
 - onboarding friction
 - no production-grade build profile system
 
-### [BLOCKER][P0] B-004 No True End-to-End Compile Validation
+Resolution status (2026-05-07):
 
-Current tests validate portions of the workflow but do not prove:
+- Added profile-driven toolchain contract with `auto`, `windows-msvc`, and `native` modes.
+- Added discovery/override model for compiler preparation (`--vcvars-path`, `SOENC_VCVARS64`, `vswhere`, standard VS locations).
+- Removed hard-coded default Python interpreter and hard-coded MSVC INCLUDE/LIB path injection from build scripts.
+- Missing toolchain now returns explicit actionable errors instead of relying on machine-specific path assumptions.
+
+### [DONE][P0] B-004 End-to-End Compile Validation Covered By Explicit Tests
+
+The repository now includes explicit end-to-end tests for:
 
 `protect -> compile -> import compiled result -> execute protected symbol`
 
-Impact:
+and for broken-runtime-chain detection. These tests pass in a toolchain-provisioned interpreter and are dependency-gated in environments without `Cython`.
 
-- the most important platform promise remains unverified
+Residual note:
 
-### [BLOCKER][P0] B-005 Weak Key-Control Model
+- standardize this compile-path execution in CI once build profiles/toolchain discovery (`ENC-P0-005`) is completed
 
-The delivered artifact still carries enough local material to reconstruct the data key in-process. This is acceptable for a basic tool but not for a platform intended to protect multiple future products.
+### [DONE][P0] B-005 KeyProvider Baseline Implemented
 
-Impact:
+The platform now has an explicit `KeyProvider` abstraction and mainline wiring for local key resolution.
 
-- limited resistance to strong reverse engineering
-- no central license or key-control story
+Resolution status (2026-05-07):
+
+- Added `enc2sop.keys` provider contract and registry (`KeyProvider`, `register/get_key_provider`).
+- Added first provider implementation: `local-embedded`.
+- Protection flow now emits provider-based key references instead of ad hoc raw local key-part tuples.
+- Runtime decryption templates now resolve key material via provider key references and retain backward compatibility for historical payload shape.
+- `build_manifest.json` now includes `key_management` metadata for runtime delivery audits.
+
+Residual risk:
+
+- license-file and remote-KMS providers are not yet implemented.
+- current provider still resolves keys locally at runtime; this is a baseline decoupling step, not final hardening.
 
 ## 5. Non-Blocking But Important Gaps
 
-### [P1] G-001 Missing Platform Configuration Contract
+### [DONE][P0] G-004 Signed Manifest Integrity
 
-There is no unified `soenc.toml` or equivalent project config that defines:
+Build manifest signing and verification is now active for the mainline protection flow.
 
-- protect scope
-- build profile
-- output directories
-- key strategy
-- package metadata
+Resolution status (2026-05-07):
+
+- `build_manifest.json` now supports HMAC-SHA256 signatures with deterministic canonical payload hashing.
+- `encryption_helper.py` supports signature generation and verification via:
+  - `--manifest-sign-key-file`
+  - `--manifest-sign-key-b64`
+  - `--manifest-key-id`
+  - `--require-manifest-signature`
+- Compile/runtime verification path now validates manifest signatures (when configured) and fails on mismatch.
+- Tamper detection tests now explicitly prove modified manifests are rejected.
+- `soenc.toml` `[keys]` contract now supports:
+  - `manifest_sign_key_file`
+  - `manifest_key_id`
+  - `require_manifest_signature`
+
+### [DONE][P0] G-001 Unified Platform Configuration Contract
+
+`soenc.toml` contract now exists and can drive the core protect/build flow with explicit schema validation and CLI merge precedence.
+
+Resolution status (2026-05-07):
+
+- Added `soenc_config.py` loader with validated sections:
+  - `[project]`: target, scope config, namespace behavior, symbol scope
+  - `[build]`: output/dist dirs, compile/precheck toggles, python exe, build profile, vcvars path
+  - `[keys]`: key mode selection placeholder contract
+  - `[package]`: package metadata placeholders
+- `encryption_helper.py` now:
+  - auto-discovers `./soenc.toml` or accepts `--config`
+  - merges config defaults with explicit CLI overrides
+  - records config source + key/package metadata in `build_manifest.json`
 
 ### [P1] G-002 Weak Product Surface
 
@@ -237,6 +289,11 @@ Production go-live should not be claimed until the following are true:
 - manifest signing is active
 - at least one non-local key-control path exists
 - qrcode/OCR is no longer part of the mandatory mainline
+
+Current go-live gate note (2026-05-07):
+
+- The first five gate items are now satisfied except "at least one non-local key-control path exists".
+- Remaining critical work to satisfy that gate is `ENC-P1-009` (license-file provider), followed by `ENC-P1-010` (remote-KMS contract stub).
 
 ## 9. Assessment Status
 

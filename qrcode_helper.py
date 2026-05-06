@@ -10,8 +10,6 @@ Design goals:
 """
 
 import argparse
-import base64
-import binascii
 import hashlib
 import itertools
 import json
@@ -22,9 +20,11 @@ import shutil
 import subprocess
 import tempfile
 import zlib
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from enc2sop.transport import ocr_adapters as _ocr_adapters
+from enc2sop.transport import protocol as _transport_protocol
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -39,34 +39,151 @@ if PIL_AVAILABLE:
 else:
     RESAMPLE_LANCZOS = None
 
-try:
-    import pytesseract  # type: ignore
+pytesseract = None
+easyocr = None
+np = None
 
-    TESSERACT_PYTHON_AVAILABLE = True
-except Exception:
-    pytesseract = None
-    TESSERACT_PYTHON_AVAILABLE = False
 
-TESSERACT_CMD = shutil.which("tesseract")
+# Protocol primitives extracted to enc2sop.transport.protocol.
+PROTOCOL_VERSION = _transport_protocol.PROTOCOL_VERSION
+STD_BASE32_ALPHABET = _transport_protocol.STD_BASE32_ALPHABET
+SAFE_BASE32_ALPHABET = _transport_protocol.SAFE_BASE32_ALPHABET
+IMAGE_SUFFIXES = _transport_protocol.IMAGE_SUFFIXES
+SIDECAR_BITS_PER_ROW = _transport_protocol.SIDECAR_BITS_PER_ROW
+SIDECAR_CELL_SIZE = _transport_protocol.SIDECAR_CELL_SIZE
+SIDECAR_CELL_GAP = _transport_protocol.SIDECAR_CELL_GAP
+HASH_FRAGMENT_LEN = _transport_protocol.HASH_FRAGMENT_LEN
+PAYLOAD_OCR_AMBIGUITIES = _transport_protocol.PAYLOAD_OCR_AMBIGUITIES
+SAFE_CHAR_TO_VAL = _transport_protocol.SAFE_CHAR_TO_VAL
+SUPPORTED_FIELD_SEPARATORS = _transport_protocol.SUPPORTED_FIELD_SEPARATORS
+LINE_PATTERN = _transport_protocol.LINE_PATTERN
+LINE_PATTERN_NOCRC = _transport_protocol.LINE_PATTERN_NOCRC
+LINE_PATTERN_NOSEP = _transport_protocol.LINE_PATTERN_NOSEP
+LINE_PATTERN_NOSEP_NOCRC = _transport_protocol.LINE_PATTERN_NOSEP_NOCRC
+LINE_PATTERN_FALLBACK = _transport_protocol.LINE_PATTERN_FALLBACK
+LINE_PATTERN_FALLBACK_NOCRC = _transport_protocol.LINE_PATTERN_FALLBACK_NOCRC
+CHUNK_PATTERN = _transport_protocol.CHUNK_PATTERN
+CHUNK_PATTERN_NOCRC = _transport_protocol.CHUNK_PATTERN_NOCRC
+CHUNK_PATTERN_FALLBACK = _transport_protocol.CHUNK_PATTERN_FALLBACK
+CHUNK_PATTERN_FALLBACK_NOCRC = _transport_protocol.CHUNK_PATTERN_FALLBACK_NOCRC
+PAYLOAD_WITH_CRC_PATTERN = _transport_protocol.PAYLOAD_WITH_CRC_PATTERN
+PAYLOAD_WITH_CRC_FALLBACK_PATTERN = _transport_protocol.PAYLOAD_WITH_CRC_FALLBACK_PATTERN
+META_PATTERN = _transport_protocol.META_PATTERN
+PAGECRC_PATTERN = _transport_protocol.PAGECRC_PATTERN
+HASH_COMPACT_PATTERN = _transport_protocol.HASH_COMPACT_PATTERN
+PAGE_NO_FROM_NAME_PATTERN = _transport_protocol.PAGE_NO_FROM_NAME_PATTERN
+
+_utc_now_iso = _transport_protocol.utc_now_iso
+_sha256_hex = _transport_protocol.sha256_hex
+_crc16_hex = _transport_protocol.crc16_hex
+_to_ascii_width = _transport_protocol.to_ascii_width
+_normalize_ocr_line = _transport_protocol.normalize_ocr_line
+_normalize_payload = _transport_protocol.normalize_payload
+_normalize_protocol_signature = _transport_protocol.normalize_protocol_signature
+_normalize_digit_token = _transport_protocol.normalize_digit_token
+_normalize_page_line_token = _transport_protocol.normalize_page_line_token
+_normalize_hex_token = _transport_protocol.normalize_hex_token
+_parse_cfg_line = _transport_protocol.parse_cfg_line
+_parse_hash_fragment_line = _transport_protocol.parse_hash_fragment_line
+_parse_hash_compact_line = _transport_protocol.parse_hash_compact_line
+_levenshtein_distance = _transport_protocol.levenshtein_distance
+_build_easyocr_langs = _ocr_adapters.build_easyocr_langs
+_encode_safe_base32 = _transport_protocol.encode_safe_base32
+_decode_safe_base32 = _transport_protocol.decode_safe_base32
+_safe_base32_encoded_length = _transport_protocol.safe_base32_encoded_length
+_safe_payload_to_bits = _transport_protocol.safe_payload_to_bits
+_bits_to_safe_payload = _transport_protocol.bits_to_safe_payload
+
+
+def _module_spec_available(module_name: str) -> bool:
+    return _ocr_adapters.is_module_available(module_name)
+
+
+TESSERACT_PYTHON_AVAILABLE = _module_spec_available("pytesseract")
+EASYOCR_AVAILABLE = _module_spec_available("easyocr")
+NUMPY_AVAILABLE = _module_spec_available("numpy")
+TESSERACT_CMD = _ocr_adapters.TESSERACT_CMD
 TESSERACT_CLI_AVAILABLE = bool(TESSERACT_CMD)
 
-try:
-    import easyocr  # type: ignore
 
-    EASYOCR_AVAILABLE = True
-except Exception:
-    EASYOCR_AVAILABLE = False
+def _sync_ocr_adapter_flags() -> None:
+    _ocr_adapters.TESSERACT_PYTHON_AVAILABLE = bool(TESSERACT_PYTHON_AVAILABLE)
+    _ocr_adapters.EASYOCR_AVAILABLE = bool(EASYOCR_AVAILABLE)
+    _ocr_adapters.NUMPY_AVAILABLE = bool(NUMPY_AVAILABLE)
+    _ocr_adapters.TESSERACT_CMD = TESSERACT_CMD
+    _ocr_adapters.TESSERACT_CLI_AVAILABLE = bool(TESSERACT_CLI_AVAILABLE)
 
-try:
-    import numpy as np  # type: ignore
 
-    NUMPY_AVAILABLE = True
-except Exception:
-    NUMPY_AVAILABLE = False
+def _load_pytesseract_module():
+    global pytesseract
+    global TESSERACT_PYTHON_AVAILABLE
+
+    if TESSERACT_PYTHON_AVAILABLE is False:
+        return None
+    if pytesseract is not None:
+        TESSERACT_PYTHON_AVAILABLE = True
+        return pytesseract
+
+    _sync_ocr_adapter_flags()
+    pytesseract = _ocr_adapters.load_pytesseract_module()
+    TESSERACT_PYTHON_AVAILABLE = bool(pytesseract is not None)
+    return pytesseract
+
+
+def _tesseract_python_available() -> bool:
+    return bool(TESSERACT_PYTHON_AVAILABLE)
+
+
+def _load_easyocr_module():
+    global easyocr
+    global EASYOCR_AVAILABLE
+
+    if EASYOCR_AVAILABLE is False:
+        return None
+    if easyocr is not None:
+        EASYOCR_AVAILABLE = True
+        return easyocr
+
+    _sync_ocr_adapter_flags()
+    easyocr = _ocr_adapters.load_easyocr_module()
+    EASYOCR_AVAILABLE = bool(easyocr is not None)
+    return easyocr
+
+
+def _load_numpy_module():
+    global np
+    global NUMPY_AVAILABLE
+
+    if NUMPY_AVAILABLE is False:
+        return None
+    if np is not None:
+        NUMPY_AVAILABLE = True
+        return np
+
+    _sync_ocr_adapter_flags()
+    np = _ocr_adapters.load_numpy_module()
+    NUMPY_AVAILABLE = bool(np is not None)
+    return np
+
+
+def _easyocr_available() -> bool:
+    return bool(EASYOCR_AVAILABLE)
+
+
+def _numpy_available() -> bool:
+    return bool(NUMPY_AVAILABLE)
+
+
+def _build_easyocr_reader(lang: str):
+    easyocr_mod = _load_easyocr_module()
+    if easyocr_mod is None:
+        raise RuntimeError("easyocr is not available in current environment")
+    reader_langs = _build_easyocr_langs(lang)
+    return easyocr_mod.Reader(reader_langs, gpu=False), reader_langs
 
 
 def _tesseract_runtime_mode() -> str:
-    if TESSERACT_PYTHON_AVAILABLE:
+    if _tesseract_python_available():
         return "pytesseract"
     if TESSERACT_CLI_AVAILABLE and TESSERACT_CMD:
         return "cli"
@@ -74,437 +191,6 @@ def _tesseract_runtime_mode() -> str:
 
 
 TESSERACT_AVAILABLE = bool(_tesseract_runtime_mode())
-
-
-PROTOCOL_VERSION = "AT1"
-STD_BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-SAFE_BASE32_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
-SIDECAR_BITS_PER_ROW = 50
-SIDECAR_CELL_SIZE = 6
-SIDECAR_CELL_GAP = 2
-HASH_FRAGMENT_LEN = 32
-PAYLOAD_OCR_AMBIGUITIES = {
-    "2": "Z",
-    "4": "H",
-    "5": "S",
-    "6": "G",
-    "7": "T",
-    "8": "B",
-    "B": "8",
-    "G": "6",
-    "H": "4",
-    "S": "5",
-    "T": "7",
-    "Z": "2",
-}
-
-if len(set(SAFE_BASE32_ALPHABET)) != 32:
-    raise RuntimeError("SAFE_BASE32_ALPHABET must contain exactly 32 unique chars")
-
-STD_TO_SAFE = str.maketrans(STD_BASE32_ALPHABET, SAFE_BASE32_ALPHABET)
-SAFE_TO_STD = str.maketrans(SAFE_BASE32_ALPHABET, STD_BASE32_ALPHABET)
-SAFE_CHAR_TO_VAL = {ch: idx for idx, ch in enumerate(SAFE_BASE32_ALPHABET)}
-SUPPORTED_FIELD_SEPARATORS = ("|", "$", "@")
-SEPARATOR_CHAR_CLASS = r"\|$@"
-SEPARATOR_FALLBACK_CHAR_CLASS = r"\|I$@T"
-
-LINE_PATTERN = re.compile(
-    r"^P(\d{3})L(\d{3})([" + SEPARATOR_CHAR_CLASS + r"])C(\d{5})\3([A-Z0-9]+)\3([0-9A-F]{4})$"
-)
-LINE_PATTERN_NOCRC = re.compile(
-    r"^P(\d{3})L(\d{3})([" + SEPARATOR_CHAR_CLASS + r"])C(\d{5})\3([A-Z0-9]+)$"
-)
-LINE_PATTERN_NOSEP = re.compile(
-    r"^P([0-9A-Z@]{3})(?:L|I|1)([0-9A-Z@]{3})C([0-9A-Z@]{5})([A-Z0-9]+)([0-9A-FIO]{4})$"
-)
-LINE_PATTERN_NOSEP_NOCRC = re.compile(
-    r"^P([0-9A-Z@]{3})(?:L|I|1)([0-9A-Z@]{3})C([0-9A-Z@]{5})([A-Z0-9]+)$"
-)
-LINE_PATTERN_FALLBACK = re.compile(
-    r"^P([0-9A-Z@]{3})(?:L|I|1)([0-9A-Z@]{3})([" + SEPARATOR_FALLBACK_CHAR_CLASS + r"])C([0-9A-Z@]{5})\3([A-Z0-9$]+)\3([0-9A-FIO]{4})$"
-)
-LINE_PATTERN_FALLBACK_NOCRC = re.compile(
-    r"^P([0-9A-Z@]{3})(?:L|I|1)([0-9A-Z@]{3})([" + SEPARATOR_FALLBACK_CHAR_CLASS + r"])C([0-9A-Z@]{5})\3([A-Z0-9$]+)$"
-)
-CHUNK_PATTERN = re.compile(
-    r"^C(\d{5})([" + SEPARATOR_CHAR_CLASS + r"])([A-Z0-9]+)\2([0-9A-F]{4})$"
-)
-CHUNK_PATTERN_NOCRC = re.compile(
-    r"^C(\d{5})([" + SEPARATOR_CHAR_CLASS + r"])([A-Z0-9]+)$"
-)
-CHUNK_PATTERN_FALLBACK = re.compile(
-    r"^C([0-9A-Z@]{5})([" + SEPARATOR_FALLBACK_CHAR_CLASS + r"])([A-Z0-9$]+)\2([0-9A-FIO]{4})$"
-)
-CHUNK_PATTERN_FALLBACK_NOCRC = re.compile(
-    r"^C([0-9A-Z@]{5})([" + SEPARATOR_FALLBACK_CHAR_CLASS + r"])([A-Z0-9$]+)$"
-)
-PAYLOAD_WITH_CRC_PATTERN = re.compile(
-    r"^([A-Z0-9]+)([" + SEPARATOR_CHAR_CLASS + r"])([0-9A-F]{4})$"
-)
-PAYLOAD_WITH_CRC_FALLBACK_PATTERN = re.compile(
-    r"^([A-Z0-9$]+)([" + SEPARATOR_FALLBACK_CHAR_CLASS + r"])([0-9A-FIO]{4})$"
-)
-META_PATTERN = re.compile(
-    r"^@META\|AT1\|ID=([A-Z0-9_-]{6,64})\|PAGE=(\d{1,3})/(\d{1,3})\|CHUNKS=(\d{1,6})\|TOTAL=(\d{1,6})$"
-)
-PAGECRC_PATTERN = re.compile(r"^@PAGECRC\|P(\d{3})\|([0-9A-F]{4})$")
-HASH_COMPACT_PATTERN = re.compile(r"^@HS([12])\|R=([0-9A-F]{16,64})\|C=([0-9A-F]{16,64})$")
-PAGE_NO_FROM_NAME_PATTERN = re.compile(r"(\d{1,4})(?!.*\d)")
-
-
-def _utc_now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _crc16_hex(data: str) -> str:
-    value = binascii.crc_hqx(data.encode("ascii"), 0)
-    return "{:04X}".format(value)
-
-
-def _to_ascii_width(text: str) -> str:
-    """Convert full-width chars to half-width chars."""
-    converted = []
-    for ch in text:
-        code = ord(ch)
-        if code == 12288:  # full-width space
-            converted.append(" ")
-            continue
-        if 65281 <= code <= 65374:
-            converted.append(chr(code - 65248))
-            continue
-        converted.append(ch)
-    return "".join(converted)
-
-
-def _normalize_ocr_line(raw_line: str) -> str:
-    """Normalize one OCR line into protocol-friendly text."""
-    line = _to_ascii_width(raw_line)
-    line = line.replace(chr(0x00A6), "|")
-    line = line.replace(chr(0xFF5C), "|")
-    line = line.replace(chr(0x01C0), "|")
-    line = line.replace(chr(0x2223), "|")
-    line = line.replace(chr(0xFF0C), ",")
-    line = line.replace(chr(0x3002), ".")
-    line = line.replace("﻿", "")
-    line = line.replace(" ", "").replace("\t", "").replace("\r", "").replace("\n", "")
-    line = line.upper()
-    return line
-
-
-def _normalize_payload(payload: str) -> str:
-    """
-    Conservative payload normalization for OCR confusion.
-    The map only targets chars that are impossible in protocol payload.
-    """
-    # SAFE_BASE32_ALPHABET excludes I/O/0/1 intentionally.
-    alias = {
-        "0": "Q",
-        "O": "Q",
-        "1": "L",
-        "I": "L",
-        "$": "S",
-    }
-    out = []
-    for ch in payload:
-        c = alias.get(ch, ch)
-        out.append(c)
-    return "".join(out)
-
-
-def _normalize_protocol_signature(line: str) -> str:
-    """
-    Normalize key protocol markers that OCR commonly confuses.
-    Example: P0011001|...  -> P001L001|...
-    """
-    if not line:
-        return line
-    # Header/footer separators are often misread as 'I'
-    if line.startswith("@METAIAT"):
-        line = line.replace("@METAI", "@META|", 1).replace("I|ID=", "|ID=", 1)
-        line = line.replace("IPAGE=", "|PAGE=").replace("ICHUNKS=", "|CHUNKS=").replace(
-            "ITOTAL=", "|TOTAL="
-        )
-        line = line.replace("ATLI", "AT1|")
-    if line.startswith("@PAGECRCIP"):
-        line = line.replace("@PAGECRCIP", "@PAGECRC|P", 1)
-    if line.startswith("@CFGIAT"):
-        line = line.replace("@CFGI", "@CFG|", 1).replace("ATLI", "AT1|", 1)
-        line = (
-            line.replace("ICC=", "|CC=")
-            .replace("ILP=", "|LP=")
-            .replace("IRC=", "|RC=")
-            .replace("IIL=", "|IL=")
-            .replace("IPG=", "|PG=")
-            .replace("ICS=", "|CS=")
-            .replace("IRS=", "|RS=")
-        )
-    line = line.replace("|ATLI|", "|AT1|")
-    if line.startswith("@CHI|"):
-        line = line.replace("@CHI|", "@CH1|", 1)
-    if line.startswith("@CHL|"):
-        line = line.replace("@CHL|", "@CH1|", 1)
-    if line.startswith("@RHI|"):
-        line = line.replace("@RHI|", "@RH1|", 1)
-    if line.startswith("@RHL|"):
-        line = line.replace("@RHL|", "@RH1|", 1)
-    if line.startswith("@CHZ|"):
-        line = line.replace("@CHZ|", "@CH2|", 1)
-    if line.startswith("@RHZ|"):
-        line = line.replace("@RHZ|", "@RH2|", 1)
-    if line.startswith("@HSI|"):
-        line = line.replace("@HSI|", "@HS1|", 1)
-    if line.startswith("@HSL|"):
-        line = line.replace("@HSL|", "@HS1|", 1)
-    if line.startswith("@HSZ|"):
-        line = line.replace("@HSZ|", "@HS2|", 1)
-
-    if line.startswith("P") and len(line) > 8:
-        chars = list(line)
-        if chars[4] in ("1", "I"):
-            chars[4] = "L"
-        line = "".join(chars)
-    # Chunk-index lines in line_index_mode=chunk start with Cxxxxx<sep>.
-    # OCR may confuse the leading "C" as "G/Q/O/D/@".
-    if len(line) >= 7 and line[0] in ("G", "Q", "O", "D", "@"):
-        sep = line[6]
-        if sep in ("|", "$", "@", "I", "T"):
-            token = _normalize_digit_token(line[1:6])
-            if len(token) == 5 and token.isdigit():
-                normalized_sep = "|" if sep in ("I", "T") else sep
-                line = "C{}{}{}".format(token, normalized_sep, line[7:])
-    return line
-
-
-def _normalize_digit_token(token: str) -> str:
-    alias = {
-        "O": "0",
-        "Q": "0",
-        "D": "0",
-        "@": "0",
-        "C": "0",
-        "I": "1",
-        "L": "1",
-        "Z": "2",
-        "M": "4",
-        "H": "4",
-        "S": "5",
-        "G": "6",
-        "T": "7",
-        "B": "8",
-    }
-    return "".join(alias.get(ch, ch) for ch in token)
-
-
-def _normalize_page_line_token(token: str) -> str:
-    """
-    OCR normalization for page/line serials (Pxxx/Lxxx).
-    Page/line fields are short and bounded, so we collapse more glyph ambiguities
-    into a single class to reduce parse failures.
-    """
-    alias = {
-        "O": "0",
-        "Q": "0",
-        "D": "0",
-        "@": "0",
-        "G": "0",
-        "C": "0",
-        "I": "1",
-        "L": "1",
-        "Z": "2",
-        "M": "4",
-        "H": "4",
-        "S": "5",
-        "T": "7",
-        "B": "8",
-    }
-    return "".join(alias.get(ch, ch) for ch in token)
-
-
-def _normalize_hex_token(token: str) -> str:
-    cleaned = []
-    for ch in _to_ascii_width(token).upper():
-        if ch in (" ", "\t", "\r", "\n"):
-            continue
-        if ch not in "0123456789ABCDEFOILS":
-            continue
-        cleaned.append(ch)
-    return (
-        "".join(cleaned)
-        .replace("O", "0")
-        .replace("I", "1")
-        .replace("L", "1")
-        .replace("S", "5")
-    )
-
-
-def _parse_cfg_line(line: str) -> Optional[Dict[str, int]]:
-    if not line.startswith("@CFG|AT1|"):
-        return None
-    parts = line.split("|")
-    values: Dict[str, int] = {}
-    for item in parts[2:]:
-        if "=" not in item:
-            return None
-        key, value = item.split("=", 1)
-        try:
-            values[key] = int(_normalize_digit_token(value))
-        except Exception:
-            return None
-    required = {"CC", "LP", "RC", "IL", "PG", "CS", "RS"}
-    if not required.issubset(set(values.keys())):
-        return None
-    return values
-
-
-def _parse_hash_fragment_line(line: str) -> Optional[Tuple[str, int, str]]:
-    if not line.startswith("@") or "|" not in line:
-        return None
-    tag, payload = line.split("|", 1)
-    if len(tag) != 4:
-        return None
-    kind = tag[1:3]
-    if kind not in ("RH", "CH"):
-        return None
-    try:
-        part_no = int(_normalize_digit_token(tag[3]))
-    except Exception:
-        return None
-    if part_no not in (1, 2):
-        return None
-    normalized = _normalize_hex_token(payload)
-    if len(normalized) < HASH_FRAGMENT_LEN:
-        return None
-    return kind, part_no, normalized[:HASH_FRAGMENT_LEN]
-
-
-def _parse_hash_compact_line(line: str) -> Optional[Tuple[int, str, str]]:
-    match = HASH_COMPACT_PATTERN.match(line)
-    if not match:
-        return None
-    try:
-        part_no = int(_normalize_digit_token(match.group(1)))
-    except Exception:
-        return None
-    if part_no not in (1, 2):
-        return None
-    raw_rh = _normalize_hex_token(match.group(2))
-    raw_ch = _normalize_hex_token(match.group(3))
-    if len(raw_rh) < HASH_FRAGMENT_LEN or len(raw_ch) < HASH_FRAGMENT_LEN:
-        return None
-    return part_no, raw_rh[:HASH_FRAGMENT_LEN], raw_ch[:HASH_FRAGMENT_LEN]
-
-
-def _levenshtein_distance(left: str, right: str) -> int:
-    if left == right:
-        return 0
-    if not left:
-        return len(right)
-    if not right:
-        return len(left)
-
-    prev = list(range(len(right) + 1))
-    for left_index, left_ch in enumerate(left, 1):
-        current = [left_index]
-        for right_index, right_ch in enumerate(right, 1):
-            substitution = prev[right_index - 1] + (0 if left_ch == right_ch else 1)
-            insertion = current[right_index - 1] + 1
-            deletion = prev[right_index] + 1
-            current.append(min(substitution, insertion, deletion))
-        prev = current
-    return prev[-1]
-
-
-def _build_easyocr_langs(lang: str) -> List[str]:
-    """
-    Map common tesseract-style language codes to EasyOCR language tags.
-    Supports separators: + , ; whitespace.
-    """
-    source = (lang or "").strip()
-    if not source:
-        source = "eng"
-    tokens = re.split(r"[+,;\s]+", source)
-    alias = {
-        "eng": "en",
-        "en": "en",
-        "chi_sim": "ch_sim",
-        "zh_cn": "ch_sim",
-        "ch_sim": "ch_sim",
-        "chi_tra": "ch_tra",
-        "zh_tw": "ch_tra",
-        "ch_tra": "ch_tra",
-        "jpn": "ja",
-        "ja": "ja",
-        "kor": "ko",
-        "ko": "ko",
-    }
-    mapped = []
-    for token in tokens:
-        if not token:
-            continue
-        key = token.lower().strip().replace("-", "_")
-        mapped.append(alias.get(key, key))
-
-    if not mapped:
-        mapped = ["en"]
-
-    # Keep order while de-duplicating.
-    uniq = []
-    seen = set()
-    for item in mapped:
-        if item in seen:
-            continue
-        seen.add(item)
-        uniq.append(item)
-    return uniq
-
-
-def _encode_safe_base32(data: bytes) -> str:
-    standard = base64.b32encode(data).decode("ascii").rstrip("=")
-    return standard.translate(STD_TO_SAFE)
-
-
-def _decode_safe_base32(data: str) -> bytes:
-    standard = data.translate(SAFE_TO_STD)
-    padding = (-len(standard)) % 8
-    if padding:
-        standard = standard + ("=" * padding)
-    return base64.b32decode(standard.encode("ascii"))
-
-
-def _safe_base32_encoded_length(byte_len: int) -> int:
-    if byte_len <= 0:
-        return 0
-    full_groups, remainder = divmod(int(byte_len), 5)
-    length = full_groups * 8
-    extra = {0: 0, 1: 2, 2: 4, 3: 5, 4: 7}[remainder]
-    return length + extra
-
-
-def _safe_payload_to_bits(payload: str) -> str:
-    bits = []
-    for ch in payload:
-        bits.append("{:05b}".format(SAFE_CHAR_TO_VAL[ch]))
-    return "".join(bits)
-
-
-def _bits_to_safe_payload(bits: str, expected_len: int) -> str:
-    out = []
-    for index in range(int(expected_len)):
-        start = index * 5
-        chunk = bits[start : start + 5]
-        if len(chunk) != 5:
-            return ""
-        value = int(chunk, 2)
-        if value < 0 or value >= len(SAFE_BASE32_ALPHABET):
-            return ""
-        out.append(SAFE_BASE32_ALPHABET[value])
-    return "".join(out)
-
 
 class AirgapTransportLayer(object):
     """
@@ -1028,7 +714,7 @@ class AirgapTransportLayer(object):
                 candidates.append("sidecar")
             if tesseract_mode:
                 candidates.append("tesseract")
-            if EASYOCR_AVAILABLE:
+            if _easyocr_available():
                 candidates.append("easyocr")
             if not candidates:
                 raise RuntimeError("no OCR backend available for auto mode")
@@ -1056,7 +742,7 @@ class AirgapTransportLayer(object):
             raise RuntimeError(
                 "tesseract backend requires pytesseract or tesseract executable when sidecar is unavailable"
             )
-        if backend == "easyocr" and not EASYOCR_AVAILABLE and not sidecar_supported:
+        if backend == "easyocr" and not _easyocr_available() and not sidecar_supported:
             raise RuntimeError("easyocr is not available in current environment")
         if backend == "sidecar":
             if manifest_path:
@@ -1072,9 +758,8 @@ class AirgapTransportLayer(object):
 
         reader = None
         reader_langs = None
-        if backend == "easyocr" and EASYOCR_AVAILABLE:
-            reader_langs = _build_easyocr_langs(lang)
-            reader = easyocr.Reader(reader_langs, gpu=False)
+        if backend == "easyocr":
+            reader, reader_langs = _build_easyocr_reader(lang)
 
         texts = []
         structured_layout_used = 0
@@ -1219,7 +904,7 @@ class AirgapTransportLayer(object):
                 candidates.append("sidecar")
             if _tesseract_runtime_mode():
                 candidates.append("tesseract")
-            if EASYOCR_AVAILABLE:
+            if _easyocr_available():
                 candidates.append("easyocr")
             if not candidates:
                 raise RuntimeError("no OCR or sidecar backend available for auto mode")
@@ -2624,8 +2309,9 @@ class AirgapTransportLayer(object):
         )
 
     def _tesseract_image_to_string(self, image, lang: str, config: str) -> str:
-        if TESSERACT_PYTHON_AVAILABLE:
-            return pytesseract.image_to_string(image, lang=lang, config=config)
+        pytesseract_mod = _load_pytesseract_module()
+        if pytesseract_mod is not None:
+            return pytesseract_mod.image_to_string(image, lang=lang, config=config)
         return self._tesseract_image_to_string_cli(image=image, lang=lang, config=config)
 
     def _tesseract_image_to_string_cli(self, image, lang: str, config: str) -> str:
@@ -2675,7 +2361,8 @@ class AirgapTransportLayer(object):
     def _ocr_image_crop_easyocr(self, image, box: List[int], reader) -> str:
         if reader is None:
             raise RuntimeError("easyocr reader is required for structured OCR extraction")
-        if not NUMPY_AVAILABLE:
+        np_mod = _load_numpy_module()
+        if np_mod is None:
             raise RuntimeError("numpy is required for structured easyocr extraction")
 
         left = max(0, int(box[0]))
@@ -2686,7 +2373,7 @@ class AirgapTransportLayer(object):
         crop = crop.resize((crop.width * 3, crop.height * 4), RESAMPLE_LANCZOS)
         bordered = Image.new("L", (crop.width + 48, crop.height + 32), 255)
         bordered.paste(crop, (24, 16))
-        crop_array = np.array(bordered)
+        crop_array = np_mod.array(bordered)
         lines = reader.readtext(crop_array, detail=0, paragraph=False)
         return "\n".join(lines)
 
@@ -3592,7 +3279,7 @@ class AirgapTransportLayer(object):
 
         if backend == "easyocr":
             if reader is None:
-                reader = easyocr.Reader(_build_easyocr_langs(lang), gpu=False)
+                reader, _reader_langs = _build_easyocr_reader(lang)
             if page_layout:
                 return self._ocr_structured_page_easyocr(
                     image_path=image_path,
