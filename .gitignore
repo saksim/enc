@@ -11,3 +11,4 @@ ocr_cli_*/
 ocr_full_smoke_*/
 ocr_live_smoke_*/
 ocr_tess_*/
+.so
