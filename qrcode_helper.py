@@ -9,7 +9,6 @@ Design goals:
 3) recover artifact from OCR text with line-level CRC and package-level SHA256 verification.
 """
 
-import argparse
 import hashlib
 import itertools
 import json
@@ -23,8 +22,12 @@ import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from enc2sop.transport import cli as _transport_cli
 from enc2sop.transport import ocr_adapters as _ocr_adapters
+from enc2sop.transport import parser as _transport_parser
 from enc2sop.transport import protocol as _transport_protocol
+from enc2sop.transport import recover as _transport_recover
+from enc2sop.transport import render as _transport_render
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -93,6 +96,9 @@ _decode_safe_base32 = _transport_protocol.decode_safe_base32
 _safe_base32_encoded_length = _transport_protocol.safe_base32_encoded_length
 _safe_payload_to_bits = _transport_protocol.safe_payload_to_bits
 _bits_to_safe_payload = _transport_protocol.bits_to_safe_payload
+_print_json = _transport_cli.print_json
+_save_json = _transport_cli.save_json
+_save_missing_chunks = _transport_cli.save_missing_chunks
 
 
 def _module_spec_available(module_name: str) -> bool:
@@ -492,16 +498,9 @@ class AirgapTransportLayer(object):
         output_file: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
-        if not manifest_path:
-            return self._recover_artifact_without_manifest(
-                ocr_input_path=ocr_input_path,
-                output_file=output_file,
-                strict_payload_chars=strict_payload_chars,
-            )
-
-        manifest = self._load_manifest(manifest_path)
-        return self._recover_artifact_against_manifest(
-            manifest=manifest,
+        return _transport_recover.recover_artifact(
+            transport=self,
+            manifest_path=manifest_path,
             ocr_input_path=ocr_input_path,
             output_file=output_file,
             strict_payload_chars=strict_payload_chars,
@@ -514,39 +513,13 @@ class AirgapTransportLayer(object):
         output_file: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
-        encoded = self._recover_encoded_payload(manifest, ocr_input_path, strict_payload_chars)
-        compressed = _decode_safe_base32(encoded)
-        compressed_sha = _sha256_hex(compressed)
-        if compressed_sha != manifest["compressed_sha256"]:
-            raise ValueError(
-                "compressed sha256 mismatch: expected {}, got {}".format(
-                    manifest["compressed_sha256"], compressed_sha
-                )
-            )
-
-        raw = zlib.decompress(compressed)
-        raw_sha = _sha256_hex(raw)
-        if raw_sha != manifest["raw_sha256"]:
-            raise ValueError(
-                "raw sha256 mismatch: expected {}, got {}".format(manifest["raw_sha256"], raw_sha)
-            )
-        if len(raw) != int(manifest["raw_size"]):
-            raise ValueError(
-                "raw size mismatch: expected {}, got {}".format(manifest["raw_size"], len(raw))
-            )
-
-        out_path = Path(output_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(raw)
-
-        return {
-            "success": True,
-            "artifact_id": manifest["artifact_id"],
-            "output_file": str(out_path),
-            "raw_size": len(raw),
-            "raw_sha256": raw_sha,
-            "compressed_sha256": compressed_sha,
-        }
+        return _transport_recover.recover_artifact_against_manifest(
+            transport=self,
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            output_file=output_file,
+            strict_payload_chars=strict_payload_chars,
+        )
 
     def verify_ocr_text(
         self,
@@ -554,15 +527,9 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
-        if not manifest_path:
-            return self._verify_ocr_text_without_manifest(
-                ocr_input_path=ocr_input_path,
-                strict_payload_chars=strict_payload_chars,
-            )
-
-        manifest = self._load_manifest(manifest_path)
-        return self._verify_ocr_text_against_manifest(
-            manifest=manifest,
+        return _transport_recover.verify_ocr_text(
+            transport=self,
+            manifest_path=manifest_path,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
         )
@@ -573,19 +540,12 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
-        encoded = self._recover_encoded_payload(manifest, ocr_input_path, strict_payload_chars)
-        compressed = _decode_safe_base32(encoded)
-        compressed_sha = _sha256_hex(compressed)
-
-        ok = compressed_sha == manifest["compressed_sha256"]
-        return {
-            "success": ok,
-            "artifact_id": manifest["artifact_id"],
-            "expected_compressed_sha256": manifest["compressed_sha256"],
-            "actual_compressed_sha256": compressed_sha,
-            "total_chunks": int(manifest["total_chunks"]),
-            "message": "verify ok" if ok else "verify failed",
-        }
+        return _transport_recover.verify_ocr_text_against_manifest(
+            transport=self,
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
 
     def analyze_ocr_text(
         self,
@@ -596,12 +556,9 @@ class AirgapTransportLayer(object):
         save_report_path: Optional[str] = None,
         emit_missing_file: Optional[str] = None,
     ) -> Dict[str, object]:
-        if manifest_path:
-            manifest = self._load_manifest(manifest_path)
-        else:
-            manifest = self._build_inferred_manifest_from_ocr(ocr_input_path)
-        return self._analyze_ocr_text_against_manifest(
-            manifest=manifest,
+        return _transport_recover.analyze_ocr_text(
+            transport=self,
+            manifest_path=manifest_path,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
             max_list=max_list,
@@ -618,59 +575,15 @@ class AirgapTransportLayer(object):
         save_report_path: Optional[str] = None,
         emit_missing_file: Optional[str] = None,
     ) -> Dict[str, object]:
-        parsed = self._parse_ocr_chunks(manifest, ocr_input_path, strict_payload_chars)
-        parity_recovered = self._apply_parity_recovery(manifest, parsed)
-        hash_resolved = self._resolve_conflicts_by_package_hash(manifest, parsed)
-        parity_recovered_after_hash = self._apply_parity_recovery(manifest, parsed)
-        total_chunks = int(manifest["total_chunks"])
-        self._downgrade_nonblocking_parity_conflicts(parsed, total_chunks)
-        parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
-        received_data_chunks, received_parity_chunks = self._count_chunk_presence(
-            parsed.get("chunks", {}), total_chunks
+        return _transport_recover.analyze_ocr_text_against_manifest(
+            transport=self,
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+            max_list=max_list,
+            save_report_path=save_report_path,
+            emit_missing_file=emit_missing_file,
         )
-
-        missing = parsed["missing_chunks"]
-        missing_records = self._build_missing_chunk_records(manifest, missing)
-        retake_plan = self._build_missing_chunk_retake_plan(missing_records)
-        cap = max(0, int(max_list))
-        recoverable = (
-            len(parsed["line_errors"]) == 0
-            and len(parsed["duplicate_conflicts"]) == 0
-            and len(missing) == 0
-        )
-        if recoverable and len(parsed["page_crc_errors"]) > 0:
-            message = "recoverable_with_page_crc_warnings"
-        else:
-            message = "recoverable" if recoverable else "not recoverable"
-        result = {
-            "success": recoverable,
-            "artifact_id": manifest["artifact_id"],
-            "expected_total_chunks": int(manifest["total_chunks"]),
-            "received_unique_chunks": received_data_chunks,
-            "received_parity_chunks": received_parity_chunks,
-            "missing_chunks_count": len(missing),
-            "missing_chunks_sample": missing[:cap],
-            "missing_chunk_locations_sample": missing_records[:cap],
-            "missing_chunk_retake_plan_sample": retake_plan[:cap],
-            "parity_recovered_count": len(parity_recovered) + len(parity_recovered_after_hash),
-            "parity_recovered_sample": (parity_recovered + parity_recovered_after_hash)[:cap],
-            "package_hash_resolved_count": len(hash_resolved),
-            "package_hash_resolved_sample": hash_resolved[:cap],
-            "line_error_count": len(parsed["line_errors"]),
-            "line_errors_sample": parsed["line_errors"][: min(20, cap)],
-            "line_warning_count": len(parsed["line_warnings"]),
-            "line_warnings_sample": parsed["line_warnings"][: min(20, cap)],
-            "page_crc_error_count": len(parsed["page_crc_errors"]),
-            "page_crc_errors": parsed["page_crc_errors"][: min(20, cap)],
-            "duplicate_conflict_count": len(parsed["duplicate_conflicts"]),
-            "duplicate_conflicts": parsed["duplicate_conflicts"][: min(20, cap)],
-            "message": message,
-        }
-        if emit_missing_file:
-            result["missing_file_path"] = _save_missing_chunks(emit_missing_file, missing_records)
-        if save_report_path:
-            result["report_path"] = _save_json(save_report_path, result)
-        return result
 
     def extract_text_from_images(
         self,
@@ -3347,19 +3260,11 @@ class AirgapTransportLayer(object):
         return best_text
 
     def _parse_ocr_chunks(self, manifest: Dict[str, object], ocr_input_path: str, strict_payload_chars: bool) -> Dict[str, object]:
-        total_chunks = int(manifest["total_chunks"])
-        line_index_mode = str(manifest.get("transport_line_index_mode", "full") or "full").strip().lower()
-        if line_index_mode == "off":
-            return self._parse_ocr_chunks_payload_only_manifest(
-                manifest=manifest,
-                ocr_input_path=ocr_input_path,
-                strict_payload_chars=strict_payload_chars,
-            )
-        return self._parse_ocr_chunks_with_total(
-            total_chunks=total_chunks,
+        return _transport_parser.parse_ocr_chunks(
+            transport=self,
+            manifest=manifest,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
-            line_index_mode=line_index_mode,
         )
 
     def _parse_ocr_chunks_payload_only_manifest(
@@ -3368,265 +3273,12 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         strict_payload_chars: bool,
     ) -> Dict[str, object]:
-        raw_lines = self._read_ocr_lines(ocr_input_path)
-        chunk_votes = {}
-        page_lines_for_crc = {}
-        page_meta_extra_for_crc = {}
-        page_meta = {}
-        page_crc_expect = {}
-        line_errors = []
-        line_warnings = []
-        current_page_no = 0
-
-        payload_rows = []
-        for source_line_no, raw in enumerate(raw_lines, 1):
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            if not line:
-                continue
-
-            meta_match = META_PATTERN.match(line)
-            if meta_match:
-                page_no = int(meta_match.group(2))
-                page_meta[page_no] = line
-                current_page_no = page_no
-                continue
-
-            if _parse_cfg_line(line):
-                if current_page_no > 0:
-                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
-                continue
-
-            if _parse_hash_fragment_line(line):
-                if current_page_no > 0:
-                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
-                continue
-            if _parse_hash_compact_line(line):
-                if current_page_no > 0:
-                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
-                continue
-
-            page_crc_match = PAGECRC_PATTERN.match(line)
-            if page_crc_match:
-                page_no = int(page_crc_match.group(1))
-                page_crc_expect[page_no] = page_crc_match.group(2)
-                current_page_no = 0
-                continue
-
-            has_crc = False
-            given_crc = ""
-            payload = ""
-            m = PAYLOAD_WITH_CRC_PATTERN.match(line)
-            if m:
-                has_crc = True
-                payload = _normalize_payload(m.group(1))
-                given_crc = _normalize_hex_token(m.group(3))
-            else:
-                mf = PAYLOAD_WITH_CRC_FALLBACK_PATTERN.match(line)
-                if mf:
-                    has_crc = True
-                    payload = _normalize_payload(mf.group(1))
-                    given_crc = _normalize_hex_token(mf.group(3))
-                    line_warnings.append(
-                        {
-                            "line_no": source_line_no,
-                            "reason": "payload_crc_fallback_pattern_used",
-                        }
-                    )
-                else:
-                    payload = _normalize_payload(line)
-
-            if strict_payload_chars:
-                invalid_chars = [ch for ch in payload if ch not in SAFE_BASE32_ALPHABET]
-                if invalid_chars:
-                    line_errors.append(
-                        {
-                            "line_no": source_line_no,
-                            "reason": "invalid_payload_chars",
-                            "chars": "".join(sorted(set(invalid_chars)))[:50],
-                        }
-                    )
-                    continue
-            else:
-                payload = "".join(ch for ch in payload if ch in SAFE_BASE32_ALPHABET)
-
-            if not payload:
-                line_warnings.append(
-                    {
-                        "line_no": source_line_no,
-                        "reason": "payload_only_empty_after_normalize",
-                    }
-                )
-                continue
-
-            payload_rows.append(
-                {
-                    "source_line_no": source_line_no,
-                    "payload": payload,
-                    "has_crc": bool(has_crc),
-                    "given_crc": given_crc,
-                }
-            )
-
-        ordered_entries = self._manifest_entries_in_transport_order(manifest)
-        if not ordered_entries:
-            total_chunks = int(manifest.get("total_chunks", 0) or 0)
-            ordered_entries = [{"page": 1, "line": idx + 1, "chunk_index": idx} for idx in range(total_chunks)]
-
-        if len(payload_rows) > len(ordered_entries):
-            line_warnings.append(
-                {
-                    "reason": "payload_rows_exceed_manifest_entries",
-                    "payload_rows": len(payload_rows),
-                    "manifest_entries": len(ordered_entries),
-                }
-            )
-
-        row_count = min(len(payload_rows), len(ordered_entries))
-        for idx in range(row_count):
-            row = payload_rows[idx]
-            entry = ordered_entries[idx]
-            chunk_idx = int(entry["chunk_index"])
-            page_no = int(entry.get("page", 0) or 0)
-            line_no = int(entry.get("line", idx + 1) or (idx + 1))
-            payload = str(row["payload"])
-            has_crc = bool(row["has_crc"])
-            given_crc = str(row["given_crc"])
-
-            core = "C{:05d}|{}".format(chunk_idx, payload)
-            expect_crc = _crc16_hex(core)
-            if has_crc and expect_crc != given_crc:
-                repaired = self._repair_payload_candidate_by_crc(
-                    payload=payload,
-                    core_prefix="C{:05d}|".format(chunk_idx),
-                    expected_crc=given_crc,
-                )
-                if repaired != payload:
-                    payload = repaired
-                    core = "C{:05d}|{}".format(chunk_idx, payload)
-                    expect_crc = _crc16_hex(core)
-                    if expect_crc == given_crc:
-                        line_warnings.append(
-                            {
-                                "line_no": int(row["source_line_no"]),
-                                "reason": "payload_crc_repaired",
-                                "chunk_idx": chunk_idx,
-                            }
-                        )
-                if has_crc and expect_crc != given_crc:
-                    line_errors.append(
-                        {
-                            "line_no": int(row["source_line_no"]),
-                            "reason": "line_crc_mismatch",
-                            "chunk_idx": chunk_idx,
-                            "expected_crc": expect_crc,
-                            "given_crc": given_crc,
-                        }
-                    )
-                    continue
-
-            votes = chunk_votes.setdefault(chunk_idx, {})
-            votes[payload] = votes.get(payload, 0) + 1
-            if has_crc:
-                page_lines_for_crc.setdefault(page_no, []).append(
-                    "P{:03d}L{:03d}|{}|{}".format(page_no, line_no, core, given_crc)
-                )
-            else:
-                page_lines_for_crc.setdefault(page_no, []).append(
-                    "P{:03d}L{:03d}|{}".format(page_no, line_no, core)
-                )
-
-        chunks = {}
-        duplicate_conflicts = []
-        for chunk_idx in sorted(chunk_votes.keys()):
-            votes = chunk_votes[chunk_idx]
-            ranked = sorted(votes.items(), key=lambda kv: (-int(kv[1]), kv[0]))
-            if not ranked:
-                continue
-            if len(ranked) == 1:
-                chunks[chunk_idx] = ranked[0][0]
-                continue
-
-            top_count = int(ranked[0][1])
-            top_payloads = [payload for payload, cnt in ranked if int(cnt) == top_count]
-            if len(top_payloads) == 1:
-                chosen = top_payloads[0]
-                chunks[chunk_idx] = chosen
-                line_warnings.append(
-                    {
-                        "reason": "duplicate_payload_resolved_by_majority",
-                        "chunk_idx": chunk_idx,
-                        "winner_votes": top_count,
-                        "total_votes": sum(int(v) for v in votes.values()),
-                    }
-                )
-                continue
-
-            duplicate_conflicts.append(
-                {
-                    "chunk_idx": chunk_idx,
-                    "reason": "duplicate_payload_tie",
-                    "candidates": [payload[:40] for payload in top_payloads[:5]],
-                    "votes": top_count,
-                }
-            )
-
-        page_crc_errors = []
-        for page_no, expect_crc in page_crc_expect.items():
-            header = page_meta.get(page_no)
-            lines = page_lines_for_crc.get(page_no, [])
-            if not header or not lines:
-                continue
-            base = [header]
-            base.extend(
-                sorted(
-                    page_meta_extra_for_crc.get(page_no, []),
-                    key=lambda item: (
-                        0
-                        if item.startswith("@CFG|")
-                        else 1
-                        if item.startswith("@HS1|")
-                        else 2
-                        if item.startswith("@HS2|")
-                        else 3
-                        if item.startswith("@RH1|")
-                        else 4
-                        if item.startswith("@RH2|")
-                        else 5
-                        if item.startswith("@CH1|")
-                        else 6
-                        if item.startswith("@CH2|")
-                        else 9,
-                        item,
-                    ),
-                )
-            )
-            base.extend(sorted(lines))
-            actual_crc = _crc16_hex("\n".join(base))
-            if actual_crc != expect_crc:
-                page_crc_errors.append(
-                    {
-                        "page_no": page_no,
-                        "expected_crc": expect_crc,
-                        "actual_crc": actual_crc,
-                    }
-                )
-
-        total_chunks = int(manifest.get("total_chunks", 0) or 0)
-        missing_chunks = [idx for idx in range(total_chunks) if idx not in chunks]
-        ordered_chunks = [chunks[idx] for idx in range(total_chunks) if idx in chunks]
-
-        return {
-            "chunks": chunks,
-            "ordered_chunks": ordered_chunks,
-            "line_errors": line_errors,
-            "line_warnings": line_warnings,
-            "duplicate_conflicts": duplicate_conflicts,
-            "page_crc_errors": page_crc_errors,
-            "missing_chunks": missing_chunks,
-            "page_meta_count": len(page_meta),
-            "page_crc_count": len(page_crc_expect),
-            "chunk_votes": chunk_votes,
-        }
+        return _transport_parser.parse_ocr_chunks_payload_only_manifest(
+            transport=self,
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
 
     def _parse_ocr_chunks_with_total(
         self,
@@ -3635,770 +3287,36 @@ class AirgapTransportLayer(object):
         strict_payload_chars: bool,
         line_index_mode: str = "full",
     ) -> Dict[str, object]:
-        raw_lines = self._read_ocr_lines(ocr_input_path)
-        chunk_votes = {}
-        page_lines_for_crc = {}
-        page_meta_extra_for_crc = {}
-        page_meta = {}
-        page_crc_expect = {}
-        line_errors = []
-        line_warnings = []
-        current_page_no = 0
-
-        for source_line_no, raw in enumerate(raw_lines, 1):
-            line = _normalize_ocr_line(raw)
-            if not line:
-                continue
-            line = _normalize_protocol_signature(line)
-
-            meta_match = META_PATTERN.match(line)
-            if meta_match:
-                page_no = int(meta_match.group(2))
-                page_meta[page_no] = line
-                current_page_no = page_no
-                continue
-
-            if _parse_cfg_line(line):
-                if current_page_no > 0:
-                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
-                continue
-
-            if _parse_hash_fragment_line(line):
-                if current_page_no > 0:
-                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
-                continue
-            if _parse_hash_compact_line(line):
-                if current_page_no > 0:
-                    page_meta_extra_for_crc.setdefault(current_page_no, []).append(line)
-                continue
-
-            page_crc_match = PAGECRC_PATTERN.match(line)
-            if page_crc_match:
-                page_no = int(page_crc_match.group(1))
-                page_crc_expect[page_no] = page_crc_match.group(2)
-                current_page_no = 0
-                continue
-
-            match = LINE_PATTERN.match(line)
-            match_no_crc = LINE_PATTERN_NOCRC.match(line) if (not match) else None
-            match_nosep_no_crc = (
-                LINE_PATTERN_NOSEP_NOCRC.match(line)
-                if (not match and not match_no_crc)
-                else None
-            )
-            match_nosep = (
-                LINE_PATTERN_NOSEP.match(line)
-                if (not match and not match_no_crc and not match_nosep_no_crc)
-                else None
-            )
-            chunk_match = (
-                CHUNK_PATTERN.match(line)
-                if (not match and not match_no_crc and not match_nosep and not match_nosep_no_crc)
-                else None
-            )
-            chunk_no_crc = (
-                CHUNK_PATTERN_NOCRC.match(line)
-                if (
-                    not match
-                    and not match_no_crc
-                    and not match_nosep
-                    and not match_nosep_no_crc
-                    and not chunk_match
-                )
-                else None
-            )
-            fallback_used = False
-            line_has_crc = False
-            line_index_kind = "full"
-            if not match and not match_no_crc and not match_nosep and not match_nosep_no_crc and not chunk_match and not chunk_no_crc:
-                fallback = LINE_PATTERN_FALLBACK.match(line)
-                fallback_no_crc = LINE_PATTERN_FALLBACK_NOCRC.match(line) if (not fallback) else None
-                chunk_fallback = CHUNK_PATTERN_FALLBACK.match(line) if (not fallback and not fallback_no_crc) else None
-                chunk_fallback_no_crc = (
-                    CHUNK_PATTERN_FALLBACK_NOCRC.match(line)
-                    if (not fallback and not fallback_no_crc and not chunk_fallback)
-                    else None
-                )
-                if fallback:
-                    fallback_used = True
-                    line_has_crc = True
-                    page_token = _normalize_page_line_token(fallback.group(1))
-                    line_token = _normalize_page_line_token(fallback.group(2))
-                    chunk_token = _normalize_digit_token(fallback.group(4))
-                    crc_token = _normalize_hex_token(fallback.group(6))
-                    try:
-                        page_no = int(page_token)
-                        line_no = int(line_token)
-                        chunk_idx = int(chunk_token)
-                    except Exception:
-                        line_warnings.append(
-                            {
-                                "line_no": source_line_no,
-                                "reason": "fallback_numeric_parse_failed",
-                                "content": line[:120],
-                            }
-                        )
-                        continue
-                    payload = _normalize_payload(fallback.group(5))
-                    given_crc = crc_token
-                elif fallback_no_crc:
-                    fallback_used = True
-                    line_has_crc = False
-                    page_token = _normalize_page_line_token(fallback_no_crc.group(1))
-                    line_token = _normalize_page_line_token(fallback_no_crc.group(2))
-                    chunk_token = _normalize_digit_token(fallback_no_crc.group(4))
-                    try:
-                        page_no = int(page_token)
-                        line_no = int(line_token)
-                        chunk_idx = int(chunk_token)
-                    except Exception:
-                        line_warnings.append(
-                            {
-                                "line_no": source_line_no,
-                                "reason": "fallback_numeric_parse_failed",
-                                "content": line[:120],
-                            }
-                        )
-                        continue
-                    payload = _normalize_payload(fallback_no_crc.group(5))
-                    given_crc = ""
-                elif chunk_fallback:
-                    fallback_used = True
-                    line_has_crc = True
-                    line_index_kind = "chunk"
-                    page_no = int(current_page_no) if current_page_no > 0 else 0
-                    line_no = int(source_line_no)
-                    chunk_token = _normalize_digit_token(chunk_fallback.group(1))
-                    try:
-                        chunk_idx = int(chunk_token)
-                    except Exception:
-                        line_warnings.append(
-                            {
-                                "line_no": source_line_no,
-                                "reason": "fallback_numeric_parse_failed",
-                                "content": line[:120],
-                            }
-                        )
-                        continue
-                    payload = _normalize_payload(chunk_fallback.group(3))
-                    given_crc = _normalize_hex_token(chunk_fallback.group(4))
-                elif chunk_fallback_no_crc:
-                    fallback_used = True
-                    line_has_crc = False
-                    line_index_kind = "chunk"
-                    page_no = int(current_page_no) if current_page_no > 0 else 0
-                    line_no = int(source_line_no)
-                    chunk_token = _normalize_digit_token(chunk_fallback_no_crc.group(1))
-                    try:
-                        chunk_idx = int(chunk_token)
-                    except Exception:
-                        line_warnings.append(
-                            {
-                                "line_no": source_line_no,
-                                "reason": "fallback_numeric_parse_failed",
-                                "content": line[:120],
-                            }
-                        )
-                        continue
-                    payload = _normalize_payload(chunk_fallback_no_crc.group(3))
-                    given_crc = ""
-                else:
-                    line_warnings.append(
-                        {
-                            "line_no": source_line_no,
-                            "reason": "unmatched_protocol_line",
-                            "content": line[:120],
-                        }
-                    )
-                    continue
-            elif match:
-                line_has_crc = True
-                page_no = int(match.group(1))
-                line_no = int(match.group(2))
-                chunk_idx = int(match.group(4))
-                payload = _normalize_payload(match.group(5))
-                given_crc = match.group(6)
-                line_index_kind = "full"
-            elif match_nosep_no_crc:
-                line_has_crc = False
-                page_no = int(_normalize_page_line_token(match_nosep_no_crc.group(1)))
-                line_no = int(_normalize_page_line_token(match_nosep_no_crc.group(2)))
-                chunk_idx = int(_normalize_digit_token(match_nosep_no_crc.group(3)))
-                payload = _normalize_payload(match_nosep_no_crc.group(4))
-                given_crc = ""
-                line_index_kind = "full"
-                possible_crc = _normalize_hex_token(payload[-4:]) if len(payload) >= 5 else ""
-                if len(possible_crc) == 4:
-                    payload_candidate = payload[:-4]
-                    core_candidate = "C{:05d}|{}".format(chunk_idx, payload_candidate)
-                    if payload_candidate and _crc16_hex(core_candidate) == possible_crc:
-                        payload = payload_candidate
-                        line_has_crc = True
-                        given_crc = possible_crc
-                line_warnings.append(
-                    {
-                        "line_no": source_line_no,
-                        "reason": "line_separator_missing",
-                        "chunk_idx": chunk_idx,
-                    }
-                )
-            elif match_nosep:
-                line_has_crc = True
-                page_no = int(_normalize_page_line_token(match_nosep.group(1)))
-                line_no = int(_normalize_page_line_token(match_nosep.group(2)))
-                chunk_idx = int(_normalize_digit_token(match_nosep.group(3)))
-                payload = _normalize_payload(match_nosep.group(4))
-                given_crc = _normalize_hex_token(match_nosep.group(5))
-                line_index_kind = "full"
-                line_warnings.append(
-                    {
-                        "line_no": source_line_no,
-                        "reason": "line_separator_missing",
-                        "chunk_idx": chunk_idx,
-                    }
-                )
-            elif chunk_match:
-                line_has_crc = True
-                line_index_kind = "chunk"
-                page_no = int(current_page_no) if current_page_no > 0 else 0
-                line_no = int(source_line_no)
-                chunk_idx = int(chunk_match.group(1))
-                payload = _normalize_payload(chunk_match.group(3))
-                given_crc = chunk_match.group(4)
-            elif chunk_no_crc:
-                line_has_crc = False
-                line_index_kind = "chunk"
-                page_no = int(current_page_no) if current_page_no > 0 else 0
-                line_no = int(source_line_no)
-                chunk_idx = int(chunk_no_crc.group(1))
-                payload = _normalize_payload(chunk_no_crc.group(3))
-                given_crc = ""
-            else:
-                line_has_crc = False
-                page_no = int(match_no_crc.group(1))
-                line_no = int(match_no_crc.group(2))
-                chunk_idx = int(match_no_crc.group(4))
-                payload = _normalize_payload(match_no_crc.group(5))
-                given_crc = ""
-                line_index_kind = "full"
-
-            if strict_payload_chars:
-                invalid_chars = [ch for ch in payload if ch not in SAFE_BASE32_ALPHABET]
-                if invalid_chars:
-                    line_errors.append(
-                        {
-                            "line_no": source_line_no,
-                            "reason": "invalid_payload_chars",
-                            "chunk_idx": chunk_idx,
-                            "chars": "".join(sorted(set(invalid_chars)))[:50],
-                        }
-                    )
-                    continue
-            else:
-                payload = "".join(ch for ch in payload if ch in SAFE_BASE32_ALPHABET)
-                if not payload:
-                    line_errors.append(
-                        {
-                            "line_no": source_line_no,
-                            "reason": "empty_payload_after_normalize",
-                            "chunk_idx": chunk_idx,
-                        }
-                    )
-                    continue
-
-            core = "C{:05d}|{}".format(chunk_idx, payload)
-            expect_crc = _crc16_hex(core)
-            if line_has_crc and expect_crc != given_crc:
-                repaired = self._repair_payload_candidate_by_crc(
-                    payload=payload,
-                    core_prefix="C{:05d}|".format(chunk_idx),
-                    expected_crc=given_crc,
-                )
-                if repaired != payload:
-                    payload = repaired
-                    core = "C{:05d}|{}".format(chunk_idx, payload)
-                    expect_crc = _crc16_hex(core)
-                    if expect_crc == given_crc:
-                        line_warnings.append(
-                            {
-                                "line_no": source_line_no,
-                                "reason": "payload_crc_repaired",
-                                "chunk_idx": chunk_idx,
-                            }
-                        )
-                if line_has_crc and expect_crc != given_crc:
-                    line_errors.append(
-                        {
-                            "line_no": source_line_no,
-                            "reason": "line_crc_mismatch",
-                            "chunk_idx": chunk_idx,
-                            "expected_crc": expect_crc,
-                            "given_crc": given_crc,
-                        }
-                    )
-                    continue
-
-            if fallback_used:
-                line_warnings.append(
-                    {
-                        "line_no": source_line_no,
-                        "reason": "fallback_line_pattern_used",
-                        "chunk_idx": chunk_idx,
-                    }
-                )
-            if not line_has_crc:
-                line_warnings.append(
-                    {
-                        "line_no": source_line_no,
-                        "reason": "line_crc_missing",
-                        "chunk_idx": chunk_idx,
-                    }
-                )
-
-            votes = chunk_votes.setdefault(chunk_idx, {})
-            votes[payload] = votes.get(payload, 0) + 1
-            if line_has_crc:
-                if line_index_kind == "chunk":
-                    page_lines_for_crc.setdefault(page_no, []).append("{}|{}".format(core, given_crc))
-                else:
-                    page_lines_for_crc.setdefault(page_no, []).append(
-                        "P{:03d}L{:03d}|{}|{}".format(page_no, line_no, core, given_crc)
-                    )
-            else:
-                if line_index_kind == "chunk":
-                    page_lines_for_crc.setdefault(page_no, []).append(core)
-                else:
-                    page_lines_for_crc.setdefault(page_no, []).append(
-                        "P{:03d}L{:03d}|{}".format(page_no, line_no, core)
-                    )
-
-        chunks = {}
-        duplicate_conflicts = []
-        for chunk_idx in sorted(chunk_votes.keys()):
-            votes = chunk_votes[chunk_idx]
-            ranked = sorted(votes.items(), key=lambda kv: (-int(kv[1]), kv[0]))
-            if not ranked:
-                continue
-            if len(ranked) == 1:
-                chunks[chunk_idx] = ranked[0][0]
-                continue
-
-            top_count = int(ranked[0][1])
-            top_payloads = [payload for payload, cnt in ranked if int(cnt) == top_count]
-            if len(top_payloads) == 1:
-                chosen = top_payloads[0]
-                chunks[chunk_idx] = chosen
-                line_warnings.append(
-                    {
-                        "reason": "duplicate_payload_resolved_by_majority",
-                        "chunk_idx": chunk_idx,
-                        "winner_votes": top_count,
-                        "total_votes": sum(int(v) for v in votes.values()),
-                    }
-                )
-                continue
-
-            duplicate_conflicts.append(
-                {
-                    "chunk_idx": chunk_idx,
-                    "reason": "duplicate_payload_tie",
-                    "candidates": [payload[:40] for payload in top_payloads[:5]],
-                    "votes": top_count,
-                }
-            )
-
-        page_crc_errors = []
-        for page_no, expect_crc in page_crc_expect.items():
-            header = page_meta.get(page_no)
-            lines = page_lines_for_crc.get(page_no, [])
-            if not header or not lines:
-                continue
-            base = [header]
-            base.extend(
-                sorted(
-                    page_meta_extra_for_crc.get(page_no, []),
-                    key=lambda item: (
-                        0 if item.startswith("@CFG|") else 1 if item.startswith("@HS1|") else 2 if item.startswith("@HS2|") else 3 if item.startswith("@RH1|") else 4 if item.startswith("@RH2|") else 5 if item.startswith("@CH1|") else 6 if item.startswith("@CH2|") else 9,
-                        item,
-                    ),
-                )
-            )
-            base.extend(sorted(lines))
-            actual_crc = _crc16_hex("\n".join(base))
-            if actual_crc != expect_crc:
-                page_crc_errors.append(
-                    {
-                        "page_no": page_no,
-                        "expected_crc": expect_crc,
-                        "actual_crc": actual_crc,
-                    }
-                )
-
-        missing_chunks = [idx for idx in range(total_chunks) if idx not in chunks]
-        ordered_chunks = [chunks[idx] for idx in range(total_chunks) if idx in chunks]
-
-        return {
-            "chunks": chunks,
-            "ordered_chunks": ordered_chunks,
-            "line_errors": line_errors,
-            "line_warnings": line_warnings,
-            "duplicate_conflicts": duplicate_conflicts,
-            "page_crc_errors": page_crc_errors,
-            "missing_chunks": missing_chunks,
-            "page_meta_count": len(page_meta),
-            "page_crc_count": len(page_crc_expect),
-            "chunk_votes": chunk_votes,
-        }
+        return _transport_parser.parse_ocr_chunks_with_total(
+            transport=self,
+            total_chunks=total_chunks,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+            line_index_mode=line_index_mode,
+        )
 
     def _choose_majority_metadata_value(self, label: str, votes: Dict[object, int]) -> Optional[object]:
-        if not votes:
-            return None
-        ranked = sorted(votes.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
-        if len(ranked) > 1 and int(ranked[0][1]) == int(ranked[1][1]) and ranked[0][0] != ranked[1][0]:
-            raise ValueError("conflicting {} values in OCR metadata: {}".format(label, [item[0] for item in ranked[:5]]))
-        return ranked[0][0]
+        return _transport_parser.choose_majority_metadata_value(label=label, votes=votes)
 
     def _scan_transport_metadata(self, ocr_input_path: str) -> Dict[str, object]:
-        raw_lines = self._read_ocr_lines(ocr_input_path)
-        artifact_votes: Dict[str, int] = {}
-        total_chunk_votes: Dict[int, int] = {}
-        total_page_votes: Dict[int, int] = {}
-        cfg_votes: Dict[str, Dict[int, int]] = {
-            "CC": {},
-            "LP": {},
-            "RC": {},
-            "IL": {},
-            "PG": {},
-            "CS": {},
-            "RS": {},
-        }
-        hash_votes: Dict[str, Dict[str, int]] = {
-            "RH1": {},
-            "RH2": {},
-            "CH1": {},
-            "CH2": {},
-        }
-        max_data_chunk_idx = -1
-        payload_only_candidates = 0
-        full_index_candidates = 0
-        chunk_index_candidates = 0
-
-        def _add_vote(bucket: Dict[object, int], value: object) -> None:
-            bucket[value] = bucket.get(value, 0) + 1
-
-        for raw in raw_lines:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            if not line:
-                continue
-
-            meta_match = META_PATTERN.match(line)
-            if meta_match:
-                _add_vote(artifact_votes, meta_match.group(1))
-                _add_vote(total_page_votes, int(meta_match.group(3)))
-                _add_vote(total_chunk_votes, int(meta_match.group(5)))
-                continue
-
-            cfg = _parse_cfg_line(line)
-            if cfg:
-                for key, value in cfg.items():
-                    _add_vote(cfg_votes[key], int(value))
-                continue
-
-            hash_fragment = _parse_hash_fragment_line(line)
-            if hash_fragment:
-                kind, part_no, fragment = hash_fragment
-                _add_vote(hash_votes["{}{}".format(kind, part_no)], fragment)
-                continue
-
-            hash_compact = _parse_hash_compact_line(line)
-            if hash_compact:
-                part_no, raw_fragment, compressed_fragment = hash_compact
-                _add_vote(hash_votes["RH{}".format(part_no)], raw_fragment)
-                _add_vote(hash_votes["CH{}".format(part_no)], compressed_fragment)
-                continue
-
-            match = LINE_PATTERN.match(line)
-            if match:
-                full_index_candidates += 1
-                chunk_idx = int(match.group(4))
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-            match_no_crc = LINE_PATTERN_NOCRC.match(line)
-            if match_no_crc:
-                full_index_candidates += 1
-                chunk_idx = int(match_no_crc.group(4))
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-            match_nosep_no_crc = LINE_PATTERN_NOSEP_NOCRC.match(line)
-            if match_nosep_no_crc:
-                full_index_candidates += 1
-                try:
-                    chunk_idx = int(_normalize_digit_token(match_nosep_no_crc.group(3)))
-                except Exception:
-                    chunk_idx = -1
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-            match_nosep = LINE_PATTERN_NOSEP.match(line)
-            if match_nosep:
-                full_index_candidates += 1
-                try:
-                    chunk_idx = int(_normalize_digit_token(match_nosep.group(3)))
-                except Exception:
-                    chunk_idx = -1
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-
-            chunk_match = CHUNK_PATTERN.match(line)
-            if chunk_match:
-                chunk_index_candidates += 1
-                chunk_idx = int(chunk_match.group(1))
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-            chunk_no_crc = CHUNK_PATTERN_NOCRC.match(line)
-            if chunk_no_crc:
-                chunk_index_candidates += 1
-                chunk_idx = int(chunk_no_crc.group(1))
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-
-            fallback = LINE_PATTERN_FALLBACK.match(line)
-            if fallback:
-                full_index_candidates += 1
-                try:
-                    chunk_idx = int(_normalize_digit_token(fallback.group(4)))
-                except Exception:
-                    continue
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-            fallback_no_crc = LINE_PATTERN_FALLBACK_NOCRC.match(line)
-            if fallback_no_crc:
-                full_index_candidates += 1
-                try:
-                    chunk_idx = int(_normalize_digit_token(fallback_no_crc.group(4)))
-                except Exception:
-                    continue
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-
-            chunk_fallback = CHUNK_PATTERN_FALLBACK.match(line)
-            if chunk_fallback:
-                chunk_index_candidates += 1
-                try:
-                    chunk_idx = int(_normalize_digit_token(chunk_fallback.group(1)))
-                except Exception:
-                    continue
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-            chunk_fallback_no_crc = CHUNK_PATTERN_FALLBACK_NOCRC.match(line)
-            if chunk_fallback_no_crc:
-                chunk_index_candidates += 1
-                try:
-                    chunk_idx = int(_normalize_digit_token(chunk_fallback_no_crc.group(1)))
-                except Exception:
-                    continue
-                if 0 <= chunk_idx < 90000:
-                    max_data_chunk_idx = max(max_data_chunk_idx, chunk_idx)
-                continue
-
-            if PAYLOAD_WITH_CRC_PATTERN.match(line) or PAYLOAD_WITH_CRC_FALLBACK_PATTERN.match(line):
-                payload_only_candidates += 1
-                continue
-            if line and (line[0] in SAFE_BASE32_ALPHABET):
-                payload_only_candidates += 1
-
-        artifact_id = self._choose_majority_metadata_value("artifact_id", artifact_votes)
-        total_chunks = self._choose_majority_metadata_value("total_chunks", total_chunk_votes)
-        total_pages = self._choose_majority_metadata_value("total_pages", total_page_votes)
-
-        metadata_source = "meta_header"
-        if total_chunks is None:
-            if max_data_chunk_idx >= 0:
-                total_chunks = max_data_chunk_idx + 1
-                metadata_source = "chunk_index_inference"
-            else:
-                if payload_only_candidates > 0:
-                    raise ValueError("cannot infer total chunks from payload-only OCR input without manifest")
-                raise ValueError("cannot infer total chunks from OCR input without manifest")
-
-        if artifact_id is None:
-            artifact_id = "UNKNOWN"
-
-        metadata = {
-            "artifact_id": str(artifact_id),
-            "total_chunks": int(total_chunks),
-            "total_pages": int(total_pages) if total_pages is not None else 0,
-            "metadata_source": metadata_source,
-        }
-        if payload_only_candidates > 0 and full_index_candidates == 0 and chunk_index_candidates == 0:
-            metadata["transport_line_index_mode"] = "off"
-        elif chunk_index_candidates > 0 and full_index_candidates == 0:
-            metadata["transport_line_index_mode"] = "chunk"
-        else:
-            metadata["transport_line_index_mode"] = "full"
-
-        for key, bucket in cfg_votes.items():
-            value = self._choose_majority_metadata_value(key, bucket)
-            if value is not None:
-                metadata[key] = int(value)
-
-        for key, bucket in hash_votes.items():
-            value = self._choose_majority_metadata_value(key, bucket)
-            if value is not None:
-                metadata[key] = str(value)
-
-        if all(key in metadata for key in ("RH1", "RH2", "CH1", "CH2", "CC", "LP", "RC", "IL", "PG", "CS", "RS")):
-            metadata["metadata_source"] = "embedded_headers"
-        return metadata
+        return _transport_parser.scan_transport_metadata(transport=self, ocr_input_path=ocr_input_path)
 
     def _build_inferred_manifest_from_ocr(self, ocr_input_path: str) -> Dict[str, object]:
-        metadata = self._scan_transport_metadata(ocr_input_path)
-        manifest: Dict[str, object] = {
-            "protocol_version": PROTOCOL_VERSION,
-            "artifact_id": metadata["artifact_id"],
-            "total_chunks": int(metadata["total_chunks"]),
-            "total_pages": int(metadata.get("total_pages", 0) or 0),
-            "lines_per_page": int(metadata.get("LP", self.lines_per_page) or self.lines_per_page),
-            "transport_line_index_mode": str(metadata.get("transport_line_index_mode", "full")),
-            "_metadata_source": metadata["metadata_source"],
-            "_embedded_metadata_complete": False,
-        }
-
-        required = ("RH1", "RH2", "CH1", "CH2", "CC", "LP", "RC", "IL", "PG", "CS", "RS")
-        if not all(key in metadata for key in required):
-            return manifest
-
-        chunk_chars = int(metadata["CC"])
-        compressed_size = int(metadata["CS"])
-        encoded_len = _safe_base32_encoded_length(compressed_size)
-        total_chunks = int(metadata["total_chunks"])
-        if chunk_chars <= 0:
-            return manifest
-
-        expected_total_chunks = int(math.ceil(float(encoded_len) / float(chunk_chars))) if encoded_len > 0 else 0
-        if expected_total_chunks != total_chunks:
-            manifest["_metadata_error"] = "embedded metadata chunk count mismatch"
-            return manifest
-
-        if total_chunks <= 0:
-            manifest["_metadata_error"] = "embedded metadata total_chunks must be > 0"
-            return manifest
-
-        last_chunk_len = encoded_len - (chunk_chars * (total_chunks - 1))
-        if last_chunk_len <= 0:
-            last_chunk_len = chunk_chars
-        chunk_lengths = [chunk_chars] * max(0, total_chunks - 1)
-        chunk_lengths.append(last_chunk_len)
-
-        parity_group_size = int(metadata["PG"])
-        manifest.update(
-            {
-                "compressed_sha256": (str(metadata["CH1"]) + str(metadata["CH2"])).lower(),
-                "raw_sha256": (str(metadata["RH1"]) + str(metadata["RH2"])).lower(),
-                "raw_size": int(metadata["RS"]),
-                "compressed_size": compressed_size,
-                "chunk_chars": chunk_chars,
-                "chunk_lengths": chunk_lengths,
-                "redundancy_copies": int(metadata["RC"]),
-                "interleave_enabled": bool(int(metadata["IL"])),
-                "parity": self._rebuild_parity_manifest(
-                    total_chunks=total_chunks,
-                    chunk_lengths=chunk_lengths,
-                    parity_group_size=parity_group_size,
-                ),
-                "_embedded_metadata_complete": True,
-            }
+        return _transport_parser.build_inferred_manifest_from_ocr(
+            transport=self,
+            ocr_input_path=ocr_input_path,
         )
-        return manifest
 
     def _verify_ocr_text_without_manifest(
         self,
         ocr_input_path: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
-        manifest = self._build_inferred_manifest_from_ocr(ocr_input_path)
-        if str(manifest.get("transport_line_index_mode", "full")) == "off":
-            raise ValueError("payload-only transport requires manifest for verify")
-        metadata_source = str(manifest.get("_metadata_source", "unknown"))
-        if manifest.get("_embedded_metadata_complete"):
-            encoded = self._recover_encoded_payload(manifest, ocr_input_path, strict_payload_chars)
-            compressed = _decode_safe_base32(encoded)
-            compressed_sha = _sha256_hex(compressed)
-            ok = compressed_sha == manifest["compressed_sha256"]
-            if not ok:
-                return {
-                    "success": False,
-                    "artifact_id": manifest["artifact_id"],
-                    "expected_compressed_sha256": manifest["compressed_sha256"],
-                    "actual_compressed_sha256": compressed_sha,
-                    "expected_total_chunks": int(manifest["total_chunks"]),
-                    "metadata_source": metadata_source,
-                    "verification_mode": "embedded_metadata",
-                    "message": "verify failed via embedded page metadata",
-                }
-
-            raw = zlib.decompress(compressed)
-            raw_sha = _sha256_hex(raw)
-            if raw_sha != manifest["raw_sha256"]:
-                raise ValueError(
-                    "raw sha256 mismatch from embedded metadata: expected {}, got {}".format(
-                        manifest["raw_sha256"], raw_sha
-                    )
-                )
-            if len(raw) != int(manifest["raw_size"]):
-                raise ValueError(
-                    "raw size mismatch from embedded metadata: expected {}, got {}".format(
-                        manifest["raw_size"], len(raw)
-                    )
-                )
-
-            return {
-                "success": True,
-                "artifact_id": manifest["artifact_id"],
-                "expected_total_chunks": int(manifest["total_chunks"]),
-                "raw_size": len(raw),
-                "raw_sha256": raw_sha,
-                "expected_compressed_sha256": manifest["compressed_sha256"],
-                "actual_compressed_sha256": compressed_sha,
-                "metadata_source": metadata_source,
-                "verification_mode": "embedded_metadata",
-                "message": "verify ok via embedded page metadata",
-            }
-
-        total_chunks = int(manifest["total_chunks"])
-        parsed = self._parse_ocr_chunks_with_total(
-            total_chunks=total_chunks,
+        return _transport_recover.verify_ocr_text_without_manifest(
+            transport=self,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
         )
-        self._resolve_conflicts_by_structure(parsed=parsed, total_chunks=total_chunks)
-        parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
-        self._raise_parse_errors(parsed, total_chunks)
-
-        encoded = "".join(parsed["chunks"][i] for i in range(total_chunks))
-        compressed = _decode_safe_base32(encoded)
-        raw = zlib.decompress(compressed)
-
-        return {
-            "success": True,
-            "artifact_id": manifest["artifact_id"],
-            "expected_total_chunks": total_chunks,
-            "received_unique_chunks": len(parsed["chunks"]),
-            "raw_size": len(raw),
-            "raw_sha256": _sha256_hex(raw),
-            "metadata_source": metadata_source,
-            "verification_mode": "structural_only",
-            "message": "structural verify ok without manifest; sha comparison unavailable",
-            "warning": "manifest not provided and embedded metadata was incomplete; verification is structural only",
-        }
 
     def _recover_artifact_without_manifest(
         self,
@@ -4406,277 +3324,28 @@ class AirgapTransportLayer(object):
         output_file: str,
         strict_payload_chars: bool = False,
     ) -> Dict[str, object]:
-        manifest = self._build_inferred_manifest_from_ocr(ocr_input_path)
-        if str(manifest.get("transport_line_index_mode", "full")) == "off":
-            raise ValueError("payload-only transport requires manifest for recover")
-        metadata_source = str(manifest.get("_metadata_source", "unknown"))
-        if manifest.get("_embedded_metadata_complete"):
-            result = self._recover_artifact_against_manifest(
-                manifest=manifest,
-                ocr_input_path=ocr_input_path,
-                output_file=output_file,
-                strict_payload_chars=strict_payload_chars,
-            )
-            result["metadata_source"] = metadata_source
-            result["verification_mode"] = "embedded_metadata"
-            result["message"] = "recovered without manifest via embedded page metadata"
-            return result
-
-        total_chunks = int(manifest["total_chunks"])
-        parsed = self._parse_ocr_chunks_with_total(
-            total_chunks=total_chunks,
+        return _transport_recover.recover_artifact_without_manifest(
+            transport=self,
             ocr_input_path=ocr_input_path,
+            output_file=output_file,
             strict_payload_chars=strict_payload_chars,
         )
-        self._resolve_conflicts_by_structure(parsed=parsed, total_chunks=total_chunks)
-        parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
-        self._raise_parse_errors(parsed, total_chunks)
-
-        encoded = "".join(parsed["chunks"][i] for i in range(total_chunks))
-        compressed = _decode_safe_base32(encoded)
-        raw = zlib.decompress(compressed)
-
-        out_path = Path(output_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(raw)
-
-        return {
-            "success": True,
-            "artifact_id": manifest["artifact_id"],
-            "output_file": str(out_path),
-            "raw_size": len(raw),
-            "raw_sha256": _sha256_hex(raw),
-            "compressed_sha256": _sha256_hex(compressed),
-            "metadata_source": metadata_source,
-            "verification_mode": "structural_only",
-            "message": "recovered without manifest",
-            "warning": "manifest not provided and embedded metadata was incomplete; parity recovery and end-to-end sha verification were unavailable",
-        }
 
     def _build_missing_chunk_records(
         self, manifest: Dict[str, object], missing_chunks: List[int]
     ) -> List[Dict[str, int]]:
-        records = []
-        handled = set()
-        chunk_locations = manifest.get("chunk_locations")
-        if isinstance(chunk_locations, dict):
-            for idx in missing_chunks:
-                key = str(int(idx))
-                raw_locations = chunk_locations.get(key, [])
-                parsed_locations = []
-                if isinstance(raw_locations, list):
-                    for item in raw_locations:
-                        if not isinstance(item, dict):
-                            continue
-                        try:
-                            parsed_locations.append(
-                                {
-                                    "page": int(item.get("page", 0)),
-                                    "line": int(item.get("line", 0)),
-                                    "copy": int(item.get("copy", 0)),
-                                    "priority": int(item.get("priority", 0)),
-                                }
-                            )
-                        except Exception:
-                            continue
-                if parsed_locations:
-                    parsed_locations.sort(
-                        key=lambda x: (
-                            int(x.get("priority", 0)),
-                            int(x.get("copy", 0)),
-                            int(x.get("page", 0)),
-                            int(x.get("line", 0)),
-                        )
-                    )
-                    for item in parsed_locations:
-                        records.append(
-                            {
-                                "chunk_index": int(idx),
-                                "page": int(item["page"]),
-                                "line": int(item["line"]),
-                                "copy": int(item["copy"]),
-                                "priority": int(item["priority"]),
-                            }
-                        )
-                    handled.add(int(idx))
-                    continue
-
-        lines_per_page = int(manifest.get("lines_per_page", self.lines_per_page))
-        if lines_per_page <= 0:
-            lines_per_page = self.lines_per_page
-        for idx in missing_chunks:
-            if int(idx) in handled:
-                continue
-            page = (int(idx) // lines_per_page) + 1
-            line = (int(idx) % lines_per_page) + 1
-            records.append(
-                {
-                    "chunk_index": int(idx),
-                    "page": page,
-                    "line": line,
-                    "copy": 1,
-                    "priority": 1,
-                }
-            )
-        return records
+        return _transport_parser.build_missing_chunk_records(
+            transport=self, manifest=manifest, missing_chunks=missing_chunks
+        )
 
     def _build_missing_chunk_retake_plan(self, records: List[Dict[str, int]]) -> List[Dict[str, int]]:
-        """
-        Pick one highest-priority retake point for each missing chunk.
-        """
-        chosen = {}
-        for item in records:
-            chunk_idx = int(item.get("chunk_index", -1))
-            if chunk_idx < 0:
-                continue
-            current = chosen.get(chunk_idx)
-            if current is None:
-                chosen[chunk_idx] = item
-                continue
-            old_key = (
-                int(current.get("priority", 0)),
-                int(current.get("copy", 0)),
-                int(current.get("page", 0)),
-                int(current.get("line", 0)),
-            )
-            new_key = (
-                int(item.get("priority", 0)),
-                int(item.get("copy", 0)),
-                int(item.get("page", 0)),
-                int(item.get("line", 0)),
-            )
-            if new_key < old_key:
-                chosen[chunk_idx] = item
-
-        plan = [chosen[k] for k in sorted(chosen.keys())]
-        return plan
+        return _transport_parser.build_missing_chunk_retake_plan(records)
 
     def _count_chunk_presence(self, chunks: object, total_chunks: int) -> Tuple[int, int]:
-        data_count = 0
-        parity_count = 0
-        if not isinstance(chunks, dict):
-            return data_count, parity_count
-        for chunk_idx in chunks.keys():
-            try:
-                idx = int(chunk_idx)
-            except Exception:
-                continue
-            if 0 <= idx < total_chunks:
-                data_count += 1
-            else:
-                parity_count += 1
-        return data_count, parity_count
+        return _transport_parser.count_chunk_presence(chunks=chunks, total_chunks=total_chunks)
 
     def _apply_parity_recovery(self, manifest: Dict[str, object], parsed: Dict[str, object]) -> List[int]:
-        """
-        Try to recover missing data chunks from parity groups.
-        Returns recovered chunk indices.
-        """
-        parity = manifest.get("parity")
-        if not isinstance(parity, dict) or not parity.get("enabled"):
-            return []
-        groups = parity.get("groups")
-        if not isinstance(groups, list):
-            return []
-        chunk_lengths = manifest.get("chunk_lengths")
-        if not isinstance(chunk_lengths, list):
-            return []
-
-        chunks = parsed.get("chunks", {})
-        if not isinstance(chunks, dict):
-            return []
-
-        recovered = []
-        recovered_set = set()
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            data_indices_raw = group.get("data_chunk_indices", [])
-            if not isinstance(data_indices_raw, list):
-                continue
-            try:
-                data_indices = [int(v) for v in data_indices_raw]
-            except Exception:
-                continue
-            try:
-                parity_idx = int(group.get("parity_chunk_index"))
-            except Exception:
-                continue
-
-            parity_payload = chunks.get(parity_idx)
-            if not isinstance(parity_payload, str) or not parity_payload:
-                continue
-
-            missing_data = [idx for idx in data_indices if idx not in chunks]
-            if len(missing_data) != 1:
-                continue
-
-            missing_idx = int(missing_data[0])
-            if missing_idx < 0 or missing_idx >= len(chunk_lengths):
-                continue
-            expected_len = int(chunk_lengths[missing_idx])
-            parity_len = int(group.get("parity_len", len(parity_payload)))
-            if parity_len <= 0:
-                continue
-
-            vals = [0] * parity_len
-            usable_parity = parity_payload[:parity_len]
-            for pos, ch in enumerate(usable_parity):
-                if ch not in SAFE_CHAR_TO_VAL:
-                    vals = []
-                    break
-                vals[pos] = SAFE_CHAR_TO_VAL[ch]
-            if not vals:
-                continue
-
-            ok = True
-            for idx in data_indices:
-                if idx == missing_idx:
-                    continue
-                payload = chunks.get(idx)
-                if not isinstance(payload, str):
-                    ok = False
-                    break
-                for pos, ch in enumerate(payload[:parity_len]):
-                    if ch not in SAFE_CHAR_TO_VAL:
-                        ok = False
-                        break
-                    vals[pos] ^= SAFE_CHAR_TO_VAL[ch]
-                if not ok:
-                    break
-            if not ok:
-                continue
-
-            candidate = "".join(SAFE_BASE32_ALPHABET[v] for v in vals)
-            candidate = candidate[:expected_len]
-            if not candidate:
-                continue
-
-            existing = chunks.get(missing_idx)
-            if isinstance(existing, str) and existing and existing != candidate:
-                parsed.setdefault("duplicate_conflicts", []).append(
-                    {
-                        "chunk_idx": missing_idx,
-                        "existing": existing[:40],
-                        "new": candidate[:40],
-                        "reason": "parity_recover_conflict",
-                    }
-                )
-                continue
-
-            chunks[missing_idx] = candidate
-            if missing_idx not in recovered_set:
-                recovered.append(missing_idx)
-                recovered_set.add(missing_idx)
-                parsed.setdefault("line_warnings", []).append(
-                    {
-                        "reason": "chunk_recovered_by_parity",
-                        "chunk_idx": missing_idx,
-                        "parity_chunk_idx": parity_idx,
-                    }
-                )
-        recovered.sort()
-        return recovered
+        return _transport_parser.apply_parity_recovery(manifest=manifest, parsed=parsed)
 
     def _analyze_score_tuple(self, analyze: Dict[str, object]) -> Tuple[int, int, int, int, int, int]:
         """
@@ -4694,33 +3363,9 @@ class AirgapTransportLayer(object):
     def _downgrade_nonblocking_parity_conflicts(
         self, parsed: Dict[str, object], total_chunks: int
     ) -> None:
-        duplicate_conflicts = parsed.get("duplicate_conflicts", [])
-        if not isinstance(duplicate_conflicts, list) or not duplicate_conflicts:
-            return
-
-        blocking = []
-        ignored = []
-        for item in duplicate_conflicts:
-            if not isinstance(item, dict):
-                continue
-            try:
-                chunk_idx = int(item.get("chunk_idx", -1))
-            except Exception:
-                chunk_idx = -1
-            if 0 <= chunk_idx < int(total_chunks):
-                blocking.append(item)
-            else:
-                ignored.append(chunk_idx)
-
-        if ignored:
-            parsed.setdefault("line_warnings", []).append(
-                {
-                    "reason": "parity_duplicate_conflicts_ignored",
-                    "count": len(ignored),
-                    "chunk_indices": ignored[:20],
-                }
-            )
-        parsed["duplicate_conflicts"] = blocking
+        return _transport_parser.downgrade_nonblocking_parity_conflicts(
+            parsed=parsed, total_chunks=total_chunks
+        )
 
     def _resolve_conflicts_by_package_hash(
         self,
@@ -4729,82 +3374,13 @@ class AirgapTransportLayer(object):
         max_conflicts: int = 12,
         max_attempts: int = 20000,
     ) -> List[int]:
-        duplicate_conflicts = parsed.get("duplicate_conflicts", [])
-        chunk_votes = parsed.get("chunk_votes", {})
-        if not isinstance(duplicate_conflicts, list) or not duplicate_conflicts:
-            return []
-        if not isinstance(chunk_votes, dict):
-            return []
-
-        conflict_items = []
-        for item in duplicate_conflicts:
-            if not isinstance(item, dict):
-                continue
-            try:
-                chunk_idx = int(item.get("chunk_idx"))
-            except Exception:
-                continue
-            votes = chunk_votes.get(chunk_idx)
-            if not isinstance(votes, dict) or not votes:
-                continue
-            ranked = sorted(votes.items(), key=lambda kv: (-int(kv[1]), kv[0]))
-            if not ranked:
-                continue
-            top_count = int(ranked[0][1])
-            candidates = [payload for payload, count in ranked if int(count) == top_count]
-            if len(candidates) < 2:
-                continue
-            conflict_items.append((chunk_idx, candidates))
-
-        if not conflict_items or len(conflict_items) > int(max_conflicts):
-            return []
-
-        total_chunks = int(manifest["total_chunks"])
-        base_chunks = dict(parsed.get("chunks", {}))
-        attempts = 0
-        for payload_combo in itertools.product(*[item[1] for item in conflict_items]):
-            attempts += 1
-            if attempts > int(max_attempts):
-                break
-
-            test_parsed = {
-                "chunks": dict(base_chunks),
-                "duplicate_conflicts": [],
-                "line_warnings": [],
-            }
-            for pair, payload in zip(conflict_items, payload_combo):
-                test_parsed["chunks"][pair[0]] = payload
-
-            self._apply_parity_recovery(manifest, test_parsed)
-            if any(idx not in test_parsed["chunks"] for idx in range(total_chunks)):
-                continue
-
-            try:
-                encoded = "".join(test_parsed["chunks"][idx] for idx in range(total_chunks))
-                compressed = _decode_safe_base32(encoded)
-                if _sha256_hex(compressed) != manifest["compressed_sha256"]:
-                    continue
-                raw = zlib.decompress(compressed)
-            except Exception:
-                continue
-
-            if _sha256_hex(raw) != manifest["raw_sha256"]:
-                continue
-            if len(raw) != int(manifest["raw_size"]):
-                continue
-
-            parsed["chunks"] = test_parsed["chunks"]
-            parsed["duplicate_conflicts"] = []
-            parsed.setdefault("line_warnings", []).append(
-                {
-                    "reason": "duplicate_conflicts_resolved_by_package_hash",
-                    "resolved_count": len(conflict_items),
-                    "attempts": attempts,
-                }
-            )
-            return [pair[0] for pair in conflict_items]
-
-        return []
+        return _transport_parser.resolve_conflicts_by_package_hash(
+            transport=self,
+            manifest=manifest,
+            parsed=parsed,
+            max_conflicts=max_conflicts,
+            max_attempts=max_attempts,
+        )
 
     def _resolve_conflicts_by_structure(
         self,
@@ -4813,780 +3389,57 @@ class AirgapTransportLayer(object):
         max_conflicts: int = 10,
         max_attempts: int = 20000,
     ) -> List[int]:
-        duplicate_conflicts = parsed.get("duplicate_conflicts", [])
-        chunk_votes = parsed.get("chunk_votes", {})
-        if not isinstance(duplicate_conflicts, list) or not duplicate_conflicts:
-            return []
-        if not isinstance(chunk_votes, dict):
-            return []
-
-        conflict_items = []
-        for item in duplicate_conflicts:
-            if not isinstance(item, dict):
-                continue
-            try:
-                chunk_idx = int(item.get("chunk_idx"))
-            except Exception:
-                continue
-            votes = chunk_votes.get(chunk_idx)
-            if not isinstance(votes, dict) or not votes:
-                continue
-            ranked = sorted(votes.items(), key=lambda kv: (-int(kv[1]), kv[0]))
-            if not ranked:
-                continue
-            top_count = int(ranked[0][1])
-            candidates = [payload for payload, count in ranked if int(count) == top_count]
-            if len(candidates) < 2:
-                continue
-            conflict_items.append((chunk_idx, candidates))
-
-        if not conflict_items or len(conflict_items) > int(max_conflicts):
-            return []
-
-        base_chunks = dict(parsed.get("chunks", {}))
-        attempts = 0
-        winners = []
-        for payload_combo in itertools.product(*[item[1] for item in conflict_items]):
-            attempts += 1
-            if attempts > int(max_attempts):
-                break
-            test_chunks = dict(base_chunks)
-            for pair, payload in zip(conflict_items, payload_combo):
-                test_chunks[pair[0]] = payload
-            if any(idx not in test_chunks for idx in range(int(total_chunks))):
-                continue
-            try:
-                encoded = "".join(test_chunks[idx] for idx in range(int(total_chunks)))
-                compressed = _decode_safe_base32(encoded)
-                zlib.decompress(compressed)
-            except Exception:
-                continue
-            winners.append(test_chunks)
-            if len(winners) > 1:
-                break
-
-        if len(winners) != 1:
-            return []
-
-        parsed["chunks"] = winners[0]
-        resolved = [pair[0] for pair in conflict_items]
-        parsed["duplicate_conflicts"] = [
-            item
-            for item in duplicate_conflicts
-            if isinstance(item, dict) and int(item.get("chunk_idx", -1)) not in set(resolved)
-        ]
-        parsed.setdefault("line_warnings", []).append(
-            {
-                "reason": "duplicate_conflicts_resolved_by_structure",
-                "resolved_count": len(resolved),
-                "attempts": attempts,
-            }
+        return _transport_parser.resolve_conflicts_by_structure(
+            parsed=parsed,
+            total_chunks=total_chunks,
+            max_conflicts=max_conflicts,
+            max_attempts=max_attempts,
         )
-        return resolved
 
     def _raise_parse_errors(self, parsed: Dict[str, object], total_chunks: int) -> None:
-        line_errors = parsed["line_errors"]
-        dup = parsed["duplicate_conflicts"]
-        missing = parsed["missing_chunks"]
-
-        if line_errors:
-            first = line_errors[0]
-            raise ValueError(
-                "line parse errors count={} first={}".format(
-                    len(line_errors), json.dumps(first, ensure_ascii=False, sort_keys=True)
-                )
-            )
-
-        if dup:
-            first = dup[0]
-            raise ValueError(
-                "duplicate chunk conflicts count={} first={}".format(
-                    len(dup), json.dumps(first, ensure_ascii=False, sort_keys=True)
-                )
-            )
-
-        if missing:
-            sample = ",".join(str(i) for i in missing[:30])
-            raise ValueError(
-                "missing chunks count={} total={} sample={} (run `analyze` for full report)".format(
-                    len(missing), total_chunks, sample
-                )
-            )
+        return _transport_parser.raise_parse_errors(parsed=parsed, total_chunks=total_chunks)
 
     def _recover_encoded_payload(
         self, manifest: Dict[str, object], ocr_input_path: str, strict_payload_chars: bool
     ) -> str:
-        total_chunks = int(manifest["total_chunks"])
-        parsed = self._parse_ocr_chunks(manifest, ocr_input_path, strict_payload_chars)
-        self._apply_parity_recovery(manifest, parsed)
-        self._resolve_conflicts_by_package_hash(manifest, parsed)
-        self._apply_parity_recovery(manifest, parsed)
-        self._downgrade_nonblocking_parity_conflicts(parsed, total_chunks)
-        parsed["missing_chunks"] = [idx for idx in range(total_chunks) if idx not in parsed["chunks"]]
-        self._raise_parse_errors(parsed, total_chunks)
-        ordered = [parsed["chunks"][i] for i in range(total_chunks)]
-        return "".join(ordered)
+        return _transport_recover.recover_encoded_payload(
+            transport=self,
+            manifest=manifest,
+            ocr_input_path=ocr_input_path,
+            strict_payload_chars=strict_payload_chars,
+        )
 
     def _load_font(self, size: int):
         if not PIL_AVAILABLE:
             raise RuntimeError("Pillow is not available")
-
-        pil_font_candidates = []
-        try:
-            pil_dir = Path(ImageFont.__file__).resolve().parent
-            pil_font_candidates.extend(
-                [
-                    str(pil_dir / "fonts" / "DejaVuSansMono.ttf"),
-                    str(pil_dir / "fonts" / "DejaVuSans.ttf"),
-                ]
-            )
-        except Exception:
-            pass
-
-        candidates = [
-            "CascadiaMono.ttf",
-            "Consola.ttf",
-            "Courier New.ttf",
-            "cour.ttf",
-            "OCRAEXT.TTF",
-            "DejaVuSansMono.ttf",
-            "DejaVuSans.ttf",
-        ]
-        for name in candidates + pil_font_candidates:
-            try:
-                return ImageFont.truetype(name, size=size)
-            except Exception:
-                continue
-        try:
-            return ImageFont.load_default(size=int(size))  # Pillow>=10
-        except Exception:
-            return ImageFont.load_default()
+        return _transport_render.load_font(size=size, image_font_module=ImageFont)
 
     def _render_page(self, lines: List[str], output_path: Path) -> Dict[str, object]:
-        width, height = self.page_size
-        img = Image.new("RGB", (width, height), "white")
-        draw = ImageDraw.Draw(img)
-
-        def _parse_render_data_line(text: str, fallback_line_no: int) -> Optional[Dict[str, object]]:
-            if not text or text.startswith("@"):
-                return None
-
-            match = LINE_PATTERN.match(text) or LINE_PATTERN_NOCRC.match(text)
-            if match:
-                return {
-                    "mode": "full",
-                    "page_no": int(match.group(1)),
-                    "line_no": int(match.group(2)),
-                    "chunk_idx": int(match.group(4)),
-                    "payload": str(match.group(5)),
-                    "expected_crc": str(match.group(6)) if match.re == LINE_PATTERN else "",
-                }
-
-            match_chunk = CHUNK_PATTERN.match(text) or CHUNK_PATTERN_NOCRC.match(text)
-            if match_chunk:
-                return {
-                    "mode": "chunk",
-                    "page_no": 0,
-                    "line_no": int(fallback_line_no),
-                    "chunk_idx": int(match_chunk.group(1)),
-                    "payload": str(match_chunk.group(3)),
-                    "expected_crc": str(match_chunk.group(4)) if match_chunk.re == CHUNK_PATTERN else "",
-                }
-
-            payload_with_crc = PAYLOAD_WITH_CRC_PATTERN.match(text)
-            if payload_with_crc:
-                return {
-                    "mode": "payload",
-                    "page_no": 0,
-                    "line_no": int(fallback_line_no),
-                    "chunk_idx": -1,
-                    "payload": str(payload_with_crc.group(1)),
-                    "expected_crc": str(payload_with_crc.group(3)),
-                }
-            payload_with_crc_fb = PAYLOAD_WITH_CRC_FALLBACK_PATTERN.match(text)
-            if payload_with_crc_fb:
-                return {
-                    "mode": "payload",
-                    "page_no": 0,
-                    "line_no": int(fallback_line_no),
-                    "chunk_idx": -1,
-                    "payload": str(payload_with_crc_fb.group(1)),
-                    "expected_crc": _normalize_hex_token(str(payload_with_crc_fb.group(3))),
-                }
-
-            if all(ch in SAFE_BASE32_ALPHABET for ch in text):
-                return {
-                    "mode": "payload",
-                    "page_no": 0,
-                    "line_no": int(fallback_line_no),
-                    "chunk_idx": -1,
-                    "payload": str(text),
-                    "expected_crc": "",
-                }
-            return None
-
-        parsed_render_lines: List[Optional[Dict[str, object]]] = []
-        for idx, line in enumerate(lines, 1):
-            parsed_render_lines.append(_parse_render_data_line(line, idx))
-
-        data_lines = [line for idx, line in enumerate(lines) if parsed_render_lines[idx] is not None]
-        control_lines = [line for idx, line in enumerate(lines) if parsed_render_lines[idx] is None]
-        max_data_len = max((len(line) for line in data_lines), default=0)
-        max_control_len = max((len(line) for line in control_lines), default=0)
-
-        usable_w = width - (self.margin * 2)
-        usable_h = height - (self.margin * 2)
-        sidecar_reserved_w = 0
-        if data_lines and self.render_sidecar:
-            sidecar_reserved_w = (
-                SIDECAR_BITS_PER_ROW * SIDECAR_CELL_SIZE
-                + (SIDECAR_BITS_PER_ROW - 1) * SIDECAR_CELL_GAP
-                + 24
-            )
-        data_usable_w = max(120, usable_w - sidecar_reserved_w)
-
-        base_size = max(16, int(self.font_size))
-        if self.font_fit_mode == "fixed":
-            max_candidate_size = base_size
-            min_candidate_size = base_size
-        elif self.font_fit_mode == "fit":
-            max_candidate_size = max(base_size + 24, min(int(self.font_max_size), base_size * 3))
-            min_candidate_size = 12
-        else:
-            # target mode: prefer --font-size exactly, only shrink when layout overflows.
-            max_candidate_size = base_size
-            min_candidate_size = 12
-
-        data_font_size = base_size
-        control_font_size = max(12, int(round(base_size * 0.62)))
-        data_font = self._load_font(data_font_size)
-        control_font = self._load_font(control_font_size)
-        data_line_h = draw.textbbox((0, 0), "Mg", font=data_font)[3] + self.line_gap
-        control_line_gap = max(2, int(round(self.line_gap * 0.45)))
-        control_line_h = draw.textbbox((0, 0), "Mg", font=control_font)[3] + control_line_gap
-
-        for candidate_size in range(max_candidate_size, min_candidate_size - 1, -2):
-            candidate_data_font = self._load_font(candidate_size)
-            candidate_control_size = max(12, int(round(candidate_size * 0.62)))
-            candidate_control_font = self._load_font(candidate_control_size)
-            candidate_data_line_h = (
-                draw.textbbox((0, 0), "Mg", font=candidate_data_font)[3] + self.line_gap
-            )
-            candidate_control_line_h = (
-                draw.textbbox((0, 0), "Mg", font=candidate_control_font)[3] + control_line_gap
-            )
-            candidate_data_char_w = draw.textbbox((0, 0), "M", font=candidate_data_font)[2]
-            candidate_control_char_w = draw.textbbox((0, 0), "M", font=candidate_control_font)[2]
-
-            fits_w = (
-                (max_data_len * candidate_data_char_w <= data_usable_w if max_data_len > 0 else True)
-                and (max_control_len * candidate_control_char_w <= usable_w if max_control_len > 0 else True)
-            )
-            fits_h = (
-                (len(data_lines) * candidate_data_line_h)
-                + (len(control_lines) * candidate_control_line_h)
-            ) <= usable_h
-            if fits_w and fits_h:
-                data_font_size = candidate_size
-                control_font_size = candidate_control_size
-                data_font = candidate_data_font
-                control_font = candidate_control_font
-                data_line_h = candidate_data_line_h
-                control_line_h = candidate_control_line_h
-                break
-
-        x = self.margin
-        y = self.margin
-        layout_lines = []
-        for idx, line in enumerate(lines):
-            parsed_line = parsed_render_lines[idx]
-            is_data = bool(parsed_line)
-            line_font = data_font if is_data else control_font
-            line_h = data_line_h if is_data else control_line_h
-            line_color = "black" if is_data else (20, 20, 20)
-
-            draw.text((x, y), line, fill=line_color, font=line_font)
-            text_bbox = draw.textbbox((x, y), line, font=line_font)
-            line_box = [
-                int(max(0, text_bbox[0] - 8)),
-                int(max(0, y - 4)),
-                int(min(width, text_bbox[2] + 8)),
-                int(min(height, y + line_h + 4)),
-            ]
-
-            meta = {"kind": "other", "line_box": line_box}
-            if parsed_line:
-                page_no = int(parsed_line.get("page_no", 0))
-                line_no = int(parsed_line.get("line_no", idx + 1))
-                chunk_idx = int(parsed_line.get("chunk_idx", -1))
-                payload = str(parsed_line.get("payload", ""))
-                mode = str(parsed_line.get("mode", "full"))
-                if mode == "full":
-                    prefix = "P{:03d}L{:03d}{}C{:05d}{}".format(
-                        page_no, line_no, self.line_separator, chunk_idx, self.line_separator
-                    )
-                elif mode == "chunk":
-                    prefix = "C{:05d}{}".format(chunk_idx, self.line_separator)
-                else:
-                    prefix = ""
-                prefix_bbox = draw.textbbox((x, y), prefix, font=line_font)
-                payload_bbox = draw.textbbox((prefix_bbox[2], y), payload, font=line_font)
-                sidecar_bits = _safe_payload_to_bits(payload)
-                sidecar_rows = int(math.ceil(float(len(sidecar_bits)) / float(SIDECAR_BITS_PER_ROW)))
-                sidecar_cols = SIDECAR_BITS_PER_ROW
-                sidecar_width = (
-                    sidecar_cols * SIDECAR_CELL_SIZE + (sidecar_cols - 1) * SIDECAR_CELL_GAP
-                )
-                sidecar_height = (
-                    sidecar_rows * SIDECAR_CELL_SIZE + (sidecar_rows - 1) * SIDECAR_CELL_GAP
-                )
-                sidecar_left = int(width - self.margin - sidecar_width)
-                min_sidecar_left = int(text_bbox[2] + 24)
-                if sidecar_left < min_sidecar_left:
-                    sidecar_left = min_sidecar_left
-                sidecar_top = int(max(0, y + max(0, (line_h - sidecar_height) // 2)))
-                if self.render_sidecar and sidecar_left + sidecar_width <= width - self.margin:
-                    for bit_index, bit in enumerate(sidecar_bits):
-                        if bit != "1":
-                            continue
-                        row = bit_index // sidecar_cols
-                        col = bit_index % sidecar_cols
-                        cell_left = sidecar_left + col * (SIDECAR_CELL_SIZE + SIDECAR_CELL_GAP)
-                        cell_top = sidecar_top + row * (SIDECAR_CELL_SIZE + SIDECAR_CELL_GAP)
-                        draw.rectangle(
-                            (
-                                cell_left,
-                                cell_top,
-                                cell_left + SIDECAR_CELL_SIZE - 1,
-                                cell_top + SIDECAR_CELL_SIZE - 1,
-                            ),
-                            fill="black",
-                        )
-
-                meta.update(
-                    {
-                        "kind": "data",
-                        "page": page_no,
-                        "line_no": line_no,
-                        "chunk_index": chunk_idx,
-                        "payload_len": len(payload),
-                        "expected_crc": str(parsed_line.get("expected_crc", "")),
-                        "font_size": int(data_font_size),
-                        "bit_count": len(sidecar_bits),
-                        "binary_cell": SIDECAR_CELL_SIZE,
-                        "binary_cols": sidecar_cols,
-                        "binary_gap": SIDECAR_CELL_GAP,
-                        "binary_rows": sidecar_rows,
-                        "payload_box": [
-                            int(max(0, prefix_bbox[2] + 8)),
-                            int(max(0, y - 4)),
-                            int(min(width, payload_bbox[2] + 4)),
-                            int(min(height, y + line_h + 4)),
-                        ],
-                    }
-                )
-                if self.render_sidecar and sidecar_left + sidecar_width <= width - self.margin:
-                    meta["binary_box"] = [
-                        int(sidecar_left),
-                        int(sidecar_top),
-                        int(sidecar_left + sidecar_width),
-                        int(sidecar_top + sidecar_height),
-                    ]
-            layout_lines.append(meta)
-            y += line_h
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        img.save(str(output_path), "PNG", dpi=(300, 300), optimize=True)
-        return {
-            "font_size": int(data_font_size),
-            "control_font_size": int(control_font_size),
-            "line_height": int(data_line_h),
-            "control_line_height": int(control_line_h),
-            "line_count": len(lines),
-            "data_line_count": len(data_lines),
-            "control_line_count": len(control_lines),
-            "page_height": int(height),
-            "page_width": int(width),
-            "lines": layout_lines,
-        }
+        if not PIL_AVAILABLE:
+            raise RuntimeError("Pillow is not available")
+        return _transport_render.render_page(
+            lines=lines,
+            output_path=output_path,
+            page_size=self.page_size,
+            margin=self.margin,
+            font_size=self.font_size,
+            line_gap=self.line_gap,
+            font_max_size=self.font_max_size,
+            font_fit_mode=self.font_fit_mode,
+            line_separator=self.line_separator,
+            render_sidecar=self.render_sidecar,
+            image_module=Image,
+            image_draw_module=ImageDraw,
+            image_font_module=ImageFont,
+        )
 
 
-def _print_json(data: Dict[str, object]) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
-
-
-def _save_json(path: str, data: Dict[str, object]) -> str:
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    return str(out)
-
-
-def _save_missing_chunks(path: str, records: List[Dict[str, int]]) -> str:
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    preferred = ["chunk_index", "page", "line", "copy", "priority"]
-    extra = []
-    for item in records:
-        for key in item.keys():
-            if key in preferred or key in extra:
-                continue
-            extra.append(key)
-    columns = preferred + extra
-    lines = [",".join(columns)]
-    for item in records:
-        row = [str(item.get(col, "")) for col in columns]
-        lines.append(",".join(row))
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return str(out)
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Airgap transport layer for encrypted small artifacts."
-    )
-    sub = parser.add_subparsers(dest="cmd")
-    # Python 3.6 does not support add_subparsers(..., required=True)
-    sub.required = True
-
-    p_export = sub.add_parser("export", help="export artifact bytes to OCR package")
-    p_export.add_argument(
-        "-i",
-        "--input-file",
-        required=True,
-        help="input artifact path; encrypt first if confidentiality matters",
-    )
-    p_export.add_argument("-o", "--output-dir", required=True, help="output package directory")
-    p_export.add_argument("--artifact-id", default=None, help="optional artifact id")
-    p_export.add_argument("--filename-prefix", default="page", help="output page prefix")
-    p_export.add_argument("--max-compressed-kib", type=int, default=64)
-    p_export.add_argument("--chunk-chars", type=int, default=40)
-    p_export.add_argument("--lines-per-page", type=int, default=20)
-    p_export.add_argument(
-        "--font-size",
-        type=int,
-        default=44,
-        help="target font size for rendered PNG pages (default fit mode: target)",
-    )
-    p_export.add_argument(
-        "--font-max-size",
-        type=int,
-        default=132,
-        help="upper bound used only when --font-fit-mode fit",
-    )
-    p_export.add_argument(
-        "--font-fit-mode",
-        choices=["target", "fit", "fixed"],
-        default="target",
-        help="target: keep --font-size unless overflow; fit: auto enlarge to max; fixed: strict fixed size",
-    )
-    p_export.add_argument(
-        "--fixed-font-size",
-        action="store_true",
-        help="deprecated alias of --font-fit-mode fixed",
-    )
-    p_export.add_argument(
-        "--metadata-level",
-        choices=["compact", "none"],
-        default="compact",
-        help="page control metadata level: compact keeps @META/@CFG/@HS/@PAGECRC, none keeps data lines only",
-    )
-    p_export.add_argument(
-        "--line-separator",
-        choices=list(SUPPORTED_FIELD_SEPARATORS),
-        default="|",
-        help="field separator in exported data lines",
-    )
-    p_export.add_argument(
-        "--line-index-mode",
-        choices=["full", "chunk", "off"],
-        default="full",
-        help="full: P/L/C, chunk: C only, off: payload only (manifest required for recover/verify)",
-    )
-    p_export.add_argument(
-        "--line-crc-mode",
-        choices=["on", "off"],
-        default="on",
-        help="append per-line CRC suffix in transport lines",
-    )
-    p_export.add_argument(
-        "--no-sidecar",
-        action="store_true",
-        help="disable rendering right-side sidecar blocks in PNG pages",
-    )
-    p_export.add_argument(
-        "--redundancy-copies",
-        type=int,
-        default=1,
-        help="repeat each chunk N copies for anti-loss transport (default 1)",
-    )
-    p_export.add_argument(
-        "--no-interleave",
-        action="store_true",
-        help="disable interleaving chunk copies across pages",
-    )
-    p_export.add_argument(
-        "--parity-group-size",
-        type=int,
-        default=0,
-        help="add one parity chunk per N data chunks (0 disables, recommended 8)",
-    )
-
-    p_estimate = sub.add_parser("estimate", help="estimate export size, chunk count, and page count")
-    p_estimate.add_argument("-i", "--input-file", required=True, help="input artifact path")
-    p_estimate.add_argument("--max-compressed-kib", type=int, default=64)
-    p_estimate.add_argument("--chunk-chars", type=int, default=40)
-    p_estimate.add_argument("--lines-per-page", type=int, default=20)
-    p_estimate.add_argument(
-        "--redundancy-copies",
-        type=int,
-        default=1,
-        help="repeat each chunk N copies for anti-loss transport (default 1)",
-    )
-    p_estimate.add_argument(
-        "--no-interleave",
-        action="store_true",
-        help="disable interleaving chunk copies across pages",
-    )
-    p_estimate.add_argument(
-        "--parity-group-size",
-        type=int,
-        default=0,
-        help="add one parity chunk per N data chunks (0 disables, recommended 8)",
-    )
-
-    p_recover = sub.add_parser("recover", help="recover artifact from OCR text")
-    p_recover.add_argument(
-        "-m",
-        "--manifest",
-        default=None,
-        help="manifest json path; optional when OCR text contains embedded export metadata",
-    )
-    p_recover.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
-    p_recover.add_argument("-o", "--output-file", required=True, help="recovered artifact path")
-    p_recover.add_argument("--strict-payload-chars", action="store_true")
-
-    p_verify = sub.add_parser("verify", help="verify OCR text against manifest")
-    p_verify.add_argument(
-        "-m",
-        "--manifest",
-        default=None,
-        help="manifest json path; optional when OCR text contains embedded export metadata",
-    )
-    p_verify.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
-    p_verify.add_argument("--strict-payload-chars", action="store_true")
-
-    p_analyze = sub.add_parser("analyze", help="analyze OCR text quality and missing chunks")
-    p_analyze.add_argument(
-        "-m",
-        "--manifest",
-        default=None,
-        help="manifest json path; optional when OCR text contains embedded export metadata",
-    )
-    p_analyze.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
-    p_analyze.add_argument("--strict-payload-chars", action="store_true")
-    p_analyze.add_argument("--max-list", type=int, default=200, help="max list size in output")
-    p_analyze.add_argument("--save-report", default=None, help="optional analyze json output path")
-    p_analyze.add_argument(
-        "--emit-missing-file",
-        default=None,
-        help="optional csv output with chunk_index,page,line,copy,priority for recapture",
-    )
-
-    p_ocr = sub.add_parser("ocr-extract", help="extract text from images with OCR backend")
-    p_ocr.add_argument("-i", "--image-input", required=True, help="image file/dir")
-    p_ocr.add_argument("-o", "--output-text", required=True, help="output text file path")
-    p_ocr.add_argument(
-        "-m",
-        "--manifest",
-        default=None,
-        help="optional manifest to enable structured OCR on self-generated pages",
-    )
-    p_ocr.add_argument(
-        "--backend",
-        choices=["tesseract", "easyocr", "sidecar", "external", "auto"],
-        default="tesseract",
-    )
-    p_ocr.add_argument("--lang", default="eng", help="ocr language")
-    p_ocr.add_argument("--psm", type=int, default=6, help="tesseract psm mode")
-    p_ocr.add_argument(
-        "--ocr-provider-cmd",
-        default=None,
-        help=(
-            "external OCR command template used by backend=external/auto; placeholders: "
-            "{image_path} {image_name} {page_no} {lang} {psm} {manifest_path}"
-        ),
-    )
-    p_ocr.add_argument(
-        "--ocr-provider-timeout-sec",
-        type=int,
-        default=120,
-        help="timeout seconds for one external OCR command call",
-    )
-
-    p_recover_images = sub.add_parser(
-        "recover-images", help="ocr images then analyze+recover artifact in one command"
-    )
-    p_recover_images.add_argument(
-        "-m",
-        "--manifest",
-        default=None,
-        help="manifest json path; optional when page photos are from exports with embedded metadata",
-    )
-    p_recover_images.add_argument("-i", "--image-input", required=True, help="image file/dir")
-    p_recover_images.add_argument("-o", "--output-file", required=True, help="recovered artifact path")
-    p_recover_images.add_argument(
-        "--backend",
-        choices=["tesseract", "easyocr", "sidecar", "external", "auto"],
-        default="auto",
-    )
-    p_recover_images.add_argument("--lang", default="eng", help="ocr language")
-    p_recover_images.add_argument("--psm", type=int, default=6, help="tesseract psm mode")
-    p_recover_images.add_argument(
-        "--ocr-provider-cmd",
-        default=None,
-        help=(
-            "external OCR command template used by backend=external/auto; placeholders: "
-            "{image_path} {image_name} {page_no} {lang} {psm} {manifest_path}"
-        ),
-    )
-    p_recover_images.add_argument(
-        "--ocr-provider-timeout-sec",
-        type=int,
-        default=120,
-        help="timeout seconds for one external OCR command call",
-    )
-    p_recover_images.add_argument("--strict-payload-chars", action="store_true")
-    p_recover_images.add_argument(
-        "--ocr-text-output", default=None, help="optional extracted OCR text output path"
-    )
-    p_recover_images.add_argument(
-        "--save-analyze-report", default=None, help="optional analyze report json path"
-    )
-    p_recover_images.add_argument(
-        "--emit-missing-file",
-        default=None,
-        help="optional csv output with chunk_index,page,line,copy,priority for recapture",
-    )
-    p_recover_images.add_argument("--max-list", type=int, default=200, help="max list size in analyze")
-
-    return parser
+def _build_parser():
+    return _transport_cli.build_parser()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    transport = AirgapTransportLayer(
-        max_compressed_kib=getattr(args, "max_compressed_kib", 64),
-        chunk_chars=getattr(args, "chunk_chars", 80),
-        lines_per_page=getattr(args, "lines_per_page", 28),
-        font_size=getattr(args, "font_size", 44),
-        font_max_size=getattr(args, "font_max_size", 132),
-        fixed_font_size=bool(getattr(args, "fixed_font_size", False)),
-        font_fit_mode=getattr(args, "font_fit_mode", "target"),
-        metadata_level=getattr(args, "metadata_level", "compact"),
-        line_separator=getattr(args, "line_separator", "|"),
-        line_index_mode=getattr(args, "line_index_mode", "full"),
-        render_sidecar=(not bool(getattr(args, "no_sidecar", False))),
-        line_crc_mode=getattr(args, "line_crc_mode", "on"),
-    )
-
-    try:
-        if args.cmd == "estimate":
-            result = transport.estimate_export_artifact(
-                input_file=args.input_file,
-                redundancy_copies=args.redundancy_copies,
-                interleave=(not args.no_interleave),
-                parity_group_size=args.parity_group_size,
-            )
-            _print_json(result)
-            return 0
-
-        if args.cmd == "export":
-            result = transport.export_artifact(
-                input_file=args.input_file,
-                output_dir=args.output_dir,
-                artifact_id=args.artifact_id,
-                filename_prefix=args.filename_prefix,
-                redundancy_copies=args.redundancy_copies,
-                interleave=(not args.no_interleave),
-                parity_group_size=args.parity_group_size,
-            )
-            _print_json(result)
-            return 0
-
-        if args.cmd == "recover":
-            result = transport.recover_artifact(
-                manifest_path=args.manifest,
-                ocr_input_path=args.ocr_input,
-                output_file=args.output_file,
-                strict_payload_chars=args.strict_payload_chars,
-            )
-            _print_json(result)
-            return 0
-
-        if args.cmd == "verify":
-            result = transport.verify_ocr_text(
-                manifest_path=args.manifest,
-                ocr_input_path=args.ocr_input,
-                strict_payload_chars=args.strict_payload_chars,
-            )
-            _print_json(result)
-            return 0 if result.get("success") else 2
-
-        if args.cmd == "analyze":
-            result = transport.analyze_ocr_text(
-                manifest_path=args.manifest,
-                ocr_input_path=args.ocr_input,
-                strict_payload_chars=args.strict_payload_chars,
-                max_list=args.max_list,
-                save_report_path=args.save_report,
-                emit_missing_file=args.emit_missing_file,
-            )
-            _print_json(result)
-            return 0 if result.get("success") else 2
-
-        if args.cmd == "ocr-extract":
-            result = transport.extract_text_from_images(
-                image_input_path=args.image_input,
-                output_text_path=args.output_text,
-                backend=args.backend,
-                lang=args.lang,
-                psm=args.psm,
-                manifest_path=args.manifest,
-                ocr_provider_cmd=args.ocr_provider_cmd,
-                ocr_provider_timeout_sec=args.ocr_provider_timeout_sec,
-            )
-            _print_json(result)
-            return 0
-
-        if args.cmd == "recover-images":
-            result = transport.recover_from_images(
-                manifest_path=args.manifest,
-                image_input_path=args.image_input,
-                output_file=args.output_file,
-                backend=args.backend,
-                lang=args.lang,
-                psm=args.psm,
-                ocr_provider_cmd=args.ocr_provider_cmd,
-                ocr_provider_timeout_sec=args.ocr_provider_timeout_sec,
-                strict_payload_chars=args.strict_payload_chars,
-                ocr_text_output=args.ocr_text_output,
-                save_analyze_report=args.save_analyze_report,
-                emit_missing_file=args.emit_missing_file,
-                max_list=args.max_list,
-            )
-            _print_json(result)
-            return 0 if result.get("success") else 2
-
-        parser.print_help()
-        return 1
-
-    except Exception as exc:
-        err = {"success": False, "error": str(exc), "cmd": args.cmd}
-        _print_json(err)
-        return 2
+    return _transport_cli.run_cli(argv=argv, transport_cls=AirgapTransportLayer)
 
 
 if __name__ == "__main__":

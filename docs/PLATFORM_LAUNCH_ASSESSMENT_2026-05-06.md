@@ -113,9 +113,19 @@ Progress status (2026-05-07):
 - Landed first extraction slice into `enc2sop.transport`:
   - `enc2sop/transport/protocol.py` (protocol constants + parsing/normalization helpers)
   - `enc2sop/transport/ocr_adapters.py` (lazy OCR adapter boundary + backend loading)
+- Landed second extraction slice into `enc2sop.transport`:
+  - `enc2sop/transport/render.py` (page rendering, sidecar layout drawing, and font fallback logic)
+  - `enc2sop/transport/cli.py` (transport parser/dispatch and report output helper boundaries)
 - `qrcode_helper.py` now consumes these extracted modules through compatibility aliases.
 - Existing transport tests remain green, including import-time easyocr isolation.
-- Residual blocker remains until render/recover/CLI are also split and `qrcode_helper.py` is reduced to a compatibility facade.
+- Landed third/fourth extraction slices into `enc2sop.transport`:
+  - `enc2sop/transport/recover.py` (recover/verify/analyze orchestration)
+  - `enc2sop/transport/parser.py` (parity/conflict/missing-chunk parse helpers)
+- `qrcode_helper.py` compatibility methods now delegate recover/parity/conflict internals into extracted transport modules.
+- Landed fifth extraction slice into `enc2sop.transport`:
+  - extracted OCR chunk parse and metadata inference internals into `enc2sop/transport/parser.py`.
+  - `qrcode_helper.py` now delegates `_parse_ocr_chunks*` and metadata inference helpers into transport parser boundaries.
+- Residual blocker remains until OCR/image pipeline internals are also extracted and `qrcode_helper.py` is reduced to a near-thin compatibility facade.
 
 ### [BLOCKER][P0] B-002 Compile Path Risk for Decrypt Runtime
 

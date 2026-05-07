@@ -66,10 +66,69 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - Added `enc2sop/transport/ocr_adapters.py` for lazy OCR backend discovery/loading (`pytesseract`, `easyocr`, `numpy`) and language mapping.
   - Rewired `qrcode_helper.py` to consume extracted modules via explicit aliases while keeping existing symbol names stable for backward compatibility.
   - Added focused regression coverage in `tests/test_transport_modules.py` to verify module extraction contracts and compatibility alias wiring.
+  - Delivered second extraction slice for rendering and CLI boundaries:
+    - Added `enc2sop/transport/render.py` for page rendering/font fallback and sidecar layout generation.
+    - Added `enc2sop/transport/cli.py` for parser construction, output helpers (`print_json`, `save_json`, `save_missing_chunks`), and command dispatch.
+    - Rewired `qrcode_helper.py` compatibility layer:
+      - `AirgapTransportLayer._load_font` delegates to `enc2sop.transport.render.load_font`.
+      - `AirgapTransportLayer._render_page` delegates to `enc2sop.transport.render.render_page`.
+      - `_build_parser` and `main` delegate to `enc2sop.transport.cli`.
+      - analyze report/missing-chunk writers now call extracted CLI helpers.
+    - Extended `tests/test_transport_modules.py` with extraction-contract assertions for CLI and render delegation paths.
   - Remaining sub-scope to complete card:
-    - extract render pipeline from `qrcode_helper.py` into `enc2sop.transport.render`
-    - extract recover/analyze path into `enc2sop.transport.recover`
-    - introduce a thin transport CLI entrypoint module and reduce `qrcode_helper.py` to compatibility shim
+    - complete conversion of `qrcode_helper.py` into a thinner compatibility shim (legacy class methods still host recover/ocr pipeline logic)
+  - Notes (2026-05-07, iteration 3):
+    - Extracted recover/verify/analyze orchestration into `enc2sop/transport/recover.py`.
+    - `qrcode_helper.AirgapTransportLayer` now delegates the following compatibility entrypoints to `enc2sop.transport.recover`:
+      - `recover_artifact`
+      - `_recover_artifact_against_manifest`
+      - `_recover_artifact_without_manifest`
+      - `verify_ocr_text`
+      - `_verify_ocr_text_against_manifest`
+      - `_verify_ocr_text_without_manifest`
+      - `analyze_ocr_text`
+      - `_analyze_ocr_text_against_manifest`
+      - `_recover_encoded_payload`
+    - Added focused delegation regression tests in `tests/test_transport_modules.py`.
+    - Full test suite remains green after extraction (`75 passed, 3 skipped`).
+    - Remaining sub-scope to complete card:
+      - extract deeper parse/recovery internals (chunk parsing, conflict resolution, parity internals) from `qrcode_helper.py` into transport modules
+      - finish reducing `qrcode_helper.py` toward a thin compatibility facade over transport package boundaries
+  - Notes (2026-05-07, iteration 4):
+    - Added `enc2sop/transport/parser.py` and extracted core recovery internals:
+      - missing-chunk records/retake planning
+      - data/parity chunk presence counting
+      - parity recovery
+      - parity-conflict downgrade handling
+      - package-hash and structural conflict resolution
+      - parse-error escalation
+    - Rewired `enc2sop/transport/recover.py` to consume parser helpers directly (instead of invoking those paths through legacy class-bound methods).
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods to delegate to `enc2sop.transport.parser` for these internals.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` to assert delegation for parser-backed compatibility methods.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 14 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 79 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract `_parse_ocr_chunks` / `_parse_ocr_chunks_with_total` (and payload-only parser path) into transport parser modules
+      - extract embedded metadata scanning/inference helpers into transport parser modules
+      - leave `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-07, iteration 5):
+    - Extracted remaining OCR parse and metadata inference internals into `enc2sop/transport/parser.py`:
+      - `_parse_ocr_chunks`
+      - `_parse_ocr_chunks_payload_only_manifest`
+      - `_parse_ocr_chunks_with_total`
+      - `_choose_majority_metadata_value`
+      - `_scan_transport_metadata`
+      - `_build_inferred_manifest_from_ocr`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above to thin delegation wrappers against `enc2sop.transport.parser`.
+    - Added focused delegation assertions in `tests/test_transport_modules.py` for parser parse/metadata entrypoints.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 16 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 81 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - reduce residual OCR/image pipeline internals in `qrcode_helper.py` into bounded transport modules so the file becomes a near-thin compatibility facade
 
 ### CARD `ENC-P0-003`
 
