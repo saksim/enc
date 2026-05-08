@@ -168,6 +168,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
             "output_dir",
             "dist_dir",
             "compile",
+            "runtime_native_loader",
             "precheck_only",
             "skip_bad_files",
             "python_exe",
@@ -179,6 +180,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
     output_dir = _resolve_path_text(_optional_text(build_table.get("output_dir"), "build.output_dir"), config_dir)
     dist_dir = _resolve_path_text(_optional_text(build_table.get("dist_dir"), "build.dist_dir"), config_dir)
     compile_enabled = _optional_bool(build_table.get("compile"), "build.compile")
+    runtime_native_loader = _optional_bool(build_table.get("runtime_native_loader"), "build.runtime_native_loader")
     precheck_only = _optional_bool(build_table.get("precheck_only"), "build.precheck_only")
     skip_bad_files = _optional_bool(build_table.get("skip_bad_files"), "build.skip_bad_files")
     python_exe = _resolve_path_text(_optional_text(build_table.get("python_exe"), "build.python_exe"), config_dir)
@@ -196,6 +198,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
         "output_dir": output_dir,
         "dist_dir": dist_dir,
         "compile": compile_enabled,
+        "runtime_native_loader": runtime_native_loader,
         "precheck_only": precheck_only,
         "skip_bad_files": skip_bad_files,
         "python_exe": python_exe,
@@ -215,6 +218,13 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
             "require_manifest_signature",
             "license_file",
             "license_id",
+            "kms_profile",
+            "kms_endpoint",
+            "kms_key_id",
+            "kms_token_env",
+            "kms_timeout_sec",
+            "kms_max_retries",
+            "kms_retry_backoff_ms",
         ),
     )
     key_mode = _optional_text(keys_table.get("mode"), "keys.mode")
@@ -235,6 +245,29 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
     )
     license_file = _optional_text(keys_table.get("license_file"), "keys.license_file")
     license_id = _optional_text(keys_table.get("license_id"), "keys.license_id")
+    kms_profile = _optional_text(keys_table.get("kms_profile"), "keys.kms_profile")
+    kms_endpoint = _optional_text(keys_table.get("kms_endpoint"), "keys.kms_endpoint")
+    kms_key_id = _optional_text(keys_table.get("kms_key_id"), "keys.kms_key_id")
+    kms_token_env = _optional_text(keys_table.get("kms_token_env"), "keys.kms_token_env")
+    kms_timeout_sec = keys_table.get("kms_timeout_sec")
+    if kms_timeout_sec is not None:
+        if isinstance(kms_timeout_sec, bool) or not isinstance(kms_timeout_sec, (int, float)):
+            raise SoencConfigError("keys.kms_timeout_sec must be a number")
+        if float(kms_timeout_sec) <= 0:
+            raise SoencConfigError("keys.kms_timeout_sec must be > 0")
+        kms_timeout_sec = float(kms_timeout_sec)
+    kms_max_retries = keys_table.get("kms_max_retries")
+    if kms_max_retries is not None:
+        if isinstance(kms_max_retries, bool) or not isinstance(kms_max_retries, int):
+            raise SoencConfigError("keys.kms_max_retries must be an integer")
+        if kms_max_retries < 0:
+            raise SoencConfigError("keys.kms_max_retries must be >= 0")
+    kms_retry_backoff_ms = keys_table.get("kms_retry_backoff_ms")
+    if kms_retry_backoff_ms is not None:
+        if isinstance(kms_retry_backoff_ms, bool) or not isinstance(kms_retry_backoff_ms, int):
+            raise SoencConfigError("keys.kms_retry_backoff_ms must be an integer")
+        if kms_retry_backoff_ms < 0:
+            raise SoencConfigError("keys.kms_retry_backoff_ms must be >= 0")
     return {
         "mode": normalized_mode,
         "manifest_sign_key_file": manifest_sign_key_file,
@@ -242,6 +275,13 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
         "require_manifest_signature": require_manifest_signature,
         "license_file": license_file,
         "license_id": license_id,
+        "kms_profile": kms_profile,
+        "kms_endpoint": kms_endpoint,
+        "kms_key_id": kms_key_id,
+        "kms_token_env": kms_token_env,
+        "kms_timeout_sec": kms_timeout_sec,
+        "kms_max_retries": kms_max_retries,
+        "kms_retry_backoff_ms": kms_retry_backoff_ms,
     }
 
 
@@ -288,6 +328,13 @@ def load_project_config(
             "require_manifest_signature": keys.get("require_manifest_signature"),
             "license_file": keys.get("license_file"),
             "license_id": keys.get("license_id"),
+            "kms_profile": keys.get("kms_profile"),
+            "kms_endpoint": keys.get("kms_endpoint"),
+            "kms_key_id": keys.get("kms_key_id"),
+            "kms_token_env": keys.get("kms_token_env"),
+            "kms_timeout_sec": keys.get("kms_timeout_sec"),
+            "kms_max_retries": keys.get("kms_max_retries"),
+            "kms_retry_backoff_ms": keys.get("kms_retry_backoff_ms"),
         }
     )
     package_metadata = _parse_package_section(_as_table(payload, "package"))

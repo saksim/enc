@@ -22,6 +22,9 @@ Payload = Tuple[str, str, str]
 LICENSE_FILE_ENV = "SOENC_LICENSE_FILE"
 LICENSE_SCHEMA = "enc2sop-license/v1"
 LICENSE_VERSION = 1
+REMOTE_KMS_MODE = "remote-kms"
+SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
+SOENC_RUNTIME_API_VERSION = 1
 
 
 def _join_key(parts: Sequence[str]) -> bytes:
@@ -133,6 +136,29 @@ def _license_key_from_ref(key_ref) -> bytes:
     return _decode_license_key(key_b64)
 
 
+def _remote_kms_stub_error(key_ref):
+    if not isinstance(key_ref, dict):
+        raise ValueError("remote-kms key_ref must be a dict")
+    required = ("key_handle", "key_id", "request", "response", "retry_policy", "error_policy")
+    missing = [name for name in required if key_ref.get(name) in (None, "")]
+    if missing:
+        raise ValueError("remote-kms key_ref missing required fields: {0}".format(", ".join(sorted(missing))))
+    request = key_ref.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("remote-kms key_ref request must be a dict")
+    if request.get("operation") != "unwrap_data_key":
+        raise ValueError("remote-kms request.operation must be unwrap_data_key")
+    token_env = str(request.get("token_env") or "").strip()
+    if not token_env:
+        raise ValueError("remote-kms request.token_env must be a non-empty string")
+    if not os.environ.get(token_env, "").strip():
+        raise RuntimeError("remote-kms token env var is missing: {0}".format(token_env))
+    raise RuntimeError(
+        "remote-kms provider is configured but runtime integration is stubbed; "
+        "implement remote unwrap client for key_handle={0}".format(key_ref.get("key_handle"))
+    )
+
+
 def _resolve_key(key_ref) -> bytes:
     """Resolve key bytes from provider key_ref payload."""
     if isinstance(key_ref, dict):
@@ -144,6 +170,8 @@ def _resolve_key(key_ref) -> bytes:
             return _join_key(parts)
         if mode == "license-file":
             return _license_key_from_ref(key_ref)
+        if mode == REMOTE_KMS_MODE:
+            return _remote_kms_stub_error(key_ref)
         raise ValueError("unsupported key provider mode: {0}".format(mode or "<empty>"))
     # Backward compatibility for historical protected files that passed raw parts.
     return _join_key(key_ref)
@@ -152,10 +180,17 @@ def _resolve_key(key_ref) -> bytes:
 def _x(payloads: Iterable[Payload], key_ref, namespace: MutableMapping[str, object]) -> None:
     """Decrypt payloads and execute them inside the caller module namespace."""
     key = _resolve_key(key_ref)
-    for nonce_b64, tag_b64, body_b64 in payloads:
-        cipher = AES.new(key, AES.MODE_GCM, nonce=base64.b64decode(nonce_b64))
-        source = cipher.decrypt_and_verify(base64.b64decode(body_b64), base64.b64decode(tag_b64))
-        exec(compile(source.decode("utf-8"), "<protected>", "exec"), namespace)
+    key_buf = bytearray(key)
+    try:
+        key = bytes(key_buf)
+        for nonce_b64, tag_b64, body_b64 in payloads:
+            cipher = AES.new(key, AES.MODE_GCM, nonce=base64.b64decode(nonce_b64))
+            source = cipher.decrypt_and_verify(base64.b64decode(body_b64), base64.b64decode(tag_b64))
+            exec(compile(source.decode("utf-8"), "<protected>", "exec"), namespace)
+    finally:
+        for index in range(len(key_buf)):
+            key_buf[index] = 0
+        key = b""
 
 
 def runtime_pyx_source() -> str:
@@ -171,6 +206,9 @@ from Crypto.Cipher import AES as _A
 _ENV = "SOENC_LICENSE_FILE"
 _SCHEMA = "enc2sop-license/v1"
 _VER = 1
+_KMS_MODE = "remote-kms"
+SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
+SOENC_RUNTIME_API_VERSION = 1
 
 
 def _j(_parts):
@@ -270,6 +308,29 @@ def _lk(_key_ref):
     return _dk(_key_b64)
 
 
+def _rk(_key_ref):
+    if not isinstance(_key_ref, dict):
+        raise ValueError("remote-kms key_ref must be a dict")
+    _required = ("key_handle", "key_id", "request", "response", "retry_policy", "error_policy")
+    _missing = [_name for _name in _required if _key_ref.get(_name) in (None, "")]
+    if _missing:
+        raise ValueError("remote-kms key_ref missing required fields: {0}".format(", ".join(sorted(_missing))))
+    _request = _key_ref.get("request")
+    if not isinstance(_request, dict):
+        raise ValueError("remote-kms key_ref request must be a dict")
+    if _request.get("operation") != "unwrap_data_key":
+        raise ValueError("remote-kms request.operation must be unwrap_data_key")
+    _token_env = str(_request.get("token_env") or "").strip()
+    if not _token_env:
+        raise ValueError("remote-kms request.token_env must be a non-empty string")
+    if not _os.environ.get(_token_env, "").strip():
+        raise RuntimeError("remote-kms token env var is missing: {0}".format(_token_env))
+    raise RuntimeError(
+        "remote-kms provider is configured but runtime integration is stubbed; "
+        "implement remote unwrap client for key_handle={0}".format(_key_ref.get("key_handle"))
+    )
+
+
 def _r(_key_ref):
     if isinstance(_key_ref, dict):
         _mode = str(_key_ref.get("mode") or "").strip().lower()
@@ -280,16 +341,25 @@ def _r(_key_ref):
             return _j(_parts)
         if _mode == "license-file":
             return _lk(_key_ref)
+        if _mode == _KMS_MODE:
+            return _rk(_key_ref)
         raise ValueError("unsupported key provider mode: {0}".format(_mode or "<empty>"))
     return _j(_key_ref)
 
 
 def _x(_payloads, _key_ref, _ns):
     _key = _r(_key_ref)
-    for _nonce, _tag, _body in _payloads:
-        _cipher = _A.new(_key, _A.MODE_GCM, nonce=_b.b64decode(_nonce))
-        _src = _cipher.decrypt_and_verify(_b.b64decode(_body), _b.b64decode(_tag))
-        exec(compile(_src.decode("utf-8"), "<protected>", "exec"), _ns)
+    _key_buf = bytearray(_key)
+    try:
+        _key = bytes(_key_buf)
+        for _nonce, _tag, _body in _payloads:
+            _cipher = _A.new(_key, _A.MODE_GCM, nonce=_b.b64decode(_nonce))
+            _src = _cipher.decrypt_and_verify(_b.b64decode(_body), _b.b64decode(_tag))
+            exec(compile(_src.decode("utf-8"), "<protected>", "exec"), _ns)
+    finally:
+        for _idx in range(len(_key_buf)):
+            _key_buf[_idx] = 0
+        _key = b""
 '''
 
 
@@ -307,6 +377,9 @@ from Crypto.Cipher import AES as _A
 _ENV = "SOENC_LICENSE_FILE"
 _SCHEMA = "enc2sop-license/v1"
 _VER = 1
+_KMS_MODE = "remote-kms"
+SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
+SOENC_RUNTIME_API_VERSION = 1
 
 
 def _j(_parts):
@@ -406,6 +479,29 @@ def _lk(_key_ref):
     return _dk(_key_b64)
 
 
+def _rk(_key_ref):
+    if not isinstance(_key_ref, dict):
+        raise ValueError("remote-kms key_ref must be a dict")
+    _required = ("key_handle", "key_id", "request", "response", "retry_policy", "error_policy")
+    _missing = [_name for _name in _required if _key_ref.get(_name) in (None, "")]
+    if _missing:
+        raise ValueError("remote-kms key_ref missing required fields: {0}".format(", ".join(sorted(_missing))))
+    _request = _key_ref.get("request")
+    if not isinstance(_request, dict):
+        raise ValueError("remote-kms key_ref request must be a dict")
+    if _request.get("operation") != "unwrap_data_key":
+        raise ValueError("remote-kms request.operation must be unwrap_data_key")
+    _token_env = str(_request.get("token_env") or "").strip()
+    if not _token_env:
+        raise ValueError("remote-kms request.token_env must be a non-empty string")
+    if not _os.environ.get(_token_env, "").strip():
+        raise RuntimeError("remote-kms token env var is missing: {0}".format(_token_env))
+    raise RuntimeError(
+        "remote-kms provider is configured but runtime integration is stubbed; "
+        "implement remote unwrap client for key_handle={0}".format(_key_ref.get("key_handle"))
+    )
+
+
 def _r(_key_ref):
     if isinstance(_key_ref, dict):
         _mode = str(_key_ref.get("mode") or "").strip().lower()
@@ -416,16 +512,25 @@ def _r(_key_ref):
             return _j(_parts)
         if _mode == "license-file":
             return _lk(_key_ref)
+        if _mode == _KMS_MODE:
+            return _rk(_key_ref)
         raise ValueError("unsupported key provider mode: {0}".format(_mode or "<empty>"))
     return _j(_key_ref)
 
 
 def _x(_payloads, _key_ref, _ns):
     _key = _r(_key_ref)
-    for _nonce, _tag, _body in _payloads:
-        _cipher = _A.new(_key, _A.MODE_GCM, nonce=_b.b64decode(_nonce))
-        _src = _cipher.decrypt_and_verify(_b.b64decode(_body), _b.b64decode(_tag))
-        exec(compile(_src.decode("utf-8"), "<protected>", "exec"), _ns)
+    _key_buf = bytearray(_key)
+    try:
+        _key = bytes(_key_buf)
+        for _nonce, _tag, _body in _payloads:
+            _cipher = _A.new(_key, _A.MODE_GCM, nonce=_b.b64decode(_nonce))
+            _src = _cipher.decrypt_and_verify(_b.b64decode(_body), _b.b64decode(_tag))
+            exec(compile(_src.decode("utf-8"), "<protected>", "exec"), _ns)
+    finally:
+        for _idx in range(len(_key_buf)):
+            _key_buf[_idx] = 0
+        _key = b""
 '''
 
 

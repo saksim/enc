@@ -192,8 +192,19 @@ Resolution status (2026-05-07):
 
 Residual risk:
 
-- remote-KMS provider is not yet implemented.
-- `license-file` mode is now available, but the runtime decrypt path is still Python-level and not yet hardened by native loader controls.
+- remote-KMS provider contract stub is implemented (`ENC-P1-010`), but live unwrap/network integration is intentionally fail-closed until a real KMS client is added.
+- `license-file` mode is now available.
+- Native-loader hardening has started (`ENC-P1-011` iteration slice):
+  - protected stubs can now enforce native runtime module loading (`runtime_delivery.loader_mode = native-extension-required`) and fail closed when runtime resolves to pure Python.
+  - compiled-flow integration coverage now includes both native-loader success and Python-runtime substitution fail-closed behavior.
+  - decrypt runtime execution now zeroizes key buffers after decrypt/exec in runtime implementations and generated templates.
+  - runtime trust-boundary checks now enforce runtime module identity/origin/path constraints under native-loader mode:
+    - runtime module name must match expected import target
+    - runtime `__spec__.origin` must match runtime `__file__`
+    - runtime path must remain in the same package directory as the protected module
+    - runtime API marker/version contract is validated before decrypt execution
+  - `build_manifest.json` runtime delivery metadata now records trust policy (`trust_policy`) and validation defaults are backfilled for older manifests.
+  - further hardening is still required to add stronger runtime authenticity/trust-boundary checks beyond loader-mode policy.
 
 ## 5. Non-Blocking But Important Gaps
 
@@ -315,7 +326,11 @@ Production go-live should not be claimed until the following are true:
 Current go-live gate note (2026-05-07):
 
 - As of 2026-05-08, the non-local key-control gate item is satisfied via `ENC-P1-009` (`license-file` provider path).
-- Remaining critical work to strengthen platform key architecture is `ENC-P1-010` (remote-KMS contract stub), followed by runtime hardening cards.
+- As of 2026-05-08, `ENC-P1-010` is completed as a selectable `remote-kms` contract stub with explicit request/response/retry/error policy metadata and fail-closed runtime behavior.
+- As of 2026-05-08, `ENC-P1-011` has an initial native-loader enforcement slice in place (config/CLI + manifest loader policy + fail-closed loader guard in protected stubs) but still requires deeper runtime-native hardening before completion.
+- As of 2026-05-08 (iteration 2), native-loader compiled-flow integration tests are in place (compiled success + Python runtime substitution fail path), and runtime key buffer zeroization is applied in decrypt execution paths.
+- As of 2026-05-08 (iteration 3), runtime native-loader trust boundaries are tightened with fail-closed module-name/origin/path checks and runtime API marker/version contract validation.
+- Remaining critical hardening work is completion of runtime native-loader progression (`ENC-P1-011`) by binding runtime authenticity to signed per-build identity data, then subsequent productization cards.
 
 ## 9. Assessment Status
 

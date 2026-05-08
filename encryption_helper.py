@@ -53,6 +53,12 @@ NATIVE_EXTENSION_SUFFIXES = (".pyd", ".so", ".dll", ".dylib")
 DEFAULT_MANIFEST_KEY_ID = "local-hmac-v1"
 SIGNATURE_ALGORITHM_HMAC_SHA256 = "hmac-sha256"
 LICENSE_FILE_MODE = "license-file"
+REMOTE_KMS_MODE = "remote-kms"
+RUNTIME_LOADER_MODE_DEFAULT = "python-import-default"
+RUNTIME_LOADER_MODE_NATIVE_ONLY = "native-extension-required"
+RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
+RUNTIME_API_VERSION = 1
+RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR = "same-package-dir"
 
 
 class SymbolRange(NamedTuple):
@@ -537,15 +543,63 @@ def selected_symbols(symbols, entry):
     return chosen
 
 
-def render_module_preamble(runtime_module, helper_name):
-    return (
-        f"def {helper_name}(_payload, _parts):\n"
-        f"    import importlib as _enc_importlib\n"
-        f"    _enc_mod_name = f\"{{__package__}}.{runtime_module}\" if __package__ else \"{runtime_module}\"\n"
-        f"    _enc_runtime = _enc_importlib.import_module(_enc_mod_name)\n"
-        f"    _enc_runtime._x((_payload,), _parts, globals())\n"
-        f"    del _enc_importlib, _enc_mod_name, _enc_runtime\n"
-    )
+def render_module_preamble(runtime_module, helper_name, require_native_runtime_loader=False):
+    lines = [
+        f"def {helper_name}(_payload, _parts):",
+        "    import importlib as _enc_importlib",
+        "    import os as _enc_os",
+        f"    _enc_mod_name = f\"{{__package__}}.{runtime_module}\" if __package__ else \"{runtime_module}\"",
+        "    _enc_runtime = _enc_importlib.import_module(_enc_mod_name)",
+    ]
+    cleanup_vars = ["_enc_importlib", "_enc_os", "_enc_mod_name", "_enc_runtime"]
+    if require_native_runtime_loader:
+        lines.extend(
+            [
+                "    _enc_runtime_name = str(getattr(_enc_runtime, '__name__', '') or '')",
+                "    if _enc_runtime_name != _enc_mod_name:",
+                f"        raise RuntimeError('runtime module name mismatch for module: {runtime_module}')",
+                "    _enc_runtime_file = str(getattr(_enc_runtime, '__file__', '') or '')",
+                "    _enc_runtime_file_lower = _enc_runtime_file.lower()",
+                f"    _enc_native_suffixes = {NATIVE_EXTENSION_SUFFIXES!r}",
+                "    if (not _enc_runtime_file_lower) or (not _enc_runtime_file_lower.endswith(_enc_native_suffixes)):",
+                f"        raise RuntimeError('native runtime loader required for module: {runtime_module}')",
+                f"    if getattr(_enc_runtime, 'SOENC_RUNTIME_API_MARKER', None) != {RUNTIME_API_MARKER!r}:",
+                f"        raise RuntimeError('runtime api marker mismatch for module: {runtime_module}')",
+                f"    if int(getattr(_enc_runtime, 'SOENC_RUNTIME_API_VERSION', 0) or 0) < {RUNTIME_API_VERSION}:",
+                f"        raise RuntimeError('runtime api version mismatch for module: {runtime_module}')",
+                "    _enc_runtime_file_norm = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_runtime_file)))",
+                "    _enc_spec = getattr(_enc_runtime, '__spec__', None)",
+                "    _enc_origin = str(getattr(_enc_spec, 'origin', '') or '')",
+                "    if _enc_origin:",
+                "        _enc_origin_norm = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_origin)))",
+                "        if _enc_origin_norm != _enc_runtime_file_norm:",
+                f"            raise RuntimeError('runtime module origin mismatch for module: {runtime_module}')",
+                "    _enc_module_file = str(globals().get('__file__', '') or '')",
+                "    if _enc_module_file:",
+                "        _enc_expected_dir = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_os.path.dirname(_enc_module_file))))",
+                "        _enc_runtime_dir = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_os.path.dirname(_enc_runtime_file))))",
+                "        if _enc_runtime_dir != _enc_expected_dir:",
+                f"            raise RuntimeError('runtime module path escaped expected package directory for module: {runtime_module}')",
+            ]
+        )
+        cleanup_vars.extend(
+            [
+                "_enc_runtime_name",
+                "_enc_runtime_file",
+                "_enc_runtime_file_lower",
+                "_enc_native_suffixes",
+                "_enc_runtime_file_norm",
+                "_enc_spec",
+                "_enc_origin",
+                "_enc_origin_norm",
+                "_enc_module_file",
+                "_enc_expected_dir",
+                "_enc_runtime_dir",
+            ]
+        )
+    lines.append("    _enc_runtime._x((_payload,), _parts, globals())")
+    lines.append("    del {0}".format(", ".join(cleanup_vars)))
+    return "\n".join(lines) + "\n"
 
 
 def render_symbol_stub(symbol):
@@ -561,7 +615,7 @@ def render_exec_block(helper_name, payload, key_ref):
     return f"{helper_name}({payload!r}, {key_ref!r})"
 
 
-def protect_source(source, runtime_module, symbols_to_encrypt, key_mode):
+def protect_source(source, runtime_module, symbols_to_encrypt, key_mode, require_native_runtime_loader=False):
     if not symbols_to_encrypt:
         return source
 
@@ -583,7 +637,11 @@ def protect_source(source, runtime_module, symbols_to_encrypt, key_mode):
     for start_offset, end_offset, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
         new_source = new_source[:start_offset] + replacement + new_source[end_offset:]
 
-    preamble = render_module_preamble(runtime_module, helper_name).splitlines()
+    preamble = render_module_preamble(
+        runtime_module,
+        helper_name,
+        require_native_runtime_loader=require_native_runtime_loader,
+    ).splitlines()
     if stubs:
         preamble.extend([""] + "\n\n".join(stubs).splitlines())
     preamble_text = "\n".join(preamble + [""])
@@ -667,6 +725,7 @@ def protect_project(
     namespace_package_parts,
     key_mode,
     key_provider,
+    require_native_runtime_loader,
 ):
     output_dir = reset_directory(output_dir)
 
@@ -684,7 +743,13 @@ def protect_project(
         chosen = selected_symbols(symbols, entry)
 
         runtime_name = runtimes[source_path.parent]
-        protected_source = protect_source(source, runtime_name, chosen, key_mode=key_mode)
+        protected_source = protect_source(
+            source,
+            runtime_name,
+            chosen,
+            key_mode=key_mode,
+            require_native_runtime_loader=require_native_runtime_loader,
+        )
         destination = output_dir / relative_for_output
         ensure_parent(destination)
         try:
@@ -750,6 +815,16 @@ def protect_project(
             "module_prefix": RUNTIME_MODULE_PREFIX,
             "compile_skip_rule": "dunder modules are skipped by batch builder; runtime names must not start with '__'",
             "validation": "build must contain compiled runtime extensions for all runtime_files",
+            "loader_mode": (
+                RUNTIME_LOADER_MODE_NATIVE_ONLY if require_native_runtime_loader else RUNTIME_LOADER_MODE_DEFAULT
+            ),
+            "loader_enforced": bool(require_native_runtime_loader),
+            "trust_policy": {
+                "runtime_api_marker": RUNTIME_API_MARKER,
+                "runtime_api_version": RUNTIME_API_VERSION,
+                "runtime_path_policy": RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
+                "spec_origin_match": True,
+            },
         },
         "key_management": {
             "mode": key_mode,
@@ -811,6 +886,16 @@ def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_
         )
 
     runtime_delivery = manifest.get("runtime_delivery") or {}
+    runtime_delivery.setdefault("loader_mode", RUNTIME_LOADER_MODE_DEFAULT)
+    runtime_delivery["loader_enforced"] = bool(runtime_delivery.get("loader_enforced", False))
+    trust_policy = runtime_delivery.get("trust_policy")
+    if not isinstance(trust_policy, dict):
+        trust_policy = {}
+    trust_policy.setdefault("runtime_api_marker", RUNTIME_API_MARKER)
+    trust_policy.setdefault("runtime_api_version", RUNTIME_API_VERSION)
+    trust_policy.setdefault("runtime_path_policy", RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR)
+    trust_policy.setdefault("spec_origin_match", True)
+    runtime_delivery["trust_policy"] = trust_policy
     runtime_delivery["compiled_runtime_files"] = sorted(compiled_runtime_files)
     runtime_delivery["validated"] = True
     manifest["runtime_delivery"] = runtime_delivery
@@ -976,6 +1061,12 @@ def parse_args(argv=None):
         "Compile the encrypted staging tree with py2_linux_rec_opera.py.",
         "Disable compile step even if enabled in soenc.toml.",
     )
+    add_tristate_flag(
+        parser,
+        "runtime-native-loader",
+        "Require protected symbols to load decrypt runtime from compiled native extension modules only.",
+        "Allow Python runtime module fallback for protected symbols.",
+    )
     parser.add_argument("--dist-dir", help="Copy compiled native artifacts and manifest into a clean release directory.")
     parser.add_argument("--function", action="append", default=None, help="Single-file mode: protect only these top-level function names.")
     parser.add_argument("--class", dest="classes", action="append", default=None, help="Single-file mode: protect only these top-level class names.")
@@ -1002,6 +1093,44 @@ def parse_args(argv=None):
         "--license-id",
         default=None,
         help="Optional stable license identifier recorded in key refs when keys.mode=license-file.",
+    )
+    parser.add_argument(
+        "--kms-profile",
+        default=None,
+        help="Remote KMS profile name when keys.mode=remote-kms.",
+    )
+    parser.add_argument(
+        "--kms-endpoint",
+        default=None,
+        help="Remote KMS endpoint URI when keys.mode=remote-kms.",
+    )
+    parser.add_argument(
+        "--kms-key-id",
+        default=None,
+        help="Remote KMS key identifier used for wrapped data keys.",
+    )
+    parser.add_argument(
+        "--kms-token-env",
+        default=None,
+        help="Environment variable name for runtime KMS auth token (default: SOENC_KMS_TOKEN).",
+    )
+    parser.add_argument(
+        "--kms-timeout-sec",
+        type=float,
+        default=None,
+        help="Remote KMS request timeout in seconds when keys.mode=remote-kms.",
+    )
+    parser.add_argument(
+        "--kms-max-retries",
+        type=int,
+        default=None,
+        help="Remote KMS max retries when keys.mode=remote-kms.",
+    )
+    parser.add_argument(
+        "--kms-retry-backoff-ms",
+        type=int,
+        default=None,
+        help="Remote KMS retry backoff in milliseconds when keys.mode=remote-kms.",
     )
     add_tristate_flag(
         parser,
@@ -1038,6 +1167,8 @@ def finalize_arg_defaults(args):
         args.infer_namespace = False
     if args.require_manifest_signature is None:
         args.require_manifest_signature = False
+    if args.runtime_native_loader is None:
+        args.runtime_native_loader = False
     if args.function is None:
         args.function = []
     if args.classes is None:
@@ -1077,11 +1208,32 @@ def main(argv=None):
     key_provider = get_key_provider(key_mode)
     if key_mode != LICENSE_FILE_MODE and (args.license_file or args.license_id):
         raise ValueError("--license-file/--license-id require keys.mode=license-file")
+    kms_args = (
+        args.kms_profile,
+        args.kms_endpoint,
+        args.kms_key_id,
+        args.kms_token_env,
+        args.kms_timeout_sec,
+        args.kms_max_retries,
+        args.kms_retry_backoff_ms,
+    )
+    if key_mode != REMOTE_KMS_MODE and any(value is not None for value in kms_args):
+        raise ValueError(
+            "--kms-profile/--kms-endpoint/--kms-key-id/--kms-token-env/--kms-timeout-sec/"
+            "--kms-max-retries/--kms-retry-backoff-ms require keys.mode=remote-kms"
+        )
     _provider_begin_run(
         key_provider,
         {
             "license_file": args.license_file if key_mode == LICENSE_FILE_MODE else None,
             "license_id": args.license_id if key_mode == LICENSE_FILE_MODE else None,
+            "kms_profile": args.kms_profile if key_mode == REMOTE_KMS_MODE else None,
+            "kms_endpoint": args.kms_endpoint if key_mode == REMOTE_KMS_MODE else None,
+            "kms_key_id": args.kms_key_id if key_mode == REMOTE_KMS_MODE else None,
+            "kms_token_env": args.kms_token_env if key_mode == REMOTE_KMS_MODE else None,
+            "kms_timeout_sec": args.kms_timeout_sec if key_mode == REMOTE_KMS_MODE else None,
+            "kms_max_retries": args.kms_max_retries if key_mode == REMOTE_KMS_MODE else None,
+            "kms_retry_backoff_ms": args.kms_retry_backoff_ms if key_mode == REMOTE_KMS_MODE else None,
         },
     )
 
@@ -1149,6 +1301,7 @@ def main(argv=None):
         namespace_package_parts=namespace_package_parts,
         key_mode=key_mode,
         key_provider=key_provider,
+        require_native_runtime_loader=args.runtime_native_loader,
     )
     if project_config is not None:
         manifest_path = actual_output_dir / "build_manifest.json"
@@ -1216,6 +1369,11 @@ def main(argv=None):
     print("namespace_package={0}".format(namespace_text if namespace_text else "<root>"))
     print(f"processed_files={len(result.processed_files)}")
     print("skipped_files={0}".format(len(syntax_issues)))
+    print(
+        "runtime_loader_mode={0}".format(
+            RUNTIME_LOADER_MODE_NATIVE_ONLY if args.runtime_native_loader else RUNTIME_LOADER_MODE_DEFAULT
+        )
+    )
     for item in result.processed_files:
         print(f"file={item.relative_path}")
         print(f"protected={','.join(item.protected_symbols) if item.protected_symbols else 'none'}")

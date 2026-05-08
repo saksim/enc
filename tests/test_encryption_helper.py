@@ -3,12 +3,14 @@ import importlib
 import os
 import shutil
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
 from unittest import mock
 
 import encryption_helper
+import soenc_config
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +38,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         if os.name == "nt" and encryption_helper.find_vcvars64() is None:
             self.skipTest("MSVC vcvars64.bat not found; skipping compile integration test")
 
-    def _build_compiled_fixture(self, root):
+    def _build_compiled_fixture(self, root, require_native_runtime_loader=False):
         package_name = "p" + uuid.uuid4().hex[:4]
         project_root = root / package_name
         project_root.mkdir(parents=True, exist_ok=True)
@@ -63,17 +65,18 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         )
 
         output_dir = root / "o"
-        exit_code = encryption_helper.main(
-            [
-                "-t",
-                str(project_root),
-                "-o",
-                str(output_dir),
-                "--compile",
-                "--python-exe",
-                sys.executable,
-            ]
-        )
+        argv = [
+            "-t",
+            str(project_root),
+            "-o",
+            str(output_dir),
+            "--compile",
+            "--python-exe",
+            sys.executable,
+        ]
+        if require_native_runtime_loader:
+            argv.append("--runtime-native-loader")
+        exit_code = encryption_helper.main(argv)
         self.assertEqual(exit_code, 0)
         build_dir = output_dir / "build"
         manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
@@ -232,6 +235,19 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             updated_manifest["runtime_delivery"]["compiled_runtime_files"],
             ["pkg/enc_rt_pkg_1234.pyd"],
         )
+        self.assertFalse(updated_manifest["runtime_delivery"].get("loader_enforced", False))
+        self.assertEqual(
+            updated_manifest["runtime_delivery"].get("loader_mode"),
+            encryption_helper.RUNTIME_LOADER_MODE_DEFAULT,
+        )
+        trust_policy = updated_manifest["runtime_delivery"].get("trust_policy") or {}
+        self.assertEqual(trust_policy.get("runtime_api_marker"), encryption_helper.RUNTIME_API_MARKER)
+        self.assertEqual(trust_policy.get("runtime_api_version"), encryption_helper.RUNTIME_API_VERSION)
+        self.assertEqual(
+            trust_policy.get("runtime_path_policy"),
+            encryption_helper.RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
+        )
+        self.assertTrue(trust_policy.get("spec_origin_match"))
 
     def test_validate_runtime_delivery_keeps_manifest_signed_after_validation(self):
         root = self.make_case_root("runtime_validate_signed")
@@ -311,6 +327,62 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             encryption_helper.validate_runtime_delivery(output_dir, broken_build_dir)
         with self.assertRaisesRegex(ModuleNotFoundError, "enc_rt_"):
             self._import_compiled_module(broken_build_dir, package_name, module_name)
+
+    def test_e2e_compiled_flow_native_loader_executes_with_compiled_runtime(self):
+        self._ensure_compile_integration_ready()
+        root = self.make_case_root("e2e_native_loader_ok")
+        package_name, module_name, _output_dir, build_dir, manifest = self._build_compiled_fixture(
+            root,
+            require_native_runtime_loader=True,
+        )
+
+        runtime_delivery = manifest.get("runtime_delivery") or {}
+        self.assertTrue(runtime_delivery.get("validated"))
+        self.assertTrue(runtime_delivery.get("loader_enforced"))
+        self.assertEqual(
+            runtime_delivery.get("loader_mode"),
+            encryption_helper.RUNTIME_LOADER_MODE_NATIVE_ONLY,
+        )
+
+        module = self._import_compiled_module(build_dir, package_name, module_name)
+        self.assertEqual(module.protected_sum(2, 5), 14)
+        self.assertEqual(module.ProtectedBox(9).total(), 16)
+
+    def test_e2e_compiled_flow_native_loader_rejects_python_runtime_substitution(self):
+        self._ensure_compile_integration_ready()
+        root = self.make_case_root("e2e_native_loader_bad")
+        package_name, module_name, output_dir, build_dir, manifest = self._build_compiled_fixture(
+            root,
+            require_native_runtime_loader=True,
+        )
+
+        runtime_source_files = tuple(manifest.get("runtime_files") or ())
+        runtime_delivery = manifest.get("runtime_delivery") or {}
+        runtime_compiled_files = tuple(runtime_delivery.get("compiled_runtime_files") or ())
+        self.assertTrue(runtime_source_files)
+        self.assertTrue(runtime_compiled_files)
+
+        tampered_build_dir = root / "b_native_sub"
+        runtime_artifact_rel = Path(runtime_compiled_files[0])
+        for path in build_dir.rglob("*"):
+            rel = path.relative_to(build_dir)
+            target = tampered_build_dir / rel
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if rel == runtime_artifact_rel:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+
+        runtime_source_rel = Path(runtime_source_files[0])
+        runtime_source = output_dir / runtime_source_rel
+        runtime_target = tampered_build_dir / runtime_source_rel
+        runtime_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(runtime_source, runtime_target)
+
+        with self.assertRaisesRegex(RuntimeError, "native runtime loader required for module"):
+            self._import_compiled_module(tampered_build_dir, package_name, module_name)
 
     def test_load_scope_config_accepts_utf8_bom(self):
         root = self.make_case_root("scope_bom")
@@ -706,6 +778,210 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertIn("'parts': [", protected)
         self.assertIn("enc_rt_demo", protected)
 
+    def test_protect_source_native_loader_guard_fails_without_native_runtime(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        self.assertIn("native runtime loader required for module: enc_rt_demo", protected)
+
+        root = self.make_case_root("native_guard")
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str((root / "pkg" / "mod.py")),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str((root / "pkg" / "enc_rt_demo.py"))
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            with self.assertRaisesRegex(RuntimeError, "native runtime loader required for module: enc_rt_demo"):
+                exec(protected, module_globals, module_globals)
+
+    def test_protect_source_native_loader_guard_accepts_runtime_marker_and_matching_path(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        root = self.make_case_root("native_guard_ok")
+        pkg_dir = root / "pkg"
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        mod_file = pkg_dir / "mod.py"
+        mod_file.write_text("", encoding="utf-8")
+        runtime_file = pkg_dir / "enc_rt_demo.pyd"
+        runtime_file.write_bytes(b"native")
+
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str(mod_file),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str(runtime_file)
+        runtime_stub.__spec__ = type("SpecStub", (), {"origin": str(runtime_file)})()
+        runtime_stub.SOENC_RUNTIME_API_MARKER = encryption_helper.RUNTIME_API_MARKER
+        runtime_stub.SOENC_RUNTIME_API_VERSION = encryption_helper.RUNTIME_API_VERSION
+        runtime_stub._x = lambda *_args, _ns=None, **_kwargs: (_args[2].update({"VALUE": 7}) if len(_args) >= 3 else None)
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            exec(protected, module_globals, module_globals)
+        self.assertEqual(module_globals["VALUE"], 7)
+
+    def test_protect_source_native_loader_guard_fails_on_runtime_marker_mismatch(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        root = self.make_case_root("native_guard_marker_bad")
+        pkg_dir = root / "pkg"
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        mod_file = pkg_dir / "mod.py"
+        mod_file.write_text("", encoding="utf-8")
+        runtime_file = pkg_dir / "enc_rt_demo.pyd"
+        runtime_file.write_bytes(b"native")
+
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str(mod_file),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str(runtime_file)
+        runtime_stub.__spec__ = type("SpecStub", (), {"origin": str(runtime_file)})()
+        runtime_stub.SOENC_RUNTIME_API_MARKER = "unexpected-marker"
+        runtime_stub.SOENC_RUNTIME_API_VERSION = encryption_helper.RUNTIME_API_VERSION
+        runtime_stub._x = lambda *_args, **_kwargs: None
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            with self.assertRaisesRegex(RuntimeError, "runtime api marker mismatch for module: enc_rt_demo"):
+                exec(protected, module_globals, module_globals)
+
+    def test_protect_source_native_loader_guard_fails_on_runtime_path_redirection(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        root = self.make_case_root("native_guard_path_bad")
+        expected_pkg = root / "pkg"
+        other_pkg = root / "other_pkg"
+        expected_pkg.mkdir(parents=True, exist_ok=True)
+        other_pkg.mkdir(parents=True, exist_ok=True)
+        mod_file = expected_pkg / "mod.py"
+        mod_file.write_text("", encoding="utf-8")
+        runtime_file = other_pkg / "enc_rt_demo.pyd"
+        runtime_file.write_bytes(b"native")
+
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str(mod_file),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str(runtime_file)
+        runtime_stub.__spec__ = type("SpecStub", (), {"origin": str(runtime_file)})()
+        runtime_stub.SOENC_RUNTIME_API_MARKER = encryption_helper.RUNTIME_API_MARKER
+        runtime_stub.SOENC_RUNTIME_API_VERSION = encryption_helper.RUNTIME_API_VERSION
+        runtime_stub._x = lambda *_args, **_kwargs: None
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime module path escaped expected package directory for module: enc_rt_demo",
+            ):
+                exec(protected, module_globals, module_globals)
+
+    def test_main_runtime_native_loader_toggle_sets_manifest_loader_mode(self):
+        root = self.make_case_root("runtime_loader_manifest")
+        source = root / "main.py"
+        source.write_text("def ok():\n    return 1\n", encoding="utf-8")
+        output_dir = root / "out"
+
+        exit_code = encryption_helper.main(
+            [
+                "-t",
+                str(source),
+                "-o",
+                str(output_dir),
+                "--runtime-native-loader",
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        runtime_delivery = manifest.get("runtime_delivery") or {}
+        self.assertTrue(runtime_delivery.get("loader_enforced"))
+        self.assertEqual(
+            runtime_delivery.get("loader_mode"),
+            encryption_helper.RUNTIME_LOADER_MODE_NATIVE_ONLY,
+        )
+        trust_policy = runtime_delivery.get("trust_policy") or {}
+        self.assertEqual(trust_policy.get("runtime_api_marker"), encryption_helper.RUNTIME_API_MARKER)
+        self.assertEqual(trust_policy.get("runtime_api_version"), encryption_helper.RUNTIME_API_VERSION)
+        self.assertEqual(
+            trust_policy.get("runtime_path_policy"),
+            encryption_helper.RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
+        )
+        self.assertTrue(trust_policy.get("spec_origin_match"))
+
     def test_cli_overrides_soenc_config_values(self):
         root = self.make_case_root("soenc_cfg_override")
         project_root = root / "project"
@@ -842,6 +1118,92 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "license integrity mismatch"):
             self._import_module_from_root(output_dir, "pkg", "mod")
+
+    def test_remote_kms_mode_emits_stub_key_contract_and_runtime_fails_closed(self):
+        root = self.make_case_root("remote_kms_mode")
+        project_root = root / "project"
+        pkg = project_root / "pkg"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "mod.py").write_text(
+            "\n".join(
+                [
+                    "def protected_value():",
+                    "    return 99",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        cfg_path = project_root / "soenc.toml"
+        cfg_path.write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    "target = \"./pkg\"",
+                    "",
+                    "[build]",
+                    "output_dir = \"./out\"",
+                    "compile = false",
+                    "",
+                    "[keys]",
+                    "mode = \"remote-kms\"",
+                    "kms_profile = \"prod\"",
+                    "kms_endpoint = \"https://kms.example.local/v1\"",
+                    "kms_key_id = \"main-key\"",
+                    "kms_token_env = \"SOENC_KMS_TEST_TOKEN\"",
+                    "kms_timeout_sec = 4.5",
+                    "kms_max_retries = 3",
+                    "kms_retry_backoff_ms = 700",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = encryption_helper.main(["--config", str(cfg_path)])
+        self.assertEqual(exit_code, 0)
+        output_dir = project_root / "out"
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        key_mgmt = manifest.get("key_management") or {}
+        self.assertEqual(key_mgmt.get("mode"), "remote-kms")
+        self.assertEqual(key_mgmt.get("provider"), "enc2sop.keys.remote_kms")
+        self.assertEqual(key_mgmt.get("kms_profile"), "prod")
+        self.assertEqual(key_mgmt.get("kms_endpoint"), "https://kms.example.local/v1")
+        self.assertEqual(key_mgmt.get("kms_key_id"), "main-key")
+        self.assertEqual(key_mgmt.get("kms_token_env"), "SOENC_KMS_TEST_TOKEN")
+        self.assertTrue((key_mgmt.get("kms_stub") or {}).get("enabled"))
+
+        protected_source = (output_dir / "pkg" / "mod.py").read_text(encoding="utf-8")
+        self.assertIn("'mode': 'remote-kms'", protected_source)
+        self.assertIn("'request': {'schema': 'enc2sop-kms-request/v1'", protected_source)
+        self.assertIn("'operation': 'unwrap_data_key'", protected_source)
+        self.assertIn("'token_env': 'SOENC_KMS_TEST_TOKEN'", protected_source)
+        self.assertIn("'retry_policy': {'max_retries': 3, 'backoff_ms': 700", protected_source)
+
+        with self.assertRaisesRegex(RuntimeError, "token env var is missing"):
+            self._import_module_from_root(output_dir, "pkg", "mod")
+
+        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "runtime integration is stubbed"):
+                self._import_module_from_root(output_dir, "pkg", "mod")
+
+    def test_remote_kms_cli_args_require_remote_kms_mode(self):
+        root = self.make_case_root("remote_kms_cli_guard")
+        source = root / "main.py"
+        source.write_text("def ok():\n    return 1\n", encoding="utf-8")
+        output_dir = root / "out"
+        with self.assertRaisesRegex(ValueError, "require keys.mode=remote-kms"):
+            encryption_helper.main(
+                [
+                    "-t",
+                    str(source),
+                    "-o",
+                    str(output_dir),
+                    "--kms-profile",
+                    "prod",
+                ]
+            )
 
 
 if __name__ == "__main__":

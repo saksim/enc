@@ -437,7 +437,7 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ### CARD `ENC-P1-010`
 
-- Status: `todo`
+- Status: `done`
 - Goal: define a remote-KMS provider contract and stub implementation
 - Type: security platform
 - Depends on: `ENC-P0-008`
@@ -448,13 +448,47 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Deliverables:
   - provider interface contract
   - request/response model
-  - retry/error policy
+- retry/error policy
 - Acceptance:
-  - platform can select the provider even if the real KMS integration is stubbed initially
+- platform can select the provider even if the real KMS integration is stubbed initially
+- Notes (2026-05-08):
+  - Added `enc2sop/keys/remote_kms.py` with `RemoteKmsKeyProvider` and explicit contract payloads in key refs:
+    - request model (`enc2sop-kms-request/v1`) with profile/endpoint/token-env/timeout fields
+    - response model (`enc2sop-kms-response/v1`) with plaintext key field contract
+    - retry policy (`max_retries`, `backoff_ms`, retryable error classes)
+    - fail-closed error policy metadata
+  - Wired provider registration/export:
+    - `enc2sop/keys/__init__.py` now exports `RemoteKmsKeyProvider`.
+  - Extended protection/config wiring for remote-KMS context:
+    - `encryption_helper.py` now accepts remote-KMS CLI overrides:
+      - `--kms-profile`
+      - `--kms-endpoint`
+      - `--kms-key-id`
+      - `--kms-token-env`
+      - `--kms-timeout-sec`
+      - `--kms-max-retries`
+      - `--kms-retry-backoff-ms`
+    - Added guardrail: remote-KMS CLI overrides require `keys.mode=remote-kms`.
+    - `soenc_config.py` `[keys]` schema now supports the same remote-KMS fields with type/range validation.
+  - Extended runtime key resolution contract in `decryption_helper.py` (runtime module templates + in-repo runtime):
+    - `remote-kms` key refs are recognized and validated structurally.
+    - runtime enforces token env presence and then fails closed with explicit `stubbed` error until real remote unwrap client is integrated.
+  - Added focused tests:
+    - `tests/test_key_provider.py`:
+      - `test_remote_kms_provider_contract_and_manifest_metadata`
+    - `tests/test_encryption_helper.py`:
+      - `test_remote_kms_mode_emits_stub_key_contract_and_runtime_fails_closed`
+      - `test_remote_kms_cli_args_require_remote_kms_mode`
+    - `tests/test_soenc_config.py`:
+      - remote-KMS field parse assertions
+      - `test_load_project_config_rejects_invalid_remote_kms_retry_values`
+  - Verification:
+    - `python -m pytest -q tests/test_key_provider.py tests/test_soenc_config.py tests/test_encryption_helper.py` => `32 passed, 3 skipped`
+    - `python -m pytest -q` => `93 passed, 3 skipped`
 
 ### CARD `ENC-P1-011`
 
-- Status: `todo`
+- Status: `in_progress`
 - Goal: move the most sensitive runtime decrypt path toward a native loader
 - Type: hardening
 - Depends on: `ENC-P0-003`, `ENC-P0-008`
@@ -467,6 +501,79 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - documented fallback strategy
 - Acceptance:
   - at least one protected flow reduces pure-Python exposure of decrypt logic
+- Notes (2026-05-08, iteration 1):
+  - Delivered first hardening slice with explicit runtime loader policy controls:
+    - `encryption_helper.py` now supports `--runtime-native-loader/--no-runtime-native-loader`.
+    - `soenc.toml` `[build]` now supports `runtime_native_loader = true|false`.
+  - Protection preamble now supports fail-closed native-loader enforcement:
+    - when enabled, protected stubs import runtime module then assert `__file__` suffix is one of native extension suffixes (`.pyd/.so/.dll/.dylib`).
+    - if runtime resolves to pure Python, execution fails with explicit `RuntimeError` before decrypt execution.
+  - Manifest/runtime delivery metadata now records loader policy:
+    - `runtime_delivery.loader_mode` (`python-import-default` or `native-extension-required`)
+    - `runtime_delivery.loader_enforced` (bool)
+    - backward-compatible defaulting added in `validate_runtime_delivery` for older manifests missing loader metadata.
+  - Added focused tests:
+    - `tests/test_encryption_helper.py`:
+      - `test_protect_source_native_loader_guard_fails_without_native_runtime`
+      - `test_main_runtime_native_loader_toggle_sets_manifest_loader_mode`
+      - extended `test_validate_runtime_delivery_marks_manifest_validated` to assert loader metadata defaults.
+    - `tests/test_soenc_config.py`:
+      - expanded config parse assertions for `[build].runtime_native_loader`.
+- Verification:
+  - `python -m pytest -q tests/test_encryption_helper.py -k "native_loader or runtime_native_loader or runtime_validate"` => `2 passed, 26 deselected`
+  - `python -m pytest -q tests/test_soenc_config.py` => `3 passed, 1 skipped`
+  - `python -m pytest -q` => `95 passed, 3 skipped`
+- Notes (2026-05-08, iteration 2):
+  - Delivered compiled-flow integration coverage for native-loader enforcement:
+    - added native-loader compile fixture toggle in `tests/test_encryption_helper.py::_build_compiled_fixture`.
+    - added `test_e2e_compiled_flow_native_loader_executes_with_compiled_runtime` (compiled runtime success path under `--runtime-native-loader`).
+    - added `test_e2e_compiled_flow_native_loader_rejects_python_runtime_substitution` (fail-closed path when compiled runtime artifact is removed and `.py` runtime is substituted).
+  - Added decrypt-path runtime hardening in `decryption_helper.py` and generated runtime templates:
+    - `_x` now copies key bytes to a mutable buffer and zeroizes it in `finally` after decrypt/exec.
+    - hardening applied consistently to in-repo runtime, `runtime_pyx_source()`, and `runtime_py_source()`.
+  - Added focused runtime regression tests in new `tests/test_decryption_helper.py`:
+    - `test_runtime_exec_decrypts_payload_after_key_buffer_hardening`
+    - `test_runtime_decrypt_supports_local_embedded_provider_key_ref_dict`
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "native_loader or e2e_compiled_flow"` => `2 passed, 4 skipped, 24 deselected`
+    - `python -m pytest -q tests/test_decryption_helper.py` => `2 passed`
+    - `python -m pytest -q` => `97 passed, 5 skipped`
+- Remaining sub-scope to complete card:
+  - reduce runtime Python attack surface further by tightening runtime import trust boundaries (e.g., runtime module self-integrity checks/signature binding) so loader policy is complemented by runtime authenticity checks.
+  - add optional compile-time/runtime guardrails that detect suspicious runtime location redirection outside expected package/build roots while preserving low-cost compatibility.
+- Notes (2026-05-08, iteration 3):
+  - Delivered runtime trust-boundary hardening slice for native-loader mode:
+    - `encryption_helper.py` protected preamble now enforces runtime identity and origin checks before decrypt execution when `--runtime-native-loader` is enabled:
+      - runtime module name must match expected `<package>.enc_rt_*`
+      - runtime file must be a native extension artifact (`.pyd/.so/.dll/.dylib`)
+      - runtime `__spec__.origin` must match runtime `__file__`
+      - runtime path must remain in the same package directory as the protected module (fail closed on redirection)
+    - Added runtime API marker/version gate to bind protected stubs to expected runtime contract:
+      - `SOENC_RUNTIME_API_MARKER = enc2sop-runtime-core-v1`
+      - `SOENC_RUNTIME_API_VERSION = 1`
+    - Added runtime trust policy metadata into manifest runtime-delivery contract:
+      - `runtime_delivery.trust_policy.runtime_api_marker`
+      - `runtime_delivery.trust_policy.runtime_api_version`
+      - `runtime_delivery.trust_policy.runtime_path_policy`
+      - `runtime_delivery.trust_policy.spec_origin_match`
+    - Backward-compatible trust-policy defaulting is now applied in runtime-delivery validation for older manifests.
+  - Updated runtime core/template generation in `decryption_helper.py`:
+    - in-repo runtime and generated `.py`/`.pyx` runtime templates now export the same API marker/version constants for loader trust checks.
+  - Added focused regression coverage:
+    - `tests/test_encryption_helper.py`:
+      - native-loader guard success path with valid runtime marker/version + matching package path
+      - fail-closed path on runtime API marker mismatch
+      - fail-closed path on runtime path redirection outside expected package directory
+      - manifest trust-policy assertions in runtime-delivery metadata tests
+    - `tests/test_decryption_helper.py`:
+      - runtime API marker/version export assertion
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "native_loader or runtime_native_loader or runtime_validate"` => `5 passed, 2 skipped, 26 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_decryption_helper.py` => `32 passed, 4 skipped`
+    - `python -m pytest -q` => `101 passed, 5 skipped`
+- Remaining sub-scope to complete card:
+  - strengthen runtime authenticity beyond marker/version by binding loader checks to signed per-build runtime identity data (e.g., manifest-linked runtime fingerprint) and enforce it in protected stubs.
+  - add compile/runtime packaging guardrails for mixed-platform native suffix resolution and explicit policy controls for trusted relocation scenarios.
 
 ### CARD `ENC-P1-012`
 
