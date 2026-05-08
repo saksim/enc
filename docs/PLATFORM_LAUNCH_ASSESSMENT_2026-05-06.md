@@ -125,7 +125,19 @@ Progress status (2026-05-07):
 - Landed fifth extraction slice into `enc2sop.transport`:
   - extracted OCR chunk parse and metadata inference internals into `enc2sop/transport/parser.py`.
   - `qrcode_helper.py` now delegates `_parse_ocr_chunks*` and metadata inference helpers into transport parser boundaries.
-- Residual blocker remains until OCR/image pipeline internals are also extracted and `qrcode_helper.py` is reduced to a near-thin compatibility facade.
+- Landed sixth extraction slice into `enc2sop.transport`:
+  - added `enc2sop/transport/layout.py` for manifest/page-layout mapping boundaries and sidecar-layout eligibility checks.
+  - `qrcode_helper.py` now delegates `_get_render_layout_pages`, `_line_meta_has_sidecar`, `_page_layout_has_sidecar`, `_page_layouts_support_sidecar`, `_manifest_has_page_entries`, `_resolve_image_page_number`, `_manifest_page_entries`, `_manifest_entries_in_transport_order`, and `_manifest_chunk_payload_length` into the extracted layout module.
+- Landed seventh extraction slice into `enc2sop.transport`:
+  - added `enc2sop/transport/ocr_pipeline.py` for manifest-guided OCR/image processing internals and OCR candidate parsing/repair helpers.
+  - `qrcode_helper.py` now delegates `_detect_text_bands`, `_select_manifest_data_bands`, `_crop_primary_text_band`, `_ocr_payload_crop_tesseract*`, `_ocr_crc_crop_tesseract*`, `_ocr_tesseract_variants`, `_ocr_generic_line_tesseract_variants`, `_ocr_band_tesseract_variants`, metadata/header parse candidates, CRC-hint candidate scoring/repair helpers, `_choose_payload_candidate_with_crc_hint`, `_ocr_manifest_guided_page_tesseract`, and `_ocr_image_crop_tesseract` into the extracted OCR pipeline module.
+- Landed eighth extraction slice into `enc2sop.transport`:
+  - added `enc2sop/transport/ocr_runtime.py` for sidecar decode, structured-page OCR, payload candidate selection/repair, external-provider stdout/command orchestration, and single-image backend routing internals.
+  - `qrcode_helper.py` now delegates `_ocr_image_crop_easyocr`, `_decode_sidecar_payload`, `_ocr_structured_page_sidecar`, `_decode_manifest_guided_sidecar_payload`, `_ocr_manifest_guided_page_sidecar`, `_choose_payload_candidate`, `_repair_payload_candidate_by_crc`, `_ocr_structured_page_tesseract`, `_ocr_structured_page_easyocr`, `_parse_external_ocr_stdout`, `_run_external_ocr_provider`, and `_ocr_single_image` into the extracted runtime module.
+- Landed ninth extraction slice into `enc2sop.transport`:
+  - added `enc2sop/transport/ocr_embedded.py` for embedded-metadata page orchestration and inferred-manifest/page-entry reconstruction internals.
+  - `qrcode_helper.py` now delegates `_build_inferred_manifest_from_metadata`, `_build_expected_page_entries`, and `_ocr_embedded_metadata_page_tesseract` into the extracted embedded OCR module.
+- `ENC-P0-002` extraction target is complete; `qrcode_helper.py` now functions as a compatibility facade over bounded `enc2sop.transport` modules.
 
 ### [BLOCKER][P0] B-002 Compile Path Risk for Decrypt Runtime
 
@@ -180,8 +192,8 @@ Resolution status (2026-05-07):
 
 Residual risk:
 
-- license-file and remote-KMS providers are not yet implemented.
-- current provider still resolves keys locally at runtime; this is a baseline decoupling step, not final hardening.
+- remote-KMS provider is not yet implemented.
+- `license-file` mode is now available, but the runtime decrypt path is still Python-level and not yet hardened by native loader controls.
 
 ## 5. Non-Blocking But Important Gaps
 
@@ -302,8 +314,8 @@ Production go-live should not be claimed until the following are true:
 
 Current go-live gate note (2026-05-07):
 
-- The first five gate items are now satisfied except "at least one non-local key-control path exists".
-- Remaining critical work to satisfy that gate is `ENC-P1-009` (license-file provider), followed by `ENC-P1-010` (remote-KMS contract stub).
+- As of 2026-05-08, the non-local key-control gate item is satisfied via `ENC-P1-009` (`license-file` provider path).
+- Remaining critical work to strengthen platform key architecture is `ENC-P1-010` (remote-KMS contract stub), followed by runtime hardening cards.
 
 ## 9. Assessment Status
 

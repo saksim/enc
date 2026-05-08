@@ -213,6 +213,8 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
             "manifest_sign_key_file",
             "manifest_key_id",
             "require_manifest_signature",
+            "license_file",
+            "license_id",
         ),
     )
     key_mode = _optional_text(keys_table.get("mode"), "keys.mode")
@@ -231,11 +233,15 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
         keys_table.get("require_manifest_signature"),
         "keys.require_manifest_signature",
     )
+    license_file = _optional_text(keys_table.get("license_file"), "keys.license_file")
+    license_id = _optional_text(keys_table.get("license_id"), "keys.license_id")
     return {
         "mode": normalized_mode,
         "manifest_sign_key_file": manifest_sign_key_file,
         "manifest_key_id": manifest_key_id,
         "require_manifest_signature": require_manifest_signature,
+        "license_file": license_file,
+        "license_id": license_id,
     }
 
 
@@ -280,6 +286,8 @@ def load_project_config(
             "manifest_sign_key_file": keys.get("manifest_sign_key_file"),
             "manifest_key_id": keys.get("manifest_key_id"),
             "require_manifest_signature": keys.get("require_manifest_signature"),
+            "license_file": keys.get("license_file"),
+            "license_id": keys.get("license_id"),
         }
     )
     package_metadata = _parse_package_section(_as_table(payload, "package"))

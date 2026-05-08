@@ -36,6 +36,8 @@ class SoencConfigTests(unittest.TestCase):
                         "manifest_sign_key_file = \"./keys/manifest.key\"",
                         "manifest_key_id = \"team-a\"",
                         "require_manifest_signature = true",
+                        "license_file = \"licenses/customer.license.json\"",
+                        "license_id = \"customer-a\"",
                         "",
                         "[package]",
                         "name = \"demo\"",
@@ -60,6 +62,8 @@ class SoencConfigTests(unittest.TestCase):
                 str((root / "keys" / "manifest.key").resolve()),
             )
             self.assertTrue(project.cli_defaults["require_manifest_signature"])
+            self.assertEqual(project.cli_defaults["license_file"], "licenses/customer.license.json")
+            self.assertEqual(project.cli_defaults["license_id"], "customer-a")
             self.assertEqual(project.cli_defaults["target"], str((root / "src").resolve()))
             self.assertEqual(project.cli_defaults["scope_config"], str((root / "cfg" / "scope.json").resolve()))
             self.assertEqual(project.cli_defaults["output_dir"], str((root / "out").resolve()))

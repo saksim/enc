@@ -44,7 +44,7 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ### CARD `ENC-P0-002`
 
-- Status: `in_progress`
+- Status: `done`
 - Goal: split `qrcode_helper.py` into bounded modules so protocol, render, OCR, recovery, and CLI are independently maintainable
 - Type: architectural refactor
 - Depends on: `ENC-P0-001`
@@ -129,6 +129,97 @@ If one card is too large for one iteration, the agent should deliver a vertical 
       - `python -m pytest -q` => 81 passed, 3 skipped
     - Remaining sub-scope to complete card:
       - reduce residual OCR/image pipeline internals in `qrcode_helper.py` into bounded transport modules so the file becomes a near-thin compatibility facade
+  - Notes (2026-05-08, iteration 6):
+    - Added `enc2sop/transport/layout.py` and extracted manifest/page-layout mapping helpers out of `qrcode_helper.py`:
+      - `_get_render_layout_pages`
+      - `_line_meta_has_sidecar`
+      - `_page_layout_has_sidecar`
+      - `_page_layouts_support_sidecar`
+      - `_manifest_has_page_entries`
+      - `_resolve_image_page_number`
+      - `_manifest_page_entries`
+      - `_manifest_entries_in_transport_order`
+      - `_manifest_chunk_payload_length`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.layout`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `layout`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for all extracted layout helper boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 17 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 82 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract residual OCR/image processing internals (band detection, manifest-guided crop routing, sidecar decode/image OCR pipeline helpers) into bounded transport modules
+      - keep `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-08, iteration 7):
+    - Added `enc2sop/transport/ocr_pipeline.py` and extracted manifest-guided OCR/image pipeline helpers out of `qrcode_helper.py`:
+      - `_detect_text_bands`
+      - `_select_manifest_data_bands`
+      - `_crop_primary_text_band`
+      - `_ocr_payload_crop_tesseract`
+      - `_ocr_crc_crop_tesseract`
+      - `_ocr_tesseract_variants`
+      - `_ocr_payload_crop_tesseract_variants`
+      - `_ocr_crc_crop_tesseract_variants`
+      - `_ocr_generic_line_tesseract_variants`
+      - `_ocr_band_tesseract_variants`
+      - `_parse_meta_line_candidate`
+      - `_parse_cfg_line_candidate`
+      - `_parse_hash_fragment_candidate`
+      - `_parse_hash_compact_candidate`
+      - `_crc_windows_from_hints`
+      - `_score_candidate_crc_against_hints`
+      - `_repair_payload_candidate_by_crc_hint`
+      - `_choose_payload_candidate_with_crc_hint`
+      - `_ocr_manifest_guided_page_tesseract`
+      - `_ocr_image_crop_tesseract`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.ocr_pipeline`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `ocr_pipeline`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for extracted OCR pipeline boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 18 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 83 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract residual sidecar decode/structured OCR page internals and external-provider image OCR orchestration internals from `qrcode_helper.py` into bounded transport modules
+      - keep `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-08, iteration 8):
+    - Added `enc2sop/transport/ocr_runtime.py` and extracted residual sidecar/structured OCR runtime boundaries:
+      - `_ocr_image_crop_easyocr`
+      - `_decode_sidecar_payload`
+      - `_ocr_structured_page_sidecar`
+      - `_decode_manifest_guided_sidecar_payload`
+      - `_ocr_manifest_guided_page_sidecar`
+      - `_choose_payload_candidate`
+      - `_repair_payload_candidate_by_crc`
+      - `_ocr_structured_page_tesseract`
+      - `_ocr_structured_page_easyocr`
+      - `_parse_external_ocr_stdout`
+      - `_run_external_ocr_provider`
+      - `_ocr_single_image`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.ocr_runtime`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `ocr_runtime`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for all extracted OCR runtime boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 19 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 84 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract remaining embedded-metadata page orchestration internals (`_ocr_embedded_metadata_page_tesseract`, `_build_inferred_manifest_from_metadata`, `_build_expected_page_entries`) from `qrcode_helper.py` into bounded transport modules
+      - keep `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-08, iteration 9):
+    - Added `enc2sop/transport/ocr_embedded.py` and extracted remaining embedded-metadata page orchestration internals from `qrcode_helper.py`:
+      - `_build_inferred_manifest_from_metadata`
+      - `_build_expected_page_entries`
+      - `_ocr_embedded_metadata_page_tesseract`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.ocr_embedded`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `ocr_embedded`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for extracted embedded-metadata helper boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 21 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 86 passed, 3 skipped
+    - Remaining sub-scope:
+      - none; `ENC-P0-002` is complete and `qrcode_helper.py` now serves as a compatibility facade over `enc2sop.transport` module boundaries.
 
 ### CARD `ENC-P0-003`
 
@@ -304,7 +395,7 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ### CARD `ENC-P1-009`
 
-- Status: `todo`
+- Status: `done`
 - Goal: add a license-file based key provider
 - Type: security + productization
 - Depends on: `ENC-P0-008`
@@ -313,10 +404,36 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - packaging and runtime wiring
 - Deliverables:
   - license file format
-  - license validation flow
-  - protected runtime path that reads license-derived key material
+- license validation flow
+- protected runtime path that reads license-derived key material
 - Acceptance:
-  - protected artifact can run with valid license and fails with invalid license
+- protected artifact can run with valid license and fails with invalid license
+- Notes (2026-05-08):
+  - Added `enc2sop/keys/license.py` with `license-file` provider implementation and run lifecycle hooks:
+    - `begin_run`: initializes license context (`license_file`, `license_id`)
+    - `pack_key`: emits key refs (`mode`, `license_id`, `license_file`, `key_id`) and stores per-run key map
+    - `finalize_run`: writes `soenc` license artifact (`enc2sop-license/v1`) with SHA256 integrity digest and updates `build_manifest.json` `key_management` metadata
+  - Updated key package export surface:
+    - `enc2sop/keys/__init__.py` now exports `LicenseFileKeyProvider`
+  - Updated protection flow wiring in `encryption_helper.py`:
+    - provider lifecycle hooks integrated (`_provider_begin_run`, `_provider_finalize_run`)
+    - `protect_project` now accepts provider instance and allows provider finalization to mutate manifest
+    - added CLI controls `--license-file`, `--license-id` and guardrails requiring `keys.mode=license-file` when used
+    - release copy flow now includes license artifact when declared by manifest
+  - Extended runtime key resolution in `decryption_helper.py`:
+    - runtime now supports `license-file` key refs
+    - resolves license path from `SOENC_LICENSE_FILE` override or manifest-relative fallback search
+    - validates license schema/version/mode, `license_id`, and integrity digest before key resolution
+  - Extended config contract in `soenc_config.py`:
+    - `[keys]` now supports `license_file` and `license_id`
+  - Added focused tests:
+    - `tests/test_key_provider.py`: provider writes license + manifest metadata
+    - `tests/test_encryption_helper.py`:
+      - valid license-mode flow executes protected symbol successfully
+      - tampered license fails at runtime with integrity mismatch
+    - `tests/test_soenc_config.py`: parse/merge coverage for `license_file` and `license_id`
+  - Verification:
+    - `python -m pytest -q tests/test_key_provider.py tests/test_encryption_helper.py tests/test_soenc_config.py` => `28 passed, 3 skipped`
 
 ### CARD `ENC-P1-010`
 

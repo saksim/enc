@@ -10,7 +10,6 @@ Design goals:
 """
 
 import hashlib
-import itertools
 import json
 import math
 import os
@@ -23,7 +22,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from enc2sop.transport import cli as _transport_cli
+from enc2sop.transport import layout as _transport_layout
 from enc2sop.transport import ocr_adapters as _ocr_adapters
+from enc2sop.transport import ocr_embedded as _transport_ocr_embedded
+from enc2sop.transport import ocr_pipeline as _transport_ocr_pipeline
+from enc2sop.transport import ocr_runtime as _transport_ocr_runtime
 from enc2sop.transport import parser as _transport_parser
 from enc2sop.transport import protocol as _transport_protocol
 from enc2sop.transport import recover as _transport_recover
@@ -1380,81 +1383,19 @@ class AirgapTransportLayer(object):
         return image_files
 
     def _get_render_layout_pages(self, manifest: Dict[str, object]) -> List[Dict[str, object]]:
-        render_layout = manifest.get("render_layout")
-        if not isinstance(render_layout, dict):
-            return []
-        pages = render_layout.get("pages")
-        if not isinstance(pages, list):
-            return []
-
-        parsed_pages = []
-        for item in pages:
-            if not isinstance(item, dict):
-                continue
-            try:
-                page_no = int(item.get("page", 0))
-            except Exception:
-                continue
-            if page_no <= 0:
-                continue
-            parsed_pages.append(item)
-
-        parsed_pages.sort(key=lambda x: int(x.get("page", 0)))
-        return parsed_pages
+        return _transport_layout.get_render_layout_pages(manifest=manifest)
 
     def _line_meta_has_sidecar(self, line_meta: Dict[str, object]) -> bool:
-        if not isinstance(line_meta, dict):
-            return False
-        box = line_meta.get("binary_box")
-        if not isinstance(box, list) or len(box) != 4:
-            return False
-        for key in ("binary_rows", "binary_cols", "bit_count", "payload_len"):
-            try:
-                if int(line_meta.get(key, 0)) <= 0:
-                    return False
-            except Exception:
-                return False
-        return True
+        return _transport_layout.line_meta_has_sidecar(line_meta=line_meta)
 
     def _page_layout_has_sidecar(self, page_layout: Dict[str, object]) -> bool:
-        if not isinstance(page_layout, dict):
-            return False
-        raw_lines = page_layout.get("lines", [])
-        if not isinstance(raw_lines, list) or not raw_lines:
-            return False
-
-        saw_data = False
-        for item in raw_lines:
-            if not isinstance(item, dict) or item.get("kind") != "data":
-                continue
-            saw_data = True
-            if not self._line_meta_has_sidecar(item):
-                return False
-        return saw_data
+        return _transport_layout.page_layout_has_sidecar(page_layout=page_layout)
 
     def _page_layouts_support_sidecar(self, page_layouts: List[Dict[str, object]]) -> bool:
-        if not isinstance(page_layouts, list) or not page_layouts:
-            return False
-        return all(self._page_layout_has_sidecar(page_layout) for page_layout in page_layouts)
+        return _transport_layout.page_layouts_support_sidecar(page_layouts=page_layouts)
 
     def _manifest_has_page_entries(self, manifest: Dict[str, object]) -> bool:
-        if not isinstance(manifest, dict):
-            return False
-        chunk_locations = manifest.get("chunk_locations")
-        if not isinstance(chunk_locations, dict) or not chunk_locations:
-            return False
-        for raw_locations in chunk_locations.values():
-            if not isinstance(raw_locations, list):
-                continue
-            for item in raw_locations:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    if int(item.get("page", 0)) > 0 and int(item.get("line", 0)) > 0:
-                        return True
-                except Exception:
-                    continue
-        return False
+        return _transport_layout.manifest_has_page_entries(manifest=manifest)
 
     def _resolve_image_page_number(
         self,
@@ -1462,300 +1403,66 @@ class AirgapTransportLayer(object):
         image_index: int,
         manifest: Optional[Dict[str, object]],
     ) -> int:
-        total_pages = 0
-        if isinstance(manifest, dict):
-            try:
-                total_pages = int(manifest.get("total_pages", 0))
-            except Exception:
-                total_pages = 0
-
-        match = PAGE_NO_FROM_NAME_PATTERN.search(image_path.stem)
-        if match:
-            try:
-                page_no = int(match.group(1))
-            except Exception:
-                page_no = 0
-            else:
-                if page_no > 0 and (not total_pages or page_no <= total_pages):
-                    return page_no
-
-        fallback = int(image_index) + 1
-        if fallback > 0:
-            return fallback
-        return 1
+        return _transport_layout.resolve_image_page_number(
+            image_path=image_path,
+            image_index=image_index,
+            manifest=manifest,
+        )
 
     def _manifest_page_entries(
         self,
         manifest: Dict[str, object],
         page_no: int,
     ) -> List[Dict[str, int]]:
-        chunk_locations = manifest.get("chunk_locations", {})
-        if not isinstance(chunk_locations, dict):
-            return []
-
-        entries = []
-        for chunk_key, raw_locations in chunk_locations.items():
-            try:
-                chunk_idx = int(chunk_key)
-            except Exception:
-                continue
-            if not isinstance(raw_locations, list):
-                continue
-            for item in raw_locations:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    item_page = int(item.get("page"))
-                    line_no = int(item.get("line"))
-                    copy_no = int(item.get("copy", 1))
-                    priority = int(item.get("priority", copy_no))
-                except Exception:
-                    continue
-                if item_page != int(page_no):
-                    continue
-                entries.append(
-                    {
-                        "page": item_page,
-                        "line": line_no,
-                        "copy": copy_no,
-                        "priority": priority,
-                        "chunk_index": chunk_idx,
-                    }
-                )
-        entries.sort(key=lambda x: (int(x["line"]), int(x["priority"]), int(x["chunk_index"])))
-        return entries
+        return _transport_layout.manifest_page_entries(
+            manifest=manifest,
+            page_no=page_no,
+        )
 
     def _manifest_entries_in_transport_order(self, manifest: Dict[str, object]) -> List[Dict[str, int]]:
-        chunk_locations = manifest.get("chunk_locations", {})
-        if not isinstance(chunk_locations, dict):
-            return []
-
-        entries: List[Dict[str, int]] = []
-        for chunk_key, raw_locations in chunk_locations.items():
-            try:
-                chunk_idx = int(chunk_key)
-            except Exception:
-                continue
-            if not isinstance(raw_locations, list):
-                continue
-            for item in raw_locations:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    item_page = int(item.get("page", 0))
-                    line_no = int(item.get("line", 0))
-                    copy_no = int(item.get("copy", 1))
-                    priority = int(item.get("priority", copy_no))
-                except Exception:
-                    continue
-                if item_page <= 0 or line_no <= 0:
-                    continue
-                entries.append(
-                    {
-                        "page": item_page,
-                        "line": line_no,
-                        "copy": copy_no,
-                        "priority": priority,
-                        "chunk_index": chunk_idx,
-                    }
-                )
-        entries.sort(key=lambda x: (int(x["page"]), int(x["line"]), int(x["copy"]), int(x["chunk_index"])))
-        return entries
+        return _transport_layout.manifest_entries_in_transport_order(manifest=manifest)
 
     def _manifest_chunk_payload_length(self, manifest: Dict[str, object], chunk_idx: int) -> int:
-        chunk_lengths = manifest.get("chunk_lengths")
-        if isinstance(chunk_lengths, list) and 0 <= int(chunk_idx) < len(chunk_lengths):
-            try:
-                return int(chunk_lengths[int(chunk_idx)])
-            except Exception:
-                return 0
-
-        parity = manifest.get("parity", {})
-        if not isinstance(parity, dict):
-            return 0
-        groups = parity.get("groups", [])
-        if not isinstance(groups, list):
-            return 0
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            try:
-                parity_idx = int(group.get("parity_chunk_index"))
-                parity_len = int(group.get("parity_len", 0))
-            except Exception:
-                continue
-            if parity_idx == int(chunk_idx) and parity_len > 0:
-                return parity_len
-        return 0
-
-    def _detect_text_bands(self, image) -> List[Dict[str, int]]:
-        gray = image.convert("L")
-        binary = gray.point(lambda p: 0 if p < 180 else 255, mode="1")
-        row_threshold = max(8, int(gray.width * 0.01))
-        rows = []
-        for y in range(gray.height):
-            dark = 0
-            for x in range(gray.width):
-                if binary.getpixel((x, y)) == 0:
-                    dark += 1
-            rows.append(dark)
-
-        raw_bands = []
-        start = None
-        for y, dark in enumerate(rows):
-            active = dark > row_threshold
-            if active and start is None:
-                start = y
-                continue
-            if (not active) and start is not None:
-                band_rows = rows[start:y]
-                raw_bands.append(
-                    {
-                        "top": start,
-                        "bottom": y - 1,
-                        "height": max(1, y - start),
-                        "ink_peak": max(band_rows) if band_rows else 0,
-                        "ink_sum": sum(band_rows),
-                    }
-                )
-                start = None
-        if start is not None:
-            band_rows = rows[start:]
-            raw_bands.append(
-                {
-                    "top": start,
-                    "bottom": gray.height - 1,
-                    "height": max(1, gray.height - start),
-                    "ink_peak": max(band_rows) if band_rows else 0,
-                    "ink_sum": sum(band_rows),
-                }
-            )
-
-        merged = []
-        merge_gap = 6
-        for band in raw_bands:
-            if not merged or int(band["top"]) - int(merged[-1]["bottom"]) > merge_gap:
-                merged.append(dict(band))
-                continue
-            merged[-1]["bottom"] = int(band["bottom"])
-            merged[-1]["height"] = int(merged[-1]["bottom"]) - int(merged[-1]["top"]) + 1
-            merged[-1]["ink_peak"] = max(int(merged[-1]["ink_peak"]), int(band["ink_peak"]))
-            merged[-1]["ink_sum"] = int(merged[-1]["ink_sum"]) + int(band["ink_sum"])
-        return merged
+        return _transport_layout.manifest_chunk_payload_length(
+            manifest=manifest,
+            chunk_idx=chunk_idx,
+        )
+    def _detect_text_bands(self, image) -> List[Dict[str, int]]:
+        return _transport_ocr_pipeline.detect_text_bands(image=image)
 
     def _select_manifest_data_bands(
         self,
         bands: List[Dict[str, int]],
         expected_count: int,
     ) -> List[Dict[str, int]]:
-        if expected_count <= 0:
-            return []
-        if len(bands) < expected_count:
-            raise ValueError(
-                "detected text bands {} is less than expected lines {}".format(
-                    len(bands), expected_count
-                )
-            )
-
-        working = list(bands)
-        if len(working) >= expected_count + 7:
-            middle = working[6:-1]
-            if len(middle) >= expected_count:
-                working = middle
-        elif len(working) >= expected_count + 2:
-            middle = working[1:-1]
-            if len(middle) >= expected_count:
-                working = middle
-
-        if len(working) > expected_count:
-            # Keep a contiguous run to preserve line order and avoid mixing header/footer bands.
-            best_window = None
-            best_score = None
-            window_count = len(working) - expected_count + 1
-            for index in range(window_count):
-                window = working[index : index + expected_count]
-                tops = [int(item["top"]) for item in window]
-                gaps = []
-                for gap_index in range(len(tops) - 1):
-                    gaps.append(max(1, tops[gap_index + 1] - tops[gap_index]))
-                if gaps:
-                    gap_span = max(gaps) - min(gaps)
-                    avg_gap = float(sum(gaps)) / float(len(gaps))
-                else:
-                    gap_span = 0
-                    avg_gap = 0.0
-                ink_total = sum(int(item["ink_sum"]) for item in window)
-                score = (gap_span, -ink_total, abs(avg_gap), index)
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_window = window
-            if best_window:
-                working = list(best_window)
-        return working
+        return _transport_ocr_pipeline.select_manifest_data_bands(
+            bands=bands,
+            expected_count=expected_count,
+        )
 
     def _crop_primary_text_band(self, image, band: Dict[str, int]):
-        top = max(0, int(band["top"]) - 6)
-        bottom = min(image.height, int(band["bottom"]) + 7)
-        band_crop = image.crop((0, top, image.width, bottom)).convert("L")
-        binary = band_crop.point(lambda p: 0 if p < 180 else 255, mode="1")
-        # A single dark pixel column is enough here; higher thresholds split thin OCR glyphs.
-        col_threshold = 1
-        spans = []
-        start = None
-        for x in range(band_crop.width):
-            dark = 0
-            for y in range(band_crop.height):
-                if binary.getpixel((x, y)) == 0:
-                    dark += 1
-            active = dark > col_threshold
-            if active and start is None:
-                start = x
-                continue
-            if (not active) and start is not None:
-                spans.append({"left": start, "right": x - 1, "width": x - start})
-                start = None
-        if start is not None:
-            spans.append({"left": start, "right": band_crop.width - 1, "width": band_crop.width - start})
-
-        merged = []
-        merge_gap = 20
-        for span in spans:
-            if not merged or int(span["left"]) - int(merged[-1]["right"]) > merge_gap:
-                merged.append(dict(span))
-                continue
-            merged[-1]["right"] = int(span["right"])
-            merged[-1]["width"] = int(merged[-1]["right"]) - int(merged[-1]["left"]) + 1
-
-        if merged:
-            best = sorted(merged, key=lambda item: (-int(item["width"]), int(item["left"])))[0]
-            left = max(0, int(best["left"]) - 20)
-            right = min(image.width, int(best["right"]) + 21)
-        else:
-            left = 0
-            right = image.width
-        return image.crop((left, top, right, bottom)).convert("L")
+        return _transport_ocr_pipeline.crop_primary_text_band(
+            image=image,
+            band=band,
+        )
 
     def _ocr_payload_crop_tesseract(self, image, lang: str) -> str:
-        crop = image.convert("L")
-        crop = crop.resize((crop.width * 3, crop.height * 4), RESAMPLE_LANCZOS)
-        crop = Image.eval(crop, lambda p: 255 if p > 180 else 0)
-        config = (
-            "--oem 3 --psm 7 "
-            "-c preserve_interword_spaces=0 "
-            "-c tessedit_char_whitelist={}"
-        ).format(SAFE_BASE32_ALPHABET)
-        return self._tesseract_image_to_string(image=crop, lang=lang, config=config)
+        return _transport_ocr_pipeline.ocr_payload_crop_tesseract(
+            transport=self,
+            image=image,
+            lang=lang,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+        )
 
     def _ocr_crc_crop_tesseract(self, image, lang: str) -> str:
-        crop = image.convert("L")
-        crop = crop.resize((crop.width * 4, crop.height * 5), RESAMPLE_LANCZOS)
-        crop = Image.eval(crop, lambda p: 255 if p > 185 else 0)
-        config = (
-            "--oem 3 --psm 7 "
-            "-c preserve_interword_spaces=0 "
-            "-c tessedit_char_whitelist=0123456789ABCDEF"
+        return _transport_ocr_pipeline.ocr_crc_crop_tesseract(
+            transport=self,
+            image=image,
+            lang=lang,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
         )
-        return self._tesseract_image_to_string(image=crop, lang=lang, config=config)
 
     def _ocr_tesseract_variants(
         self,
@@ -1764,179 +1471,88 @@ class AirgapTransportLayer(object):
         whitelist: str,
         variants: List[Tuple[int, int, Optional[int]]],
     ) -> List[str]:
-        outputs = []
-        seen = set()
-        base = image.convert("L")
-        config = (
-            "--oem 3 --psm 7 "
-            "-c preserve_interword_spaces=0 "
-            "-c tessedit_char_whitelist={}"
-        ).format(whitelist)
-        for scale_x, scale_y, threshold in variants:
-            if scale_x <= 0 or scale_y <= 0:
-                continue
-            crop = base.resize(
-                (max(1, base.width * scale_x), max(1, base.height * scale_y)),
-                RESAMPLE_LANCZOS,
-            )
-            if threshold is not None:
-                crop = Image.eval(crop, lambda p, t=threshold: 255 if p > t else 0)
-            text = self._tesseract_image_to_string(image=crop, lang=lang, config=config)
-            normalized = _normalize_ocr_line(text)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            outputs.append(text)
-        return outputs
-
-    def _ocr_payload_crop_tesseract_variants(self, image, lang: str) -> List[str]:
-        return self._ocr_tesseract_variants(
-            image=image,
-            lang=lang,
-            whitelist=SAFE_BASE32_ALPHABET,
-            variants=[
-                (3, 4, 180),
-                (4, 5, 170),
-                (3, 4, None),
-            ],
-        )
-
-    def _ocr_crc_crop_tesseract_variants(self, image, lang: str) -> List[str]:
-        return self._ocr_tesseract_variants(
-            image=image,
-            lang=lang,
-            whitelist="0123456789ABCDEF",
-            variants=[
-                (4, 5, 185),
-                (4, 5, None),
-                (3, 4, 170),
-            ],
-        )
-
-    def _ocr_generic_line_tesseract_variants(self, image, lang: str, whitelist: str) -> List[str]:
-        return self._ocr_tesseract_variants(
+        return _transport_ocr_pipeline.ocr_tesseract_variants(
+            transport=self,
             image=image,
             lang=lang,
             whitelist=whitelist,
-            variants=[
-                (3, 4, 180),
-                (4, 5, 170),
-                (3, 4, None),
-            ],
+            variants=variants,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+        )
+
+    def _ocr_payload_crop_tesseract_variants(self, image, lang: str) -> List[str]:
+        return _transport_ocr_pipeline.ocr_payload_crop_tesseract_variants(
+            transport=self,
+            image=image,
+            lang=lang,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+        )
+
+    def _ocr_crc_crop_tesseract_variants(self, image, lang: str) -> List[str]:
+        return _transport_ocr_pipeline.ocr_crc_crop_tesseract_variants(
+            transport=self,
+            image=image,
+            lang=lang,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+        )
+
+    def _ocr_generic_line_tesseract_variants(self, image, lang: str, whitelist: str) -> List[str]:
+        return _transport_ocr_pipeline.ocr_generic_line_tesseract_variants(
+            transport=self,
+            image=image,
+            lang=lang,
+            whitelist=whitelist,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
         )
 
     def _ocr_band_tesseract_variants(self, image, band: Dict[str, int], lang: str, whitelist: str) -> List[str]:
-        text_band = self._crop_primary_text_band(image=image, band=band)
-        return self._ocr_generic_line_tesseract_variants(text_band, lang=lang, whitelist=whitelist)
+        return _transport_ocr_pipeline.ocr_band_tesseract_variants(
+            transport=self,
+            image=image,
+            band=band,
+            lang=lang,
+            whitelist=whitelist,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+        )
 
     def _parse_meta_line_candidate(self, raw_texts: List[str]) -> Optional[Dict[str, int]]:
-        for raw in raw_texts:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            match = META_PATTERN.match(line)
-            if not match:
-                continue
-            return {
-                "artifact_id": match.group(1),
-                "page_no": int(match.group(2)),
-                "total_pages": int(match.group(3)),
-                "page_chunks": int(match.group(4)),
-                "total_chunks": int(match.group(5)),
-                "canonical": "@META|AT1|ID={}|PAGE={}/{}|CHUNKS={}|TOTAL={}".format(
-                    match.group(1),
-                    int(match.group(2)),
-                    int(match.group(3)),
-                    int(match.group(4)),
-                    int(match.group(5)),
-                ),
-            }
-        return None
+        return _transport_ocr_pipeline.parse_meta_line_candidate(raw_texts=raw_texts)
 
     def _parse_cfg_line_candidate(self, raw_texts: List[str]) -> Optional[Dict[str, object]]:
-        for raw in raw_texts:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            cfg = _parse_cfg_line(line)
-            if not cfg:
-                continue
-            return {
-                "values": cfg,
-                "canonical": "@CFG|AT1|CC={}|LP={}|RC={}|IL={}|PG={}|CS={}|RS={}".format(
-                    int(cfg["CC"]),
-                    int(cfg["LP"]),
-                    int(cfg["RC"]),
-                    int(cfg["IL"]),
-                    int(cfg["PG"]),
-                    int(cfg["CS"]),
-                    int(cfg["RS"]),
-                ),
-            }
-        return None
+        return _transport_ocr_pipeline.parse_cfg_line_candidate(raw_texts=raw_texts)
 
     def _parse_hash_fragment_candidate(self, raw_texts: List[str], expected_kind: str, expected_part: int) -> Optional[str]:
-        for raw in raw_texts:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            parsed = _parse_hash_fragment_line(line)
-            if not parsed:
-                continue
-            kind, part_no, fragment = parsed
-            if kind == expected_kind and int(part_no) == int(expected_part):
-                return "@{}{}|{}".format(expected_kind, int(expected_part), fragment)
-        return None
+        return _transport_ocr_pipeline.parse_hash_fragment_candidate(
+            raw_texts=raw_texts,
+            expected_kind=expected_kind,
+            expected_part=expected_part,
+        )
 
     def _parse_hash_compact_candidate(
         self, raw_texts: List[str], expected_part: int
     ) -> Optional[Dict[str, str]]:
-        for raw in raw_texts:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            parsed = _parse_hash_compact_line(line)
-            if not parsed:
-                continue
-            part_no, rh, ch = parsed
-            if int(part_no) != int(expected_part):
-                continue
-            return {
-                "canonical": "@HS{}|R={}|C={}".format(int(part_no), rh, ch),
-                "RH": rh,
-                "CH": ch,
-            }
-        return None
+        return _transport_ocr_pipeline.parse_hash_compact_candidate(
+            raw_texts=raw_texts,
+            expected_part=expected_part,
+        )
 
     def _crc_windows_from_hints(self, crc_hints: List[str]) -> List[str]:
-        windows = []
-        seen = set()
-        for raw_hint in crc_hints:
-            normalized = _normalize_hex_token(raw_hint)
-            if len(normalized) < 4:
-                continue
-            for index in range(0, len(normalized) - 3):
-                window = normalized[index : index + 4]
-                if len(window) != 4 or any(ch not in "0123456789ABCDEF" for ch in window):
-                    continue
-                if window in seen:
-                    continue
-                seen.add(window)
-                windows.append(window)
-        return windows
+        return _transport_ocr_pipeline.crc_windows_from_hints(crc_hints=crc_hints)
 
     def _score_candidate_crc_against_hints(
         self,
         candidate_crc: str,
         crc_hints: List[str],
     ) -> Tuple[int, int, int, int]:
-        windows = self._crc_windows_from_hints(crc_hints)
-        if not windows:
-            return (0, 0, 0, 0)
-
-        diffs = sorted(
-            (
-                _levenshtein_distance(candidate_crc, window),
-                sum(1 for left, right in zip(candidate_crc, window) if left != right),
-            )
-            for window in windows
+        return _transport_ocr_pipeline.score_candidate_crc_against_hints(
+            candidate_crc=candidate_crc,
+            crc_hints=crc_hints,
         )
-        exact_count = sum(1 for item in diffs if item == (0, 0))
-        near_count = sum(1 for item in diffs if item[0] <= 1)
-        top = diffs[: min(4, len(diffs))]
-        return (-exact_count, -near_count, sum(item[0] for item in top), sum(item[1] for item in top))
 
     def _repair_payload_candidate_by_crc_hint(
         self,
@@ -1945,88 +1561,12 @@ class AirgapTransportLayer(object):
         crc_hint: str,
         max_attempts: int = 12000,
     ) -> Tuple[str, str, Tuple[int, int]]:
-        actual_crc = _crc16_hex(core_prefix + payload)
-        normalized_crc = _normalize_hex_token(crc_hint)
-        if not normalized_crc or any(ch not in "0123456789ABCDEF" for ch in normalized_crc):
-            return payload, actual_crc, (0, 0)
-
-        hint_windows = []
-        if len(normalized_crc) >= 4:
-            for index in range(0, len(normalized_crc) - 3):
-                hint_windows.append(normalized_crc[index : index + 4])
-        else:
-            hint_windows.append(normalized_crc)
-
-        def _crc_score(candidate_crc: str) -> Tuple[int, int]:
-            edit_distance = _levenshtein_distance(candidate_crc, normalized_crc)
-            window_diff = 0
-            if hint_windows and all(len(window) == len(candidate_crc) for window in hint_windows):
-                window_diff = min(
-                    sum(1 for left, right in zip(candidate_crc, window) if left != right)
-                    for window in hint_windows
-                )
-            return (edit_distance, window_diff)
-
-        best_payload = payload
-        best_crc = actual_crc
-        best_diff = _crc_score(actual_crc)
-        if best_diff == (0, 0):
-            return best_payload, best_crc, best_diff
-
-        positions = []
-        replacements = []
-        for index, ch in enumerate(payload):
-            alt_text = PAYLOAD_OCR_AMBIGUITIES.get(ch, "")
-            alt_chars = [c for c in alt_text if c in SAFE_BASE32_ALPHABET and c != ch]
-            if not alt_chars:
-                continue
-            positions.append(index)
-            replacements.append(alt_chars)
-
-        attempts = 0
-        base_chars = list(payload)
-        max_depth = min(4, len(positions))
-        for depth in range(1, max_depth + 1):
-            for pos_combo in itertools.combinations(range(len(positions)), depth):
-                alt_lists = [replacements[pos_idx] for pos_idx in pos_combo]
-                for repl_combo in itertools.product(*alt_lists):
-                    attempts += 1
-                    if attempts > max_attempts:
-                        break
-                    candidate_chars = list(base_chars)
-                    for rel_idx, repl in zip(pos_combo, repl_combo):
-                        candidate_chars[positions[rel_idx]] = repl
-                    candidate = "".join(candidate_chars)
-                    candidate_crc = _crc16_hex(core_prefix + candidate)
-                    diff = _crc_score(candidate_crc)
-                    if diff < best_diff:
-                        best_payload = candidate
-                        best_crc = candidate_crc
-                        best_diff = diff
-                        if diff == (0, 0):
-                            return best_payload, best_crc, best_diff
-                if attempts > max_attempts:
-                    break
-            if attempts > max_attempts:
-                break
-
-        # Short payloads are cheap to brute-force for one arbitrary symbol.
-        if best_diff != (0, 0) and len(payload) <= 12:
-            for index, original in enumerate(payload):
-                for repl in SAFE_BASE32_ALPHABET:
-                    if repl == original:
-                        continue
-                    candidate = payload[:index] + repl + payload[index + 1 :]
-                    candidate_crc = _crc16_hex(core_prefix + candidate)
-                    diff = _crc_score(candidate_crc)
-                    if diff < best_diff:
-                        best_payload = candidate
-                        best_crc = candidate_crc
-                        best_diff = diff
-                        if diff == (0, 0):
-                            return best_payload, best_crc, best_diff
-
-        return best_payload, best_crc, best_diff
+        return _transport_ocr_pipeline.repair_payload_candidate_by_crc_hint(
+            payload=payload,
+            core_prefix=core_prefix,
+            crc_hint=crc_hint,
+            max_attempts=max_attempts,
+        )
 
     def _choose_payload_candidate_with_crc_hint(
         self,
@@ -2035,84 +1575,12 @@ class AirgapTransportLayer(object):
         crc_hints: List[str],
         raw_texts: List[str],
     ) -> str:
-        if expected_len <= 0:
-            return ""
-
-        sep_chars = {"X", "I", "1", "|"}
-        candidates = []
-        seen = set()
-        all_crc_hints = list(crc_hints or [])
-
-        for raw in raw_texts:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            chunk_match = re.search(r"C[0-9OIL]{5}", line)
-            segment = line[chunk_match.end() :] if chunk_match else line
-            crc_match = re.search(r"([0-9A-FIOBLS]{4})$", segment)
-            parts = []
-            if crc_match and crc_match.start(1) > 0:
-                all_crc_hints.append(crc_match.group(1))
-                parts.append(segment[: crc_match.start(1)])
-            parts.append(segment)
-            for part in parts:
-                if part[:1] in sep_chars:
-                    part = part[1:]
-                if part[-1:] in sep_chars:
-                    part = part[:-1]
-                normalized = _normalize_payload(part)
-                safe = "".join(ch for ch in normalized if ch in SAFE_BASE32_ALPHABET)
-                if not safe:
-                    continue
-                if len(safe) == expected_len:
-                    variants = [safe]
-                elif len(safe) > expected_len:
-                    if (chunk_match is None) and crc_match:
-                        tail_start = len(safe) - expected_len
-                        window_start = max(0, tail_start - 2)
-                        window_end = min(len(safe) - expected_len, tail_start + 2)
-                        variants = [
-                            safe[start : start + expected_len]
-                            for start in range(window_start, window_end + 1)
-                        ]
-                    else:
-                        variants = [
-                            safe[start : start + expected_len]
-                            for start in range(0, len(safe) - expected_len + 1)
-                        ]
-                else:
-                    variants = []
-                for candidate in variants:
-                    if candidate in seen:
-                        continue
-                    seen.add(candidate)
-                    candidates.append(candidate)
-
-        if not candidates:
-            return ""
-
-        ranked = []
-        core_prefix = "C{:05d}|".format(int(chunk_idx))
-        windows = self._crc_windows_from_hints(all_crc_hints)
-        for candidate in candidates:
-            if windows:
-                for one_hint in windows:
-                    repaired, actual_crc, diff = self._repair_payload_candidate_by_crc_hint(
-                        payload=candidate,
-                        core_prefix=core_prefix,
-                        crc_hint=one_hint,
-                    )
-                    ranked.append(
-                        (
-                            self._score_candidate_crc_against_hints(actual_crc, all_crc_hints),
-                            diff,
-                            repaired,
-                            actual_crc,
-                        )
-                    )
-            else:
-                actual_crc = _crc16_hex(core_prefix + candidate)
-                ranked.append(((0, 0, 0, 0), (0, 0), candidate, actual_crc))
-        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-        return ranked[0][2]
+        return _transport_ocr_pipeline.choose_payload_candidate_with_crc_hint(
+            chunk_idx=chunk_idx,
+            expected_len=expected_len,
+            crc_hints=crc_hints,
+            raw_texts=raw_texts,
+        )
 
     def _ocr_manifest_guided_page_tesseract(
         self,
@@ -2126,70 +1594,15 @@ class AirgapTransportLayer(object):
             raise RuntimeError("Pillow is required for manifest-guided OCR extraction")
         if not page_entries:
             raise ValueError("manifest page {} does not contain chunk locations".format(page_no))
-
-        image = Image.open(str(image_path)).convert("L")
-        bands = self._detect_text_bands(image)
-        data_bands = self._select_manifest_data_bands(bands, len(page_entries))
-        if len(data_bands) != len(page_entries):
-            raise ValueError(
-                "manifest-guided OCR band mismatch: expected {} got {}".format(
-                    len(page_entries), len(data_bands)
-                )
-            )
-
-        lines = []
-        for band, entry in zip(data_bands, page_entries):
-            chunk_idx = int(entry["chunk_index"])
-            payload_len = self._manifest_chunk_payload_length(manifest, chunk_idx)
-            if payload_len <= 0:
-                raise ValueError("missing chunk length for chunk {}".format(chunk_idx))
-
-            text_band = self._crop_primary_text_band(image=image, band=band)
-            total_chars = 16 + payload_len + 1 + 4
-            char_width = float(text_band.width) / float(max(1, total_chars))
-            pad = max(2, int(round(char_width * 0.25)))
-
-            payload_left = max(0, int(round(16 * char_width)) - pad)
-            payload_right = min(
-                text_band.width,
-                int(round((16 + payload_len) * char_width)) + pad,
-            )
-            crc_left = max(0, int(round((16 + payload_len + 1) * char_width)) - pad)
-            crc_right = min(
-                text_band.width,
-                int(round((16 + payload_len + 5) * char_width)) + pad,
-            )
-
-            payload_crop = text_band.crop((payload_left, 0, max(payload_left + 1, payload_right), text_band.height))
-            crc_crop = text_band.crop((crc_left, 0, max(crc_left + 1, crc_right), text_band.height))
-
-            payload_raws = self._ocr_payload_crop_tesseract_variants(payload_crop, lang=lang)
-            line_raws = self._ocr_payload_crop_tesseract_variants(text_band, lang=lang)
-            crc_hints = self._ocr_crc_crop_tesseract_variants(crc_crop, lang=lang)
-            payload = self._choose_payload_candidate_with_crc_hint(
-                chunk_idx=chunk_idx,
-                expected_len=payload_len,
-                crc_hints=crc_hints,
-                raw_texts=payload_raws + line_raws,
-            )
-            if not payload:
-                raise ValueError(
-                    "manifest-guided OCR failed to recover payload at page={} line={} chunk={}".format(
-                        int(entry["page"]), int(entry["line"]), chunk_idx
-                    )
-                )
-
-            actual_crc = _crc16_hex("C{:05d}|{}".format(chunk_idx, payload))
-            lines.append(
-                "P{:03d}L{:03d}|C{:05d}|{}|{}".format(
-                    int(entry["page"]),
-                    int(entry["line"]),
-                    chunk_idx,
-                    payload,
-                    actual_crc,
-                )
-            )
-        return "\n".join(lines)
+        return _transport_ocr_pipeline.ocr_manifest_guided_page_tesseract(
+            transport=self,
+            image_path=image_path,
+            manifest=manifest,
+            page_no=page_no,
+            page_entries=page_entries,
+            lang=lang,
+            image_module=Image,
+        )
 
     def _ocr_image_crop_tesseract(
         self,
@@ -2199,26 +1612,15 @@ class AirgapTransportLayer(object):
         whitelist: str,
         psm: int = 7,
     ) -> str:
-        left = max(0, int(box[0]))
-        top = max(0, int(box[1]))
-        right = max(left + 1, int(box[2]))
-        bottom = max(top + 1, int(box[3]))
-        crop = image.crop((left, top, right, bottom)).convert("L")
-        scale_x = 3
-        scale_y = 4
-        crop = crop.resize((crop.width * scale_x, crop.height * scale_y), RESAMPLE_LANCZOS)
-        bordered = Image.new("L", (crop.width + 48, crop.height + 32), 255)
-        bordered.paste(crop, (24, 16))
-        crop = Image.eval(bordered, lambda p: 255 if p > 180 else 0)
-        config = (
-            "--oem 3 --psm {} "
-            "-c preserve_interword_spaces=0 "
-            "-c tessedit_char_whitelist={}"
-        ).format(int(psm), whitelist)
-        return self._tesseract_image_to_string(
-            image=crop,
+        return _transport_ocr_pipeline.ocr_image_crop_tesseract(
+            transport=self,
+            image=image,
+            box=box,
             lang=lang,
-            config=config,
+            whitelist=whitelist,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+            psm=psm,
         )
 
     def _tesseract_image_to_string(self, image, lang: str, config: str) -> str:
@@ -2272,23 +1674,14 @@ class AirgapTransportLayer(object):
                     pass
 
     def _ocr_image_crop_easyocr(self, image, box: List[int], reader) -> str:
-        if reader is None:
-            raise RuntimeError("easyocr reader is required for structured OCR extraction")
-        np_mod = _load_numpy_module()
-        if np_mod is None:
-            raise RuntimeError("numpy is required for structured easyocr extraction")
-
-        left = max(0, int(box[0]))
-        top = max(0, int(box[1]))
-        right = max(left + 1, int(box[2]))
-        bottom = max(top + 1, int(box[3]))
-        crop = image.crop((left, top, right, bottom)).convert("L")
-        crop = crop.resize((crop.width * 3, crop.height * 4), RESAMPLE_LANCZOS)
-        bordered = Image.new("L", (crop.width + 48, crop.height + 32), 255)
-        bordered.paste(crop, (24, 16))
-        crop_array = np_mod.array(bordered)
-        lines = reader.readtext(crop_array, detail=0, paragraph=False)
-        return "\n".join(lines)
+        return _transport_ocr_runtime.ocr_image_crop_easyocr(
+            image=image,
+            box=box,
+            reader=reader,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+            load_numpy_module=_load_numpy_module,
+        )
 
     def _decode_sidecar_payload(
         self,
@@ -2296,45 +1689,12 @@ class AirgapTransportLayer(object):
         page_layout: Dict[str, object],
         line_meta: Dict[str, object],
     ) -> str:
-        box = line_meta.get("binary_box")
-        if not isinstance(box, list) or len(box) != 4:
-            return ""
-
-        try:
-            rows = int(line_meta.get("binary_rows", 0))
-            cols = int(line_meta.get("binary_cols", 0))
-            bit_count = int(line_meta.get("bit_count", 0))
-            payload_len = int(line_meta.get("payload_len", 0))
-        except Exception:
-            return ""
-        if rows <= 0 or cols <= 0 or bit_count <= 0 or payload_len <= 0:
-            return ""
-
-        source_w = max(1, int(page_layout.get("page_width", image.width)))
-        source_h = max(1, int(page_layout.get("page_height", image.height)))
-        scale_x = float(image.width) / float(source_w)
-        scale_y = float(image.height) / float(source_h)
-
-        left = int(round(float(box[0]) * scale_x))
-        top = int(round(float(box[1]) * scale_y))
-        cell_w = max(1, int(round(float(line_meta.get("binary_cell", SIDECAR_CELL_SIZE)) * scale_x)))
-        cell_h = max(1, int(round(float(line_meta.get("binary_cell", SIDECAR_CELL_SIZE)) * scale_y)))
-        gap_x = max(0, int(round(float(line_meta.get("binary_gap", SIDECAR_CELL_GAP)) * scale_x)))
-        gap_y = max(0, int(round(float(line_meta.get("binary_gap", SIDECAR_CELL_GAP)) * scale_y)))
-
-        gray = image.convert("L")
-        bits = []
-        for bit_index in range(bit_count):
-            row = bit_index // cols
-            col = bit_index % cols
-            sample_x = left + col * (cell_w + gap_x) + (cell_w // 2)
-            sample_y = top + row * (cell_h + gap_y) + (cell_h // 2)
-            sample_x = min(max(0, sample_x), gray.width - 1)
-            sample_y = min(max(0, sample_y), gray.height - 1)
-            pixel = gray.getpixel((sample_x, sample_y))
-            bits.append("1" if pixel < 128 else "0")
-
-        return _bits_to_safe_payload("".join(bits), payload_len)
+        return _transport_ocr_runtime.decode_sidecar_payload(
+            transport=self,
+            image=image,
+            page_layout=page_layout,
+            line_meta=line_meta,
+        )
 
     def _ocr_structured_page_sidecar(
         self,
@@ -2343,41 +1703,12 @@ class AirgapTransportLayer(object):
     ) -> str:
         if not PIL_AVAILABLE:
             raise RuntimeError("Pillow is required for structured sidecar extraction")
-
-        raw_lines = page_layout.get("lines", [])
-        if not isinstance(raw_lines, list):
-            raw_lines = []
-        if not raw_lines:
-            raise ValueError("structured sidecar page layout is missing lines")
-
-        image = Image.open(str(image_path)).convert("L")
-        data_lines = []
-        for item in raw_lines:
-            if not isinstance(item, dict) or item.get("kind") != "data":
-                continue
-            try:
-                page_no = int(item.get("page"))
-                line_no = int(item.get("line_no"))
-                chunk_idx = int(item.get("chunk_index"))
-            except Exception:
-                continue
-            expected_crc = str(item.get("expected_crc", ""))
-            payload = self._decode_sidecar_payload(image=image, page_layout=page_layout, line_meta=item)
-            if not payload:
-                raise ValueError(
-                    "structured sidecar payload missing at page={} line={} chunk={}".format(
-                        page_no, line_no, chunk_idx
-                    )
-                )
-            data_lines.append(
-                "P{:03d}L{:03d}|C{:05d}|{}|{}".format(
-                    page_no, line_no, chunk_idx, payload, expected_crc
-                )
-            )
-
-        if not data_lines:
-            raise ValueError("structured sidecar page layout does not contain data lines")
-        return "\n".join(data_lines)
+        return _transport_ocr_runtime.ocr_structured_page_sidecar(
+            transport=self,
+            image_path=image_path,
+            page_layout=page_layout,
+            image_module=Image,
+        )
 
     def _decode_manifest_guided_sidecar_payload(
         self,
@@ -2385,70 +1716,14 @@ class AirgapTransportLayer(object):
         band: Dict[str, int],
         payload_len: int,
     ) -> str:
-        if (not PIL_AVAILABLE) or payload_len <= 0:
+        if not PIL_AVAILABLE:
             return ""
-
-        bit_count = int(payload_len) * 5
-        cols = SIDECAR_BITS_PER_ROW
-        rows = int(math.ceil(float(bit_count) / float(cols)))
-        sidecar_width = cols * SIDECAR_CELL_SIZE + (cols - 1) * SIDECAR_CELL_GAP
-        sidecar_height = rows * SIDECAR_CELL_SIZE + (rows - 1) * SIDECAR_CELL_GAP
-        left = int(image.width - self.margin - sidecar_width)
-        if left < 0:
-            return ""
-
-        band_mid = (int(band["top"]) + int(band["bottom"])) // 2
-        top = int(max(0, band_mid - (sidecar_height // 2)))
-        if top + sidecar_height > image.height:
-            top = max(0, image.height - sidecar_height)
-
-        gray = image.convert("L")
-        best_payload = ""
-        best_score = None
-        for offset_x in range(-4, 5):
-            for offset_y in range(-8, 9):
-                sample_left = left + offset_x
-                sample_top = top + offset_y
-                if sample_left < 0 or sample_top < 0:
-                    continue
-                if sample_left + sidecar_width > gray.width or sample_top + sidecar_height > gray.height:
-                    continue
-
-                bits = []
-                samples = []
-                for bit_index in range(bit_count):
-                    row = bit_index // cols
-                    col = bit_index % cols
-                    sample_x = sample_left + col * (SIDECAR_CELL_SIZE + SIDECAR_CELL_GAP) + (
-                        SIDECAR_CELL_SIZE // 2
-                    )
-                    sample_y = sample_top + row * (SIDECAR_CELL_SIZE + SIDECAR_CELL_GAP) + (
-                        SIDECAR_CELL_SIZE // 2
-                    )
-                    pixel = gray.getpixel((sample_x, sample_y))
-                    samples.append(int(pixel))
-                    bits.append("1" if pixel < 128 else "0")
-
-                if not samples:
-                    continue
-                dark = sum(1 for pixel in samples if pixel < 128)
-                dark_ratio = float(dark) / float(len(samples))
-                contrast = max(samples) - min(samples)
-                if dark_ratio <= 0.03 or dark_ratio >= 0.97:
-                    continue
-                if contrast < 80:
-                    continue
-
-                payload = _bits_to_safe_payload("".join(bits), payload_len)
-                if not payload:
-                    continue
-                balance_penalty = abs(dark_ratio - 0.5)
-                score = (balance_penalty, -contrast, abs(offset_x) + abs(offset_y))
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_payload = payload
-
-        return best_payload
+        return _transport_ocr_runtime.decode_manifest_guided_sidecar_payload(
+            transport=self,
+            image=image,
+            band=band,
+            payload_len=payload_len,
+        )
 
     def _ocr_manifest_guided_page_sidecar(
         self,
@@ -2459,94 +1734,20 @@ class AirgapTransportLayer(object):
     ) -> str:
         if not PIL_AVAILABLE:
             raise RuntimeError("Pillow is required for manifest-guided sidecar extraction")
-        if not page_entries:
-            raise ValueError("manifest page {} does not contain chunk locations".format(page_no))
-
-        image = Image.open(str(image_path)).convert("L")
-        bands = self._detect_text_bands(image)
-        data_bands = self._select_manifest_data_bands(bands, len(page_entries))
-        if len(data_bands) != len(page_entries):
-            raise ValueError(
-                "manifest-guided sidecar band mismatch: expected {} got {}".format(
-                    len(page_entries), len(data_bands)
-                )
-            )
-
-        lines = []
-        for band, entry in zip(data_bands, page_entries):
-            chunk_idx = int(entry["chunk_index"])
-            payload_len = self._manifest_chunk_payload_length(manifest, chunk_idx)
-            payload = self._decode_manifest_guided_sidecar_payload(
-                image=image,
-                band=band,
-                payload_len=payload_len,
-            )
-            if not payload:
-                raise ValueError(
-                    "manifest-guided sidecar failed at page={} line={} chunk={}".format(
-                        int(entry["page"]), int(entry["line"]), chunk_idx
-                    )
-                )
-            actual_crc = _crc16_hex("C{:05d}|{}".format(chunk_idx, payload))
-            lines.append(
-                "P{:03d}L{:03d}|C{:05d}|{}|{}".format(
-                    int(entry["page"]),
-                    int(entry["line"]),
-                    chunk_idx,
-                    payload,
-                    actual_crc,
-                )
-            )
-
-        return "\n".join(lines)
+        return _transport_ocr_runtime.ocr_manifest_guided_page_sidecar(
+            transport=self,
+            image_path=image_path,
+            manifest=manifest,
+            page_no=page_no,
+            page_entries=page_entries,
+            image_module=Image,
+        )
 
     def _build_inferred_manifest_from_metadata(self, metadata: Dict[str, object]) -> Dict[str, object]:
-        manifest: Dict[str, object] = {
-            "protocol_version": PROTOCOL_VERSION,
-            "artifact_id": str(metadata["artifact_id"]),
-            "total_chunks": int(metadata["total_chunks"]),
-            "total_pages": int(metadata.get("total_pages", 0) or 0),
-            "lines_per_page": int(metadata["LP"]),
-            "transport_line_index_mode": str(metadata.get("transport_line_index_mode", "full")),
-            "_metadata_source": "embedded_headers",
-            "_embedded_metadata_complete": True,
-        }
-
-        chunk_chars = int(metadata["CC"])
-        compressed_size = int(metadata["CS"])
-        total_chunks = int(metadata["total_chunks"])
-        encoded_len = _safe_base32_encoded_length(compressed_size)
-        expected_total_chunks = int(math.ceil(float(encoded_len) / float(chunk_chars))) if encoded_len > 0 else 0
-        if expected_total_chunks != total_chunks:
-            raise ValueError(
-                "embedded metadata chunk count mismatch: expected {} got {}".format(expected_total_chunks, total_chunks)
-            )
-
-        last_chunk_len = encoded_len - (chunk_chars * (total_chunks - 1))
-        if last_chunk_len <= 0:
-            last_chunk_len = chunk_chars
-        chunk_lengths = [chunk_chars] * max(0, total_chunks - 1)
-        chunk_lengths.append(last_chunk_len)
-
-        parity_group_size = int(metadata["PG"])
-        manifest.update(
-            {
-                "compressed_sha256": (str(metadata["CH1"]) + str(metadata["CH2"])).lower(),
-                "raw_sha256": (str(metadata["RH1"]) + str(metadata["RH2"])).lower(),
-                "raw_size": int(metadata["RS"]),
-                "compressed_size": compressed_size,
-                "chunk_chars": chunk_chars,
-                "chunk_lengths": chunk_lengths,
-                "redundancy_copies": int(metadata["RC"]),
-                "interleave_enabled": bool(int(metadata["IL"])),
-                "parity": self._rebuild_parity_manifest(
-                    total_chunks=total_chunks,
-                    chunk_lengths=chunk_lengths,
-                    parity_group_size=parity_group_size,
-                ),
-            }
+        return _transport_ocr_embedded.build_inferred_manifest_from_metadata(
+            metadata=metadata,
+            rebuild_parity_manifest=self._rebuild_parity_manifest,
         )
-        return manifest
 
     def _build_expected_page_entries(
         self,
@@ -2554,54 +1755,13 @@ class AirgapTransportLayer(object):
         page_no: int,
         page_chunks: int,
     ) -> List[Dict[str, int]]:
-        total_chunks = int(manifest["total_chunks"])
-        chunk_lengths = [int(value) for value in manifest.get("chunk_lengths", [])]
-        if len(chunk_lengths) != total_chunks:
-            raise ValueError("chunk_lengths missing for embedded metadata page reconstruction")
-
-        base_entries = [(idx, "A" * int(chunk_lengths[idx])) for idx in range(total_chunks)]
-        parity = manifest.get("parity", {})
-        if isinstance(parity, dict) and parity.get("enabled"):
-            groups = parity.get("groups", [])
-            if isinstance(groups, list):
-                for group in groups:
-                    if not isinstance(group, dict):
-                        continue
-                    try:
-                        parity_idx = int(group.get("parity_chunk_index"))
-                        parity_len = int(group.get("parity_len", 0))
-                    except Exception:
-                        continue
-                    if parity_len > 0:
-                        base_entries.append((parity_idx, "A" * parity_len))
-
-        chunk_entries = self._build_chunk_entries(
-            base_entries=base_entries,
-            redundancy_copies=int(manifest.get("redundancy_copies", 1)),
-            interleave=bool(manifest.get("interleave_enabled", True)),
+        return _transport_ocr_embedded.build_expected_page_entries(
+            manifest=manifest,
+            page_no=page_no,
+            page_chunks=page_chunks,
+            build_chunk_entries=self._build_chunk_entries,
+            lines_per_page_default=int(self.lines_per_page),
         )
-        lines_per_page = int(manifest.get("lines_per_page", self.lines_per_page))
-        start = max(0, (int(page_no) - 1) * lines_per_page)
-        page_entries = chunk_entries[start : start + int(page_chunks)]
-        if len(page_entries) != int(page_chunks):
-            raise ValueError(
-                "embedded metadata page reconstruction mismatch: expected {} entries got {}".format(
-                    int(page_chunks), len(page_entries)
-                )
-            )
-
-        out = []
-        for line_no, entry in enumerate(page_entries, 1):
-            chunk_idx, _payload, copy_no = entry
-            out.append(
-                {
-                    "page": int(page_no),
-                    "line": int(line_no),
-                    "chunk_index": int(chunk_idx),
-                    "copy": int(copy_no),
-                }
-            )
-        return out
 
     def _ocr_embedded_metadata_page_tesseract(
         self,
@@ -2612,215 +1772,15 @@ class AirgapTransportLayer(object):
     ) -> str:
         if not PIL_AVAILABLE:
             raise RuntimeError("Pillow is required for embedded metadata extraction")
-
-        image = Image.open(str(image_path)).convert("L")
-        bands = self._detect_text_bands(image)
-        if len(bands) < 5:
-            raise ValueError("detected text bands {} is less than minimum embedded layout 5".format(len(bands)))
-
-        meta_whitelist = "@META|AT1IDPAGECHUNKSOTALCFGPRHSC0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_=-/"
-        hash_whitelist = "@RHCH|0123456789ABCDEF"
-        compact_hash_whitelist = "@HSRC|0123456789ABCDEF="
-        pagecrc_whitelist = "@PAGECR|P0123456789ABCDEF"
-
-        meta_line = self._parse_meta_line_candidate(
-            self._ocr_band_tesseract_variants(image=image, band=bands[0], lang=lang, whitelist=meta_whitelist)
+        return _transport_ocr_embedded.ocr_embedded_metadata_page_tesseract(
+            transport=self,
+            image_path=image_path,
+            page_no_hint=page_no_hint,
+            lang=lang,
+            prefer_sidecar=prefer_sidecar,
+            image_module=Image,
+            pil_available=True,
         )
-        if not meta_line:
-            raise ValueError("failed to parse embedded @META line from image {}".format(image_path))
-
-        cfg_line = self._parse_cfg_line_candidate(
-            self._ocr_band_tesseract_variants(image=image, band=bands[1], lang=lang, whitelist=meta_whitelist)
-        )
-        if not cfg_line:
-            raise ValueError("failed to parse embedded @CFG line from image {}".format(image_path))
-
-        hash_lines: List[str] = []
-        hash_values: Dict[str, str] = {}
-        data_start_idx = 0
-
-        compact_1 = self._parse_hash_compact_candidate(
-            self._ocr_band_tesseract_variants(
-                image=image, band=bands[2], lang=lang, whitelist=compact_hash_whitelist
-            ),
-            expected_part=1,
-        )
-        compact_2 = None
-        if len(bands) > 3:
-            compact_2 = self._parse_hash_compact_candidate(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[3], lang=lang, whitelist=compact_hash_whitelist
-                ),
-                expected_part=2,
-            )
-
-        if compact_1 and compact_2:
-            hash_lines.extend([compact_1["canonical"], compact_2["canonical"]])
-            hash_values.update(
-                {
-                    "RH1": compact_1["RH"],
-                    "RH2": compact_2["RH"],
-                    "CH1": compact_1["CH"],
-                    "CH2": compact_2["CH"],
-                }
-            )
-            data_start_idx = 4
-        else:
-            if len(bands) < 6:
-                raise ValueError(
-                    "detected text bands {} is less than legacy embedded layout 6".format(len(bands))
-                )
-            rh1 = self._parse_hash_fragment_candidate(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[2], lang=lang, whitelist=hash_whitelist
-                ),
-                expected_kind="RH",
-                expected_part=1,
-            )
-            rh2 = self._parse_hash_fragment_candidate(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[3], lang=lang, whitelist=hash_whitelist
-                ),
-                expected_kind="RH",
-                expected_part=2,
-            )
-            ch1 = self._parse_hash_fragment_candidate(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[4], lang=lang, whitelist=hash_whitelist
-                ),
-                expected_kind="CH",
-                expected_part=1,
-            )
-            ch2 = self._parse_hash_fragment_candidate(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[5], lang=lang, whitelist=hash_whitelist
-                ),
-                expected_kind="CH",
-                expected_part=2,
-            )
-            if not all((rh1, rh2, ch1, ch2)):
-                raise ValueError("failed to parse embedded hash fragments from image {}".format(image_path))
-            hash_lines.extend([rh1, rh2, ch1, ch2])
-            hash_values.update(
-                {
-                    "RH1": rh1.split("|", 1)[1],
-                    "RH2": rh2.split("|", 1)[1],
-                    "CH1": ch1.split("|", 1)[1],
-                    "CH2": ch2.split("|", 1)[1],
-                }
-            )
-            data_start_idx = 6
-
-        page_chunks = int(meta_line["page_chunks"])
-        data_bands = list(bands[data_start_idx : data_start_idx + page_chunks])
-        if len(data_bands) != page_chunks:
-            raise ValueError(
-                "embedded metadata page band mismatch: expected {} got {}".format(page_chunks, len(data_bands))
-            )
-
-        footer_candidates_raw = []
-        footer_band_index = data_start_idx + page_chunks
-        if footer_band_index < len(bands):
-            footer_candidates_raw.extend(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[footer_band_index], lang=lang, whitelist=pagecrc_whitelist
-                )
-            )
-        if bands:
-            footer_candidates_raw.extend(
-                self._ocr_band_tesseract_variants(
-                    image=image, band=bands[-1], lang=lang, whitelist=pagecrc_whitelist
-                )
-            )
-
-        footer_line = None
-        for raw in footer_candidates_raw:
-            line = _normalize_protocol_signature(_normalize_ocr_line(raw))
-            match = PAGECRC_PATTERN.match(line)
-            if match:
-                footer_line = "@PAGECRC|P{:03d}|{}".format(int(match.group(1)), match.group(2))
-                break
-
-        metadata = {
-            "artifact_id": meta_line["artifact_id"],
-            "total_chunks": int(meta_line["total_chunks"]),
-            "total_pages": int(meta_line["total_pages"]),
-            "CC": int(cfg_line["values"]["CC"]),
-            "LP": int(cfg_line["values"]["LP"]),
-            "RC": int(cfg_line["values"]["RC"]),
-            "IL": int(cfg_line["values"]["IL"]),
-            "PG": int(cfg_line["values"]["PG"]),
-            "CS": int(cfg_line["values"]["CS"]),
-            "RS": int(cfg_line["values"]["RS"]),
-            "RH1": hash_values["RH1"],
-            "RH2": hash_values["RH2"],
-            "CH1": hash_values["CH1"],
-            "CH2": hash_values["CH2"],
-        }
-        manifest = self._build_inferred_manifest_from_metadata(metadata)
-        page_no = int(meta_line["page_no"]) if int(meta_line["page_no"]) > 0 else int(page_no_hint)
-        expected_entries = self._build_expected_page_entries(manifest=manifest, page_no=page_no, page_chunks=page_chunks)
-
-        lines = [
-            meta_line["canonical"],
-            cfg_line["canonical"],
-        ]
-        lines.extend(hash_lines)
-        for band, entry in zip(data_bands, expected_entries):
-            chunk_idx = int(entry["chunk_index"])
-            payload_len = self._manifest_chunk_payload_length(manifest, chunk_idx)
-            payload = ""
-            if prefer_sidecar:
-                payload = self._decode_manifest_guided_sidecar_payload(
-                    image=image,
-                    band=band,
-                    payload_len=payload_len,
-                )
-            if not payload:
-                text_band = self._crop_primary_text_band(image=image, band=band)
-                total_chars = 16 + payload_len + 1 + 4
-                char_width = float(text_band.width) / float(max(1, total_chars))
-                pad = max(2, int(round(char_width * 0.25)))
-
-                payload_left = max(0, int(round(16 * char_width)) - pad)
-                payload_right = min(text_band.width, int(round((16 + payload_len) * char_width)) + pad)
-                crc_left = max(0, int(round((16 + payload_len + 1) * char_width)) - pad)
-                crc_right = min(text_band.width, int(round((16 + payload_len + 5) * char_width)) + pad)
-
-                payload_crop = text_band.crop((payload_left, 0, max(payload_left + 1, payload_right), text_band.height))
-                crc_crop = text_band.crop((crc_left, 0, max(crc_left + 1, crc_right), text_band.height))
-                payload_raws = self._ocr_payload_crop_tesseract_variants(payload_crop, lang=lang)
-                line_raws = self._ocr_payload_crop_tesseract_variants(text_band, lang=lang)
-                crc_hints = self._ocr_crc_crop_tesseract_variants(crc_crop, lang=lang)
-                payload = self._choose_payload_candidate_with_crc_hint(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    crc_hints=crc_hints,
-                    raw_texts=payload_raws + line_raws,
-                )
-            if not payload:
-                raise ValueError(
-                    "embedded metadata OCR failed at page={} line={} chunk={}".format(
-                        int(entry["page"]), int(entry["line"]), chunk_idx
-                    )
-                )
-
-            actual_crc = _crc16_hex("C{:05d}|{}".format(chunk_idx, payload))
-            lines.append(
-                "P{:03d}L{:03d}|C{:05d}|{}|{}".format(
-                    int(entry["page"]),
-                    int(entry["line"]),
-                    chunk_idx,
-                    payload,
-                    actual_crc,
-                )
-            )
-
-        if footer_line is None:
-            footer_crc = _crc16_hex("\n".join(lines))
-            footer_line = "@PAGECRC|P{:03d}|{}".format(page_no, footer_crc)
-        lines.append(footer_line)
-        return "\n".join(lines)
 
     def _choose_payload_candidate(
         self,
@@ -2829,39 +1789,13 @@ class AirgapTransportLayer(object):
         expected_crc: str,
         raw_texts: List[str],
     ) -> str:
-        candidates = []
-        seen = set()
-
-        for raw in raw_texts:
-            normalized = _normalize_payload(_normalize_ocr_line(raw))
-            safe = "".join(ch for ch in normalized if ch in SAFE_BASE32_ALPHABET)
-            if not safe:
-                continue
-
-            variants = [safe]
-            if expected_len > 0 and len(safe) > expected_len:
-                for start in range(0, len(safe) - expected_len + 1):
-                    variants.append(safe[start : start + expected_len])
-
-            for candidate in variants:
-                if candidate in seen:
-                    continue
-                seen.add(candidate)
-                candidates.append(candidate)
-
-        core_prefix = "C{:05d}|".format(int(chunk_idx))
-        for candidate in candidates:
-            if len(candidate) != expected_len:
-                continue
-            repaired = self._repair_payload_candidate_by_crc(
-                payload=candidate,
-                core_prefix=core_prefix,
-                expected_crc=expected_crc,
-            )
-            if _crc16_hex(core_prefix + repaired) == expected_crc:
-                return repaired
-
-        return ""
+        return _transport_ocr_runtime.choose_payload_candidate(
+            transport=self,
+            chunk_idx=chunk_idx,
+            expected_len=expected_len,
+            expected_crc=expected_crc,
+            raw_texts=raw_texts,
+        )
 
     def _repair_payload_candidate_by_crc(
         self,
@@ -2869,43 +1803,11 @@ class AirgapTransportLayer(object):
         core_prefix: str,
         expected_crc: str,
     ) -> str:
-        if not payload:
-            return payload
-        if _crc16_hex(core_prefix + payload) == expected_crc:
-            return payload
-
-        positions = []
-        replacements = []
-        for index, ch in enumerate(payload):
-            alt_text = PAYLOAD_OCR_AMBIGUITIES.get(ch, "")
-            alt_chars = [c for c in alt_text if c in SAFE_BASE32_ALPHABET and c != ch]
-            if not alt_chars:
-                continue
-            positions.append(index)
-            replacements.append(alt_chars)
-
-        if not positions:
-            return payload
-
-        base_chars = list(payload)
-        attempts = 0
-        max_attempts = 12000
-        max_depth = min(4, len(positions))
-        for depth in range(1, max_depth + 1):
-            for pos_combo in itertools.combinations(range(len(positions)), depth):
-                alt_lists = [replacements[pos_idx] for pos_idx in pos_combo]
-                for repl_combo in itertools.product(*alt_lists):
-                    attempts += 1
-                    if attempts > max_attempts:
-                        return payload
-                    candidate_chars = list(base_chars)
-                    for rel_idx, repl in zip(pos_combo, repl_combo):
-                        candidate_chars[positions[rel_idx]] = repl
-                    candidate = "".join(candidate_chars)
-                    if _crc16_hex(core_prefix + candidate) == expected_crc:
-                        return candidate
-
-        return payload
+        return _transport_ocr_runtime.repair_payload_candidate_by_crc(
+            payload=payload,
+            core_prefix=core_prefix,
+            expected_crc=expected_crc,
+        )
 
     def _ocr_structured_page_tesseract(
         self,
@@ -2915,87 +1817,13 @@ class AirgapTransportLayer(object):
     ) -> str:
         if not PIL_AVAILABLE:
             raise RuntimeError("Pillow is required for structured OCR extraction")
-
-        raw_lines = page_layout.get("lines", [])
-        if not isinstance(raw_lines, list):
-            raw_lines = []
-        if not raw_lines:
-            raise ValueError("structured OCR page layout is missing lines")
-
-        image = Image.open(str(image_path)).convert("L")
-        data_lines = []
-        payload_whitelist = SAFE_BASE32_ALPHABET
-        for item in raw_lines:
-            if not isinstance(item, dict) or item.get("kind") != "data":
-                continue
-            try:
-                page_no = int(item.get("page"))
-                line_no = int(item.get("line_no"))
-                chunk_idx = int(item.get("chunk_index"))
-                payload_len = int(item.get("payload_len"))
-            except Exception:
-                continue
-            expected_crc = str(item.get("expected_crc", ""))
-            payload_box = item.get("payload_box")
-            line_box = item.get("line_box")
-            payload = self._decode_sidecar_payload(image=image, page_layout=page_layout, line_meta=item)
-            if (not payload) and isinstance(payload_box, list) and len(payload_box) == 4:
-                payload_raw = self._ocr_image_crop_tesseract(
-                    image=image,
-                    box=payload_box,
-                    lang=lang,
-                    whitelist=payload_whitelist,
-                    psm=7,
-                )
-                payload = self._choose_payload_candidate(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    expected_crc=expected_crc,
-                    raw_texts=[payload_raw],
-                )
-            if not payload and isinstance(line_box, list) and len(line_box) == 4:
-                line_raw = self._ocr_image_crop_tesseract(
-                    image=image,
-                    box=line_box,
-                    lang=lang,
-                    whitelist=payload_whitelist,
-                    psm=7,
-                )
-                payload = self._choose_payload_candidate(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    expected_crc=expected_crc,
-                    raw_texts=[line_raw],
-                )
-            if not payload and isinstance(payload_box, list) and len(payload_box) == 4:
-                payload_raw_wide = self._ocr_image_crop_tesseract(
-                    image=image,
-                    box=[
-                        int(payload_box[0]),
-                        max(0, int(payload_box[1]) - 2),
-                        int(payload_box[2]) + 20,
-                        int(payload_box[3]),
-                    ],
-                    lang=lang,
-                    whitelist=payload_whitelist,
-                    psm=7,
-                )
-                payload = self._choose_payload_candidate(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    expected_crc=expected_crc,
-                    raw_texts=[payload_raw_wide],
-                )
-
-            data_lines.append(
-                "P{:03d}L{:03d}|C{:05d}|{}|{}".format(
-                    page_no, line_no, chunk_idx, payload, expected_crc
-                )
-            )
-
-        if not data_lines:
-            raise ValueError("structured OCR page layout does not contain data lines")
-        return "\n".join(data_lines)
+        return _transport_ocr_runtime.ocr_structured_page_tesseract(
+            transport=self,
+            image_path=image_path,
+            lang=lang,
+            page_layout=page_layout,
+            image_module=Image,
+        )
 
     def _ocr_structured_page_easyocr(
         self,
@@ -3005,103 +1833,18 @@ class AirgapTransportLayer(object):
     ) -> str:
         if not PIL_AVAILABLE:
             raise RuntimeError("Pillow is required for structured OCR extraction")
-
-        raw_lines = page_layout.get("lines", [])
-        if not isinstance(raw_lines, list):
-            raw_lines = []
-        if not raw_lines:
-            raise ValueError("structured OCR page layout is missing lines")
-
-        image = Image.open(str(image_path)).convert("L")
-        data_lines = []
-        for item in raw_lines:
-            if not isinstance(item, dict) or item.get("kind") != "data":
-                continue
-            try:
-                page_no = int(item.get("page"))
-                line_no = int(item.get("line_no"))
-                chunk_idx = int(item.get("chunk_index"))
-                payload_len = int(item.get("payload_len"))
-            except Exception:
-                continue
-
-            expected_crc = str(item.get("expected_crc", ""))
-            payload_box = item.get("payload_box")
-            line_box = item.get("line_box")
-            payload = self._decode_sidecar_payload(image=image, page_layout=page_layout, line_meta=item)
-            if (not payload) and isinstance(payload_box, list) and len(payload_box) == 4:
-                payload_raw = self._ocr_image_crop_easyocr(image=image, box=payload_box, reader=reader)
-                payload = self._choose_payload_candidate(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    expected_crc=expected_crc,
-                    raw_texts=[payload_raw],
-                )
-            if not payload and isinstance(line_box, list) and len(line_box) == 4:
-                line_raw = self._ocr_image_crop_easyocr(image=image, box=line_box, reader=reader)
-                payload = self._choose_payload_candidate(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    expected_crc=expected_crc,
-                    raw_texts=[line_raw],
-                )
-            if not payload and isinstance(payload_box, list) and len(payload_box) == 4:
-                payload_raw_wide = self._ocr_image_crop_easyocr(
-                    image=image,
-                    box=[
-                        int(payload_box[0]),
-                        max(0, int(payload_box[1]) - 2),
-                        int(payload_box[2]) + 20,
-                        int(payload_box[3]),
-                    ],
-                    reader=reader,
-                )
-                payload = self._choose_payload_candidate(
-                    chunk_idx=chunk_idx,
-                    expected_len=payload_len,
-                    expected_crc=expected_crc,
-                    raw_texts=[payload_raw_wide],
-                )
-
-            data_lines.append(
-                "P{:03d}L{:03d}|C{:05d}|{}|{}".format(
-                    page_no, line_no, chunk_idx, payload, expected_crc
-                )
-            )
-
-        if not data_lines:
-            raise ValueError("structured OCR page layout does not contain data lines")
-        return "\n".join(data_lines)
+        return _transport_ocr_runtime.ocr_structured_page_easyocr(
+            transport=self,
+            image_path=image_path,
+            page_layout=page_layout,
+            reader=reader,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+            load_numpy_module=_load_numpy_module,
+        )
 
     def _parse_external_ocr_stdout(self, raw_output: str) -> str:
-        text = str(raw_output or "").strip()
-        if not text:
-            return ""
-
-        parsed = None
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-
-        if isinstance(parsed, dict):
-            direct = parsed.get("text")
-            if isinstance(direct, str) and direct.strip():
-                return direct
-            lines = parsed.get("lines")
-            if isinstance(lines, list):
-                return "\n".join(str(item) for item in lines if str(item).strip())
-            output_text_path = parsed.get("output_text_path")
-            if isinstance(output_text_path, str):
-                candidate = Path(output_text_path)
-                if candidate.exists() and candidate.is_file():
-                    return candidate.read_text(encoding="utf-8", errors="ignore")
-
-        if ("\n" not in text) and ("\r" not in text):
-            candidate = Path(text)
-            if candidate.exists() and candidate.is_file():
-                return candidate.read_text(encoding="utf-8", errors="ignore")
-        return str(raw_output or "")
+        return _transport_ocr_runtime.parse_external_ocr_stdout(raw_output=raw_output)
 
     def _run_external_ocr_provider(
         self,
@@ -3113,46 +1856,17 @@ class AirgapTransportLayer(object):
         provider_cmd: str,
         timeout_sec: int,
     ) -> str:
-        cmd_template = str(provider_cmd or "").strip()
-        if not cmd_template:
-            raise ValueError("external OCR provider command is empty")
-
-        mapping = {
-            "image_path": str(image_path),
-            "image_name": str(image_path.name),
-            "page_no": int(page_no),
-            "lang": str(lang),
-            "psm": int(psm),
-            "manifest_path": str(manifest_path or ""),
-        }
-        try:
-            command = cmd_template.format(**mapping)
-        except KeyError as exc:
-            raise ValueError(
-                "unknown placeholder in --ocr-provider-cmd: {}".format(exc)
-            )
-
-        completed = subprocess.run(
-            command,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=max(1, int(timeout_sec)),
-            check=False,
+        return _transport_ocr_runtime.run_external_ocr_provider(
+            transport=self,
+            image_path=image_path,
+            page_no=page_no,
+            lang=lang,
+            psm=psm,
+            manifest_path=manifest_path,
+            provider_cmd=provider_cmd,
+            timeout_sec=timeout_sec,
+            subprocess_module=subprocess,
         )
-        stdout = completed.stdout.decode("utf-8", errors="replace")
-        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-        if completed.returncode != 0:
-            raise RuntimeError(
-                "external OCR command failed for image {} with exit code {}: {}".format(
-                    image_path, completed.returncode, stderr or "no stderr"
-                )
-            )
-
-        parsed_text = self._parse_external_ocr_stdout(stdout)
-        if not str(parsed_text).strip():
-            raise RuntimeError("external OCR command returned empty text for image {}".format(image_path))
-        return str(parsed_text)
 
     def _ocr_single_image(
         self,
@@ -3163,46 +1877,20 @@ class AirgapTransportLayer(object):
         reader=None,
         page_layout: Optional[Dict[str, object]] = None,
     ) -> str:
-        if backend == "sidecar":
-            if not page_layout:
-                raise ValueError("sidecar backend requires manifest render_layout metadata")
-            return self._ocr_structured_page_sidecar(
-                image_path=image_path,
-                page_layout=page_layout,
-            )
-
-        if backend == "tesseract":
-            if not PIL_AVAILABLE:
-                raise RuntimeError("Pillow is required for tesseract preprocessing")
-            if page_layout:
-                return self._ocr_structured_page_tesseract(
-                    image_path=image_path,
-                    lang=lang,
-                    page_layout=page_layout,
-                )
-            image = Image.open(str(image_path)).convert("L")
-            # Improve OCR robustness for camera/screenshot noise.
-            image = image.resize((image.width * 2, image.height * 2), RESAMPLE_LANCZOS)
-            image = Image.eval(image, lambda p: 255 if p > 170 else 0)
-            return self._ocr_transport_page_tesseract_best_effort(
-                image=image,
-                lang=lang,
-                psm=psm,
-            )
-
-        if backend == "easyocr":
-            if reader is None:
-                reader, _reader_langs = _build_easyocr_reader(lang)
-            if page_layout:
-                return self._ocr_structured_page_easyocr(
-                    image_path=image_path,
-                    page_layout=page_layout,
-                    reader=reader,
-                )
-            lines = reader.readtext(str(image_path), detail=0, paragraph=False)
-            return "\n".join(lines)
-
-        raise ValueError("unsupported backend: {}".format(backend))
+        return _transport_ocr_runtime.ocr_single_image(
+            transport=self,
+            image_path=image_path,
+            backend=backend,
+            lang=lang,
+            psm=psm,
+            reader=reader,
+            page_layout=page_layout,
+            pil_available=PIL_AVAILABLE,
+            image_module=Image,
+            resample_lanczos=RESAMPLE_LANCZOS,
+            build_easyocr_reader=_build_easyocr_reader,
+            load_numpy_module=_load_numpy_module,
+        )
 
     def _score_transport_ocr_text(self, text: str) -> Tuple[int, int]:
         lines = str(text or "").splitlines()

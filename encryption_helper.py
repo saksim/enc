@@ -52,6 +52,7 @@ RUNTIME_DELIVERY_MODE = "compiled_native_extension"
 NATIVE_EXTENSION_SUFFIXES = (".pyd", ".so", ".dll", ".dylib")
 DEFAULT_MANIFEST_KEY_ID = "local-hmac-v1"
 SIGNATURE_ALGORITHM_HMAC_SHA256 = "hmac-sha256"
+LICENSE_FILE_MODE = "license-file"
 
 
 class SymbolRange(NamedTuple):
@@ -482,6 +483,23 @@ def pack_key_reference(key_bytes, key_mode):
     return key_ref
 
 
+def _provider_begin_run(provider, context):
+    hook = getattr(provider, "begin_run", None)
+    if callable(hook):
+        hook(context)
+
+
+def _provider_finalize_run(provider, output_dir, manifest):
+    hook = getattr(provider, "finalize_run", None)
+    if callable(hook):
+        finalized = hook(output_dir, manifest)
+        if finalized is not None:
+            if not isinstance(finalized, dict):
+                raise ValueError("key provider finalize_run must return dict manifest or None")
+            return finalized
+    return manifest
+
+
 def file_scope_entry(
     relative_path,
     config,
@@ -648,6 +666,7 @@ def protect_project(
     skip_bad_files,
     namespace_package_parts,
     key_mode,
+    key_provider,
 ):
     output_dir = reset_directory(output_dir)
 
@@ -748,6 +767,7 @@ def protect_project(
         ],
         "note": "Encrypted staging files are .py. Batch compilation is delegated to py2_linux_rec_opera.py.",
     }
+    manifest = _provider_finalize_run(key_provider, output_dir, manifest)
     write_manifest(output_dir, manifest)
 
     return output_dir, tuple(results), tuple(sorted(output_runtimes)), tuple(generated_issues)
@@ -880,6 +900,22 @@ def copy_release(build_dir, dist_dir, staging_dir):
     if manifest.exists():
         shutil.copy2(manifest, dist_dir / manifest.name)
         copied.append(dist_dir / manifest.name)
+
+    license_file = None
+    if manifest.exists():
+        payload = read_manifest(manifest)
+        license_file = ((payload.get("key_management") or {}).get("license_file")) or None
+    if license_file:
+        source_license = (staging_dir / license_file).resolve()
+        if source_license.exists():
+            try:
+                source_license.relative_to(staging_dir.resolve())
+            except ValueError:
+                raise RuntimeError("license_file escapes staging directory: {0}".format(license_file))
+            target_license = dist_dir / license_file
+            ensure_parent(target_license)
+            shutil.copy2(source_license, target_license)
+            copied.append(target_license)
     return dist_dir, tuple(copied)
 
 
@@ -957,6 +993,16 @@ def parse_args(argv=None):
         default=None,
         help="Signature key identifier recorded in build_manifest.json.",
     )
+    parser.add_argument(
+        "--license-file",
+        default=None,
+        help="Relative output path for generated license JSON when keys.mode=license-file.",
+    )
+    parser.add_argument(
+        "--license-id",
+        default=None,
+        help="Optional stable license identifier recorded in key refs when keys.mode=license-file.",
+    )
     add_tristate_flag(
         parser,
         "require-manifest-signature",
@@ -1028,7 +1074,16 @@ def main(argv=None):
         key_b64=args.manifest_sign_key_b64,
     )
     key_mode = (project_config.key_mode if project_config is not None and project_config.key_mode else DEFAULT_KEY_MODE)
-    get_key_provider(key_mode)
+    key_provider = get_key_provider(key_mode)
+    if key_mode != LICENSE_FILE_MODE and (args.license_file or args.license_id):
+        raise ValueError("--license-file/--license-id require keys.mode=license-file")
+    _provider_begin_run(
+        key_provider,
+        {
+            "license_file": args.license_file if key_mode == LICENSE_FILE_MODE else None,
+            "license_id": args.license_id if key_mode == LICENSE_FILE_MODE else None,
+        },
+    )
 
     if not target.exists():
         raise FileNotFoundError(f"target not found: {target}")
@@ -1093,6 +1148,7 @@ def main(argv=None):
         skip_bad_files=args.skip_bad_files,
         namespace_package_parts=namespace_package_parts,
         key_mode=key_mode,
+        key_provider=key_provider,
     )
     if project_config is not None:
         manifest_path = actual_output_dir / "build_manifest.json"

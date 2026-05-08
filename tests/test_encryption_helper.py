@@ -92,6 +92,19 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.addCleanup(lambda: sys.modules.pop(package_name, None))
         return importlib.import_module(full_module)
 
+    def _import_module_from_root(self, root_dir, package_name, module_name):
+        root_text = str(root_dir)
+        sys.path.insert(0, root_text)
+        self.addCleanup(lambda: sys.path.remove(root_text) if root_text in sys.path else None)
+
+        importlib.invalidate_caches()
+        full_module = f"{package_name}.{module_name}"
+        sys.modules.pop(full_module, None)
+        sys.modules.pop(package_name, None)
+        self.addCleanup(lambda: sys.modules.pop(full_module, None))
+        self.addCleanup(lambda: sys.modules.pop(package_name, None))
+        return importlib.import_module(full_module)
+
     def test_runtime_module_names_avoid_dunder_prefix(self):
         root = self.make_case_root("runtime_name")
         src_dir = root / "src"
@@ -728,6 +741,107 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue((output_override / "build_manifest.json").exists())
         self.assertFalse((output_override / "build").exists())
+
+    def test_license_file_mode_generates_license_and_runtime_executes(self):
+        root = self.make_case_root("license_mode_ok")
+        project_root = root / "project"
+        pkg = project_root / "pkg"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "mod.py").write_text(
+            "\n".join(
+                [
+                    "BASE = 3",
+                    "",
+                    "def protected_sum(a, b):",
+                    "    return a + b + BASE",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        cfg_path = project_root / "soenc.toml"
+        cfg_path.write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    "target = \"./pkg\"",
+                    "",
+                    "[build]",
+                    "output_dir = \"./out\"",
+                    "compile = false",
+                    "",
+                    "[keys]",
+                    "mode = \"license-file\"",
+                    "license_file = \"licenses/customer.license.json\"",
+                    "license_id = \"customer-a\"",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = encryption_helper.main(["--config", str(cfg_path)])
+        self.assertEqual(exit_code, 0)
+        output_dir = project_root / "out"
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        key_mgmt = manifest.get("key_management") or {}
+        self.assertEqual(key_mgmt.get("mode"), "license-file")
+        self.assertEqual(key_mgmt.get("license_file"), "licenses/customer.license.json")
+        self.assertEqual(key_mgmt.get("license_id"), "customer-a")
+
+        license_path = output_dir / "licenses" / "customer.license.json"
+        self.assertTrue(license_path.exists())
+        module = self._import_module_from_root(output_dir, "pkg", "mod")
+        self.assertEqual(module.protected_sum(4, 5), 12)
+
+    def test_license_file_mode_rejects_tampered_license(self):
+        root = self.make_case_root("license_mode_tamper")
+        project_root = root / "project"
+        pkg = project_root / "pkg"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "mod.py").write_text(
+            "\n".join(
+                [
+                    "def secret_value():",
+                    "    return 42",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        cfg_path = project_root / "soenc.toml"
+        cfg_path.write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    "target = \"./pkg\"",
+                    "",
+                    "[build]",
+                    "output_dir = \"./out\"",
+                    "compile = false",
+                    "",
+                    "[keys]",
+                    "mode = \"license-file\"",
+                    "license_file = \"licenses/customer.license.json\"",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = encryption_helper.main(["--config", str(cfg_path)])
+        self.assertEqual(exit_code, 0)
+        output_dir = project_root / "out"
+        license_path = output_dir / "licenses" / "customer.license.json"
+        payload = json.loads(license_path.read_text(encoding="utf-8"))
+        first_key = next(iter(payload["keys"]))
+        payload["keys"][first_key] = "AAAAAAAAAAAAAAAAAAAAAA=="
+        license_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "license integrity mismatch"):
+            self._import_module_from_root(output_dir, "pkg", "mod")
 
 
 if __name__ == "__main__":
