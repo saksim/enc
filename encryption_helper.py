@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Protect Python source files and batch-compile them with Cython.
 
@@ -19,6 +19,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tokenize
 from pathlib import Path
 from typing import Dict
@@ -59,6 +60,11 @@ RUNTIME_LOADER_MODE_NATIVE_ONLY = "native-extension-required"
 RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 RUNTIME_API_VERSION = 1
 RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR = "same-package-dir"
+RUNTIME_PATH_POLICY_TRUSTED_RELOCATION = "trusted-relocation"
+RUNTIME_FINGERPRINT_ALGORITHM_SHA256 = "sha256"
+RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED = "manifest-compiled-runtime-v1"
+RUNTIME_SUFFIX_POLICY_STRICT_SINGLE = "strict-single-platform"
+RUNTIME_SUFFIX_POLICY_PREFER_HOST = "prefer-host-platform"
 
 
 class SymbolRange(NamedTuple):
@@ -555,12 +561,19 @@ def render_module_preamble(runtime_module, helper_name, require_native_runtime_l
     if require_native_runtime_loader:
         lines.extend(
             [
+                "    import hashlib as _enc_hashlib",
+                "    import json as _enc_json",
+            ]
+        )
+        lines.extend(
+            [
                 "    _enc_runtime_name = str(getattr(_enc_runtime, '__name__', '') or '')",
                 "    if _enc_runtime_name != _enc_mod_name:",
                 f"        raise RuntimeError('runtime module name mismatch for module: {runtime_module}')",
                 "    _enc_runtime_file = str(getattr(_enc_runtime, '__file__', '') or '')",
                 "    _enc_runtime_file_lower = _enc_runtime_file.lower()",
                 f"    _enc_native_suffixes = {NATIVE_EXTENSION_SUFFIXES!r}",
+                "    _enc_runtime_suffix = ''",
                 "    if (not _enc_runtime_file_lower) or (not _enc_runtime_file_lower.endswith(_enc_native_suffixes)):",
                 f"        raise RuntimeError('native runtime loader required for module: {runtime_module}')",
                 f"    if getattr(_enc_runtime, 'SOENC_RUNTIME_API_MARKER', None) != {RUNTIME_API_MARKER!r}:",
@@ -570,24 +583,186 @@ def render_module_preamble(runtime_module, helper_name, require_native_runtime_l
                 "    _enc_runtime_file_norm = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_runtime_file)))",
                 "    _enc_spec = getattr(_enc_runtime, '__spec__', None)",
                 "    _enc_origin = str(getattr(_enc_spec, 'origin', '') or '')",
+                "    _enc_origin_norm = ''",
                 "    if _enc_origin:",
                 "        _enc_origin_norm = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_origin)))",
                 "        if _enc_origin_norm != _enc_runtime_file_norm:",
                 f"            raise RuntimeError('runtime module origin mismatch for module: {runtime_module}')",
                 "    _enc_module_file = str(globals().get('__file__', '') or '')",
+                "    _enc_expected_dir = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_os.path.dirname(_enc_runtime_file))))",
+                "    _enc_runtime_dir = _enc_expected_dir",
                 "    if _enc_module_file:",
                 "        _enc_expected_dir = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_os.path.dirname(_enc_module_file))))",
                 "        _enc_runtime_dir = _enc_os.path.normcase(_enc_os.path.normpath(_enc_os.path.abspath(_enc_os.path.dirname(_enc_runtime_file))))",
+                "    _enc_manifest_probe = _enc_expected_dir",
+                "    _enc_package = str(globals().get('__package__', '') or '')",
+                "    _enc_pkg_parts = [item for item in _enc_package.split('.') if item]",
+                "    _enc_index = -1",
+                "    for _enc_index in range(len(_enc_pkg_parts)):",
+                "        _enc_manifest_probe = _enc_os.path.dirname(_enc_manifest_probe)",
+                "    _enc_manifest_path = ''",
+                "    _enc_manifest_candidate = ''",
+                "    _enc_manifest_walk = ''",
+                "    _enc_manifest_parent = ''",
+                "    _enc_manifest_candidate = _enc_os.path.join(_enc_manifest_probe, 'build_manifest.json')",
+                "    if _enc_os.path.isfile(_enc_manifest_candidate):",
+                "        _enc_manifest_path = _enc_manifest_candidate",
+                "    else:",
+                "        _enc_manifest_walk = _enc_expected_dir",
+                "        while _enc_manifest_walk:",
+                "            _enc_manifest_candidate = _enc_os.path.join(_enc_manifest_walk, 'build_manifest.json')",
+                "            if _enc_os.path.isfile(_enc_manifest_candidate):",
+                "                _enc_manifest_path = _enc_manifest_candidate",
+                "                break",
+                "            _enc_manifest_parent = _enc_os.path.dirname(_enc_manifest_walk)",
+                "            if _enc_manifest_parent == _enc_manifest_walk:",
+                "                break",
+                "            _enc_manifest_walk = _enc_manifest_parent",
+                "    if not _enc_manifest_path:",
+                f"        raise RuntimeError('runtime fingerprint manifest missing for module: {runtime_module}')",
+                "    with open(_enc_manifest_path, 'r', encoding='utf-8') as _enc_manifest_file:",
+                "        _enc_manifest = _enc_json.load(_enc_manifest_file)",
+                "    _enc_runtime_delivery = _enc_manifest.get('runtime_delivery') if isinstance(_enc_manifest, dict) else None",
+                "    _enc_trust_policy = _enc_runtime_delivery.get('trust_policy') if isinstance(_enc_runtime_delivery, dict) else None",
+                "    _enc_require_fp = bool((_enc_trust_policy or {}).get('require_runtime_fingerprint', True))",
+                f"    _enc_suffix_policy = str((_enc_trust_policy or {{}}).get('runtime_suffix_policy', {RUNTIME_SUFFIX_POLICY_STRICT_SINGLE!r}) or {RUNTIME_SUFFIX_POLICY_STRICT_SINGLE!r}).strip()",
+                "    _enc_suffixes_raw = (_enc_trust_policy or {}).get('runtime_native_suffixes', _enc_native_suffixes)",
+                "    if isinstance(_enc_suffixes_raw, str):",
+                "        _enc_suffixes_raw = [_enc_suffixes_raw]",
+                "    _enc_suffixes = []",
+                "    _enc_suffix = ''",
+                "    _enc_suffix_text = ''",
+                "    if isinstance(_enc_suffixes_raw, list):",
+                "        for _enc_suffix in _enc_suffixes_raw:",
+                "            _enc_suffix_text = str(_enc_suffix or '').strip().lower()",
+                "            if not _enc_suffix_text:",
+                "                continue",
+                "            if not _enc_suffix_text.startswith('.'):",
+                "                _enc_suffix_text = '.' + _enc_suffix_text",
+                "            if _enc_suffix_text not in _enc_suffixes:",
+                "                _enc_suffixes.append(_enc_suffix_text)",
+                "    if not _enc_suffixes:",
+                "        _enc_suffixes = list(_enc_native_suffixes)",
+                "    _enc_runtime_suffix = _enc_os.path.splitext(_enc_runtime_file_lower)[1]",
+                "    if _enc_runtime_suffix not in _enc_suffixes:",
+                f"        raise RuntimeError('runtime native suffix not allowed for module: {runtime_module}')",
+                f"    if _enc_suffix_policy not in ({RUNTIME_SUFFIX_POLICY_STRICT_SINGLE!r}, {RUNTIME_SUFFIX_POLICY_PREFER_HOST!r}):",
+                f"        raise RuntimeError('unsupported runtime suffix policy for module: {runtime_module}')",
+                f"    _enc_path_policy = str((_enc_trust_policy or {{}}).get('runtime_path_policy', {RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR!r}) or {RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR!r}).strip()",
+                "    _enc_allow_reloc = bool((_enc_trust_policy or {}).get('runtime_relocation_allowed', False))",
+                "    _enc_roots_raw = (_enc_trust_policy or {}).get('trusted_runtime_roots', [])",
+                "    if isinstance(_enc_roots_raw, str):",
+                "        _enc_roots_raw = [_enc_roots_raw]",
+                "    _enc_roots = []",
+                "    _enc_root = ''",
+                "    _enc_root_text = ''",
+                "    if isinstance(_enc_roots_raw, list):",
+                "        for _enc_root in _enc_roots_raw:",
+                "            _enc_root_text = str(_enc_root or '').strip().replace('\\\\', '/')",
+                "            while _enc_root_text.startswith('./'):",
+                "                _enc_root_text = _enc_root_text[2:]",
+                "            _enc_root_text = _enc_root_text.strip('/')",
+                "            if _enc_root_text and (_enc_root_text not in _enc_roots):",
+                "                _enc_roots.append(_enc_root_text)",
+                "    _enc_is_trusted_root = False",
+                "    _enc_root_norm = ''",
+                "    _enc_root_prefix = ''",
+                "    _enc_manifest_root = _enc_os.path.dirname(_enc_manifest_path)",
+                "    _enc_runtime_rel = ''",
+                "    if _enc_path_policy == 'same-package-dir':",
                 "        if _enc_runtime_dir != _enc_expected_dir:",
                 f"            raise RuntimeError('runtime module path escaped expected package directory for module: {runtime_module}')",
+                "    elif _enc_path_policy == 'trusted-relocation':",
+                "        if not _enc_allow_reloc:",
+                f"            raise RuntimeError('runtime relocation is not allowed for module: {runtime_module}')",
+                "        if not _enc_roots:",
+                f"            raise RuntimeError('runtime trusted relocation roots missing for module: {runtime_module}')",
+                "        try:",
+                "            _enc_runtime_rel = _enc_os.path.relpath(_enc_runtime_file, _enc_manifest_root)",
+                "        except ValueError:",
+                f"            raise RuntimeError('runtime relocation root not trusted for module: {runtime_module}')",
+                "        _enc_runtime_rel = _enc_runtime_rel.replace('\\\\', '/').lstrip('./')",
+                "        for _enc_root in _enc_roots:",
+                "            _enc_root_norm = str(_enc_root).replace('\\\\', '/').strip('/')",
+                "            if not _enc_root_norm:",
+                "                continue",
+                "            _enc_root_prefix = _enc_root_norm + '/'",
+                "            if (_enc_runtime_rel == _enc_root_norm) or _enc_runtime_rel.startswith(_enc_root_prefix):",
+                "                _enc_is_trusted_root = True",
+                "                break",
+                "        if not _enc_is_trusted_root:",
+                f"            raise RuntimeError('runtime relocation root not trusted for module: {runtime_module}')",
+                "    else:",
+                f"        raise RuntimeError('unsupported runtime path policy for module: {runtime_module}')",
+                "    _enc_entries = []",
+                "    _enc_expected_digest = ''",
+                f"    _enc_expected_algo = {RUNTIME_FINGERPRINT_ALGORITHM_SHA256!r}",
+                "    _enc_expected_rel = ''",
+                "    _enc_expected_suffix = ''",
+                "    _enc_runtime_rel_base = ''",
+                "    _enc_expected_rel_base = ''",
+                "    _enc_entry = None",
+                "    _enc_hasher = None",
+                "    _enc_runtime_stream = None",
+                "    _enc_chunk = b''",
+                "    _enc_actual_digest = ''",
+                "    if _enc_require_fp:",
+                "        _enc_entries = _enc_runtime_delivery.get('compiled_runtime_fingerprints') if isinstance(_enc_runtime_delivery, dict) else None",
+                "        if not isinstance(_enc_entries, list):",
+                f"            raise RuntimeError('runtime fingerprint metadata missing for module: {runtime_module}')",
+                "        for _enc_entry in _enc_entries:",
+                "            if not isinstance(_enc_entry, dict):",
+                "                continue",
+                f"            if str(_enc_entry.get('module_name') or '') != {runtime_module!r}:",
+                "                continue",
+                "            _enc_expected_digest = str(_enc_entry.get('digest_hex') or '').strip().lower()",
+                f"            _enc_expected_algo = str(_enc_entry.get('algorithm') or {RUNTIME_FINGERPRINT_ALGORITHM_SHA256!r}).strip().lower()",
+                "            _enc_expected_rel = str(_enc_entry.get('compiled_relative_path') or '').strip().replace('\\\\', '/')",
+                "            break",
+                "        if not _enc_expected_digest:",
+                f"            raise RuntimeError('runtime fingerprint missing for module: {runtime_module}')",
+                f"        if _enc_expected_algo != {RUNTIME_FINGERPRINT_ALGORITHM_SHA256!r}:",
+                f"            raise RuntimeError('unsupported runtime fingerprint algorithm for module: {runtime_module}')",
+                "        if (_enc_suffix_policy == 'strict-single-platform') and _enc_expected_rel:",
+                "            _enc_expected_suffix = _enc_os.path.splitext(_enc_expected_rel.lower())[1]",
+                "            if (_enc_expected_suffix and _enc_runtime_suffix) and (_enc_expected_suffix != _enc_runtime_suffix):",
+                f"                raise RuntimeError('runtime native suffix mismatch for module: {runtime_module}')",
+                "        _enc_hasher = _enc_hashlib.sha256()",
+                "        with open(_enc_runtime_file, 'rb') as _enc_runtime_stream:",
+                "            while True:",
+                "                _enc_chunk = _enc_runtime_stream.read(131072)",
+                "                if not _enc_chunk:",
+                "                    break",
+                "                _enc_hasher.update(_enc_chunk)",
+                "        _enc_actual_digest = _enc_hasher.hexdigest().lower()",
+                "        if _enc_actual_digest != _enc_expected_digest:",
+                f"            raise RuntimeError('runtime fingerprint mismatch for module: {runtime_module}')",
+                "        if _enc_expected_rel:",
+                "            if not _enc_runtime_rel:",
+                "                try:",
+                "                    _enc_runtime_rel = _enc_os.path.relpath(_enc_runtime_file, _enc_manifest_root)",
+                "                except ValueError:",
+                f"                    raise RuntimeError('runtime fingerprint path mismatch for module: {runtime_module}')",
+                "            _enc_runtime_rel = _enc_runtime_rel.replace('\\\\', '/').lstrip('./')",
+                "            if _enc_suffix_policy == 'strict-single-platform':",
+                "                if _enc_runtime_rel != _enc_expected_rel:",
+                f"                    raise RuntimeError('runtime fingerprint path mismatch for module: {runtime_module}')",
+                "            else:",
+                "                _enc_runtime_rel_base = _enc_os.path.splitext(_enc_runtime_rel)[0]",
+                "                _enc_expected_rel_base = _enc_os.path.splitext(_enc_expected_rel)[0]",
+                "                if _enc_runtime_rel_base != _enc_expected_rel_base:",
+                f"                    raise RuntimeError('runtime fingerprint path mismatch for module: {runtime_module}')",
             ]
         )
         cleanup_vars.extend(
             [
+                "_enc_hashlib",
+                "_enc_json",
                 "_enc_runtime_name",
                 "_enc_runtime_file",
                 "_enc_runtime_file_lower",
                 "_enc_native_suffixes",
+                "_enc_runtime_suffix",
                 "_enc_runtime_file_norm",
                 "_enc_spec",
                 "_enc_origin",
@@ -595,12 +770,52 @@ def render_module_preamble(runtime_module, helper_name, require_native_runtime_l
                 "_enc_module_file",
                 "_enc_expected_dir",
                 "_enc_runtime_dir",
+                "_enc_manifest_probe",
+                "_enc_package",
+                "_enc_pkg_parts",
+                "_enc_index",
+                "_enc_manifest_path",
+                "_enc_manifest_candidate",
+                "_enc_manifest_walk",
+                "_enc_manifest_parent",
+                "_enc_manifest_file",
+                "_enc_manifest",
+                "_enc_runtime_delivery",
+                "_enc_trust_policy",
+                "_enc_require_fp",
+                "_enc_suffix_policy",
+                "_enc_suffixes_raw",
+                "_enc_suffixes",
+                "_enc_suffix",
+                "_enc_suffix_text",
+                "_enc_path_policy",
+                "_enc_allow_reloc",
+                "_enc_roots_raw",
+                "_enc_roots",
+                "_enc_root",
+                "_enc_root_text",
+                "_enc_is_trusted_root",
+                "_enc_root_norm",
+                "_enc_root_prefix",
+                "_enc_entries",
+                "_enc_expected_digest",
+                "_enc_expected_algo",
+                "_enc_expected_rel",
+                "_enc_expected_suffix",
+                "_enc_runtime_rel_base",
+                "_enc_expected_rel_base",
+                "_enc_entry",
+                "_enc_hasher",
+                "_enc_runtime_stream",
+                "_enc_chunk",
+                "_enc_actual_digest",
+                "_enc_manifest_root",
+                "_enc_runtime_rel",
             ]
         )
     lines.append("    _enc_runtime._x((_payload,), _parts, globals())")
     lines.append("    del {0}".format(", ".join(cleanup_vars)))
     return "\n".join(lines) + "\n"
-
 
 def render_symbol_stub(symbol):
     if symbol.kind in ("function", "async_function"):
@@ -823,7 +1038,14 @@ def protect_project(
                 "runtime_api_marker": RUNTIME_API_MARKER,
                 "runtime_api_version": RUNTIME_API_VERSION,
                 "runtime_path_policy": RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
+                "runtime_relocation_allowed": False,
+                "trusted_runtime_roots": [],
+                "runtime_suffix_policy": RUNTIME_SUFFIX_POLICY_STRICT_SINGLE,
+                "runtime_native_suffixes": list(runtime_host_native_suffixes()),
                 "spec_origin_match": True,
+                "runtime_fingerprint_algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                "runtime_fingerprint_binding": RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED,
+                "require_runtime_fingerprint": bool(require_native_runtime_loader),
             },
         },
         "key_management": {
@@ -853,6 +1075,178 @@ def _runtime_native_candidates(source_relative_path):
     return tuple(source_rel.with_suffix(suffix) for suffix in NATIVE_EXTENSION_SUFFIXES)
 
 
+def runtime_host_native_suffixes():
+    suffixes = []  # type: List[str]
+    ext_suffix = str(sysconfig.get_config_var("EXT_SUFFIX") or "").strip().lower()
+    if ext_suffix:
+        ext = os.path.splitext(ext_suffix)[1]
+        if ext and ext not in suffixes:
+            suffixes.append(ext)
+    for suffix in NATIVE_EXTENSION_SUFFIXES:
+        text = str(suffix).strip().lower()
+        if not text.startswith("."):
+            text = "." + text
+        if text and text not in suffixes:
+            suffixes.append(text)
+    return tuple(suffixes)
+
+
+def _normalize_native_suffixes(raw_suffixes):
+    if isinstance(raw_suffixes, str):
+        raw_suffixes = [raw_suffixes]
+    if not isinstance(raw_suffixes, list):
+        return tuple()
+    normalized = []  # type: List[str]
+    for item in raw_suffixes:
+        text = str(item).strip().lower()
+        if not text:
+            continue
+        if not text.startswith("."):
+            text = "." + text
+        if text not in normalized:
+            normalized.append(text)
+    return tuple(normalized)
+
+
+def _normalize_trusted_runtime_roots(raw_roots):
+    if isinstance(raw_roots, str):
+        raw_roots = [raw_roots]
+    if not isinstance(raw_roots, list):
+        return tuple()
+    normalized = []  # type: List[str]
+    for item in raw_roots:
+        text = str(item).strip().replace("\\", "/")
+        if not text:
+            continue
+        while text.startswith("./"):
+            text = text[2:]
+        text = text.strip("/")
+        if not text:
+            continue
+        path = Path(text)
+        if path.is_absolute() or ".." in path.parts:
+            raise RuntimeError("trusted runtime root must be a relative path inside release root: {0}".format(item))
+        value = str(path).replace("\\", "/")
+        if value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def _runtime_native_candidates_for_suffixes(source_relative_path, native_suffixes):
+    source_rel = Path(source_relative_path)
+    return tuple(source_rel.with_suffix(suffix) for suffix in native_suffixes)
+
+
+def _pick_compiled_runtime_candidate(build_dir, runtime_file, native_suffixes, suffix_policy):
+    existing = []  # type: List[Tuple[str, str]]
+    for candidate in _runtime_native_candidates_for_suffixes(runtime_file, native_suffixes):
+        candidate_path = build_dir / candidate
+        if candidate_path.exists():
+            suffix = candidate.suffix.lower()
+            existing.append((_normalized_relpath_text(candidate), suffix))
+
+    if not existing:
+        return None
+
+    by_suffix = {}  # type: Dict[str, str]
+    for candidate_text, suffix in existing:
+        by_suffix[suffix] = candidate_text
+
+    host_suffixes = runtime_host_native_suffixes()
+    host_suffix = host_suffixes[0] if host_suffixes else (native_suffixes[0] if native_suffixes else "")
+    if suffix_policy == RUNTIME_SUFFIX_POLICY_STRICT_SINGLE:
+        if len(by_suffix) > 1:
+            raise RuntimeError(
+                "mixed-platform runtime artifacts detected for {0}: {1}".format(
+                    runtime_file,
+                    ", ".join(sorted(by_suffix.keys())),
+                )
+            )
+        if host_suffix and host_suffix not in by_suffix:
+            raise RuntimeError(
+                "runtime native suffix mismatch for host platform on {0}: expected {1}, found {2}".format(
+                    runtime_file,
+                    host_suffix,
+                    ", ".join(sorted(by_suffix.keys())),
+                )
+            )
+        return by_suffix.get(host_suffix) if host_suffix else next(iter(by_suffix.values()))
+
+    if suffix_policy != RUNTIME_SUFFIX_POLICY_PREFER_HOST:
+        raise RuntimeError("unsupported runtime suffix policy: {0}".format(suffix_policy))
+
+    for suffix in host_suffixes:
+        candidate = by_suffix.get(suffix)
+        if candidate is not None:
+            return candidate
+    return sorted(by_suffix.values())[0]
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(131072)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalized_relpath_text(value):
+    return str(value).replace("\\", "/")
+
+
+def _runtime_fingerprints_from_manifest(manifest, build_dir, source_to_compiled):
+    fingerprints = []  # type: List[Dict[str, str]]
+    runtime_modules = manifest.get("runtime_modules")
+    if isinstance(runtime_modules, list):
+        for entry in runtime_modules:
+            if not isinstance(entry, dict):
+                continue
+            source_relative = _normalized_relpath_text(entry.get("source_relative_path") or "").strip()
+            if not source_relative:
+                continue
+            compiled_relative = source_to_compiled.get(source_relative)
+            if not compiled_relative:
+                continue
+            module_name = str(entry.get("module_name") or "").strip() or Path(source_relative).stem
+            package_relative = _normalized_relpath_text(entry.get("package_relative_path") or "").strip()
+            if package_relative == ".":
+                package_relative = ""
+            compiled_path = build_dir / Path(compiled_relative)
+            fingerprints.append(
+                {
+                    "module_name": module_name,
+                    "source_relative_path": source_relative,
+                    "package_relative_path": package_relative,
+                    "compiled_relative_path": compiled_relative,
+                    "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                    "digest_hex": _sha256_file(compiled_path),
+                }
+            )
+    if fingerprints:
+        return sorted(fingerprints, key=lambda item: (item["module_name"], item["compiled_relative_path"]))
+
+    for source_relative, compiled_relative in source_to_compiled.items():
+        source_path = Path(source_relative)
+        package_relative = _normalized_relpath_text(source_path.parent)
+        if package_relative == ".":
+            package_relative = ""
+        compiled_path = build_dir / Path(compiled_relative)
+        fingerprints.append(
+            {
+                "module_name": source_path.stem,
+                "source_relative_path": source_relative,
+                "package_relative_path": package_relative,
+                "compiled_relative_path": compiled_relative,
+                "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                "digest_hex": _sha256_file(compiled_path),
+            }
+        )
+    return sorted(fingerprints, key=lambda item: (item["module_name"], item["compiled_relative_path"]))
+
+
 def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_manifest_signature=False):
     manifest_path = staging_dir / "build_manifest.json"
     if not manifest_path.exists():
@@ -867,24 +1261,6 @@ def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_
     if not runtime_files:
         return tuple()
 
-    compiled_runtime_files = []  # type: List[str]
-    missing_runtime_files = []  # type: List[str]
-    for runtime_file in runtime_files:
-        matched = None
-        for candidate in _runtime_native_candidates(runtime_file):
-            if (build_dir / candidate).exists():
-                matched = str(candidate).replace("\\", "/")
-                break
-        if matched is None:
-            missing_runtime_files.append(str(runtime_file))
-        else:
-            compiled_runtime_files.append(matched)
-
-    if missing_runtime_files:
-        raise RuntimeError(
-            "compiled runtime modules missing from build output: {0}".format(", ".join(sorted(missing_runtime_files)))
-        )
-
     runtime_delivery = manifest.get("runtime_delivery") or {}
     runtime_delivery.setdefault("loader_mode", RUNTIME_LOADER_MODE_DEFAULT)
     runtime_delivery["loader_enforced"] = bool(runtime_delivery.get("loader_enforced", False))
@@ -894,9 +1270,67 @@ def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_
     trust_policy.setdefault("runtime_api_marker", RUNTIME_API_MARKER)
     trust_policy.setdefault("runtime_api_version", RUNTIME_API_VERSION)
     trust_policy.setdefault("runtime_path_policy", RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR)
+    trust_policy.setdefault("runtime_relocation_allowed", False)
+    trust_policy.setdefault("trusted_runtime_roots", [])
+    trust_policy.setdefault("runtime_suffix_policy", RUNTIME_SUFFIX_POLICY_STRICT_SINGLE)
+    trust_policy.setdefault("runtime_native_suffixes", list(runtime_host_native_suffixes()))
     trust_policy.setdefault("spec_origin_match", True)
+    trust_policy.setdefault("runtime_fingerprint_algorithm", RUNTIME_FINGERPRINT_ALGORITHM_SHA256)
+    trust_policy.setdefault("runtime_fingerprint_binding", RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED)
+    trust_policy.setdefault("require_runtime_fingerprint", runtime_delivery["loader_enforced"])
     runtime_delivery["trust_policy"] = trust_policy
+
+    runtime_suffix_policy = str(trust_policy.get("runtime_suffix_policy") or RUNTIME_SUFFIX_POLICY_STRICT_SINGLE).strip()
+    if runtime_suffix_policy not in {RUNTIME_SUFFIX_POLICY_STRICT_SINGLE, RUNTIME_SUFFIX_POLICY_PREFER_HOST}:
+        raise RuntimeError("unsupported runtime suffix policy: {0}".format(runtime_suffix_policy))
+    runtime_native_suffixes = _normalize_native_suffixes(trust_policy.get("runtime_native_suffixes"))
+    if not runtime_native_suffixes:
+        runtime_native_suffixes = runtime_host_native_suffixes()
+    trust_policy["runtime_native_suffixes"] = list(runtime_native_suffixes)
+    trust_policy["runtime_suffix_policy"] = runtime_suffix_policy
+
+    runtime_path_policy = str(trust_policy.get("runtime_path_policy") or RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR).strip()
+    if runtime_path_policy not in {RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR, RUNTIME_PATH_POLICY_TRUSTED_RELOCATION}:
+        raise RuntimeError("unsupported runtime path policy: {0}".format(runtime_path_policy))
+    trusted_runtime_roots = _normalize_trusted_runtime_roots(trust_policy.get("trusted_runtime_roots"))
+    runtime_relocation_allowed = bool(trust_policy.get("runtime_relocation_allowed", False))
+    if runtime_path_policy == RUNTIME_PATH_POLICY_TRUSTED_RELOCATION:
+        if not runtime_relocation_allowed:
+            raise RuntimeError("trusted-relocation path policy requires runtime_relocation_allowed=true")
+        if not trusted_runtime_roots:
+            raise RuntimeError("trusted-relocation path policy requires trusted_runtime_roots")
+    trust_policy["runtime_relocation_allowed"] = runtime_relocation_allowed
+    trust_policy["trusted_runtime_roots"] = list(trusted_runtime_roots)
+    trust_policy["runtime_path_policy"] = runtime_path_policy
+
+    compiled_runtime_files = []  # type: List[str]
+    source_to_compiled = {}  # type: Dict[str, str]
+    missing_runtime_files = []  # type: List[str]
+    for runtime_file in runtime_files:
+        runtime_source_relative = _normalized_relpath_text(runtime_file)
+        matched = _pick_compiled_runtime_candidate(
+            build_dir=build_dir,
+            runtime_file=runtime_file,
+            native_suffixes=runtime_native_suffixes,
+            suffix_policy=runtime_suffix_policy,
+        )
+        if matched is None:
+            missing_runtime_files.append(runtime_source_relative)
+        else:
+            compiled_runtime_files.append(matched)
+            source_to_compiled[runtime_source_relative] = matched
+
+    if missing_runtime_files:
+        raise RuntimeError(
+            "compiled runtime modules missing from build output: {0}".format(", ".join(sorted(missing_runtime_files)))
+        )
+
     runtime_delivery["compiled_runtime_files"] = sorted(compiled_runtime_files)
+    runtime_delivery["compiled_runtime_fingerprints"] = _runtime_fingerprints_from_manifest(
+        manifest,
+        build_dir,
+        source_to_compiled,
+    )
     runtime_delivery["validated"] = True
     manifest["runtime_delivery"] = runtime_delivery
     write_manifest(staging_dir, manifest, signing_key=signing_key, key_id=(manifest.get("signature") or {}).get("key_id"))
@@ -1390,3 +1824,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -1,5 +1,6 @@
 import json
 import importlib
+import hashlib
 import os
 import shutil
 import sys
@@ -247,7 +248,32 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             trust_policy.get("runtime_path_policy"),
             encryption_helper.RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
         )
+        self.assertFalse(trust_policy.get("runtime_relocation_allowed"))
+        self.assertEqual(trust_policy.get("trusted_runtime_roots"), [])
+        self.assertEqual(
+            trust_policy.get("runtime_suffix_policy"),
+            encryption_helper.RUNTIME_SUFFIX_POLICY_STRICT_SINGLE,
+        )
+        self.assertTrue(trust_policy.get("runtime_native_suffixes"))
         self.assertTrue(trust_policy.get("spec_origin_match"))
+        self.assertEqual(
+            trust_policy.get("runtime_fingerprint_algorithm"),
+            encryption_helper.RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+        )
+        self.assertEqual(
+            trust_policy.get("runtime_fingerprint_binding"),
+            encryption_helper.RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED,
+        )
+        self.assertFalse(trust_policy.get("require_runtime_fingerprint"))
+        fingerprints = updated_manifest["runtime_delivery"].get("compiled_runtime_fingerprints") or []
+        self.assertEqual(len(fingerprints), 1)
+        fp = fingerprints[0]
+        self.assertEqual(fp.get("module_name"), "enc_rt_pkg_1234")
+        self.assertEqual(fp.get("source_relative_path"), "pkg/enc_rt_pkg_1234.py")
+        self.assertEqual(fp.get("compiled_relative_path"), "pkg/enc_rt_pkg_1234.pyd")
+        self.assertEqual(fp.get("package_relative_path"), "pkg")
+        self.assertEqual(fp.get("algorithm"), encryption_helper.RUNTIME_FINGERPRINT_ALGORITHM_SHA256)
+        self.assertEqual(len(str(fp.get("digest_hex") or "")), 64)
 
     def test_validate_runtime_delivery_keeps_manifest_signed_after_validation(self):
         root = self.make_case_root("runtime_validate_signed")
@@ -283,6 +309,64 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         loaded, signature = encryption_helper.verify_manifest_signature_file(manifest_path, key)
         self.assertEqual(signature["key_id"], "team-main")
         self.assertTrue(loaded["runtime_delivery"]["validated"])
+
+    def test_validate_runtime_delivery_rejects_mixed_platform_artifacts_under_strict_policy(self):
+        root = self.make_case_root("runtime_validate_mixed_suffix")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        pkg_dir = build_dir / "pkg"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+
+        runtime_source = "pkg/enc_rt_pkg_1234.py"
+        (pkg_dir / "enc_rt_pkg_1234.pyd").write_bytes(b"native-win")
+        (pkg_dir / "enc_rt_pkg_1234.so").write_bytes(b"native-linux")
+        manifest = {
+            "runtime_files": [runtime_source],
+            "runtime_delivery": {
+                "mode": encryption_helper.RUNTIME_DELIVERY_MODE,
+                "trust_policy": {
+                    "runtime_suffix_policy": encryption_helper.RUNTIME_SUFFIX_POLICY_STRICT_SINGLE,
+                    "runtime_native_suffixes": [".pyd", ".so"],
+                },
+            },
+        }
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "mixed-platform runtime artifacts detected"):
+            encryption_helper.validate_runtime_delivery(staging_dir, build_dir)
+
+    def test_validate_runtime_delivery_requires_relocation_roots_when_trusted_relocation_enabled(self):
+        root = self.make_case_root("runtime_validate_trusted_roots_required")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        pkg_dir = build_dir / "pkg"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+
+        runtime_source = "pkg/enc_rt_pkg_1234.py"
+        (pkg_dir / "enc_rt_pkg_1234.pyd").write_bytes(b"native-binary")
+        manifest = {
+            "runtime_files": [runtime_source],
+            "runtime_delivery": {
+                "mode": encryption_helper.RUNTIME_DELIVERY_MODE,
+                "trust_policy": {
+                    "runtime_path_policy": encryption_helper.RUNTIME_PATH_POLICY_TRUSTED_RELOCATION,
+                    "runtime_relocation_allowed": True,
+                    "trusted_runtime_roots": [],
+                },
+            },
+        }
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "trusted-relocation path policy requires trusted_runtime_roots"):
+            encryption_helper.validate_runtime_delivery(staging_dir, build_dir)
 
     def test_e2e_compiled_flow_imports_and_executes_protected_symbols(self):
         self._ensure_compile_integration_ready()
@@ -838,6 +922,27 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         mod_file.write_text("", encoding="utf-8")
         runtime_file = pkg_dir / "enc_rt_demo.pyd"
         runtime_file.write_bytes(b"native")
+        runtime_digest = hashlib.sha256(runtime_file.read_bytes()).hexdigest()
+        (root / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_delivery": {
+                        "compiled_runtime_fingerprints": [
+                            {
+                                "module_name": "enc_rt_demo",
+                                "compiled_relative_path": "pkg/enc_rt_demo.pyd",
+                                "algorithm": "sha256",
+                                "digest_hex": runtime_digest,
+                            }
+                        ],
+                        "trust_policy": {"require_runtime_fingerprint": True},
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         module_globals = {
             "__name__": "pkg.mod",
@@ -856,6 +961,71 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         with mock.patch("importlib.import_module", return_value=runtime_stub):
             exec(protected, module_globals, module_globals)
         self.assertEqual(module_globals["VALUE"], 7)
+
+    def test_protect_source_native_loader_guard_fails_on_runtime_fingerprint_mismatch(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        root = self.make_case_root("native_guard_fingerprint_bad")
+        pkg_dir = root / "pkg"
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        mod_file = pkg_dir / "mod.py"
+        mod_file.write_text("", encoding="utf-8")
+        runtime_file = pkg_dir / "enc_rt_demo.pyd"
+        runtime_file.write_bytes(b"native-one")
+        expected_digest = hashlib.sha256(b"native-two").hexdigest()
+        (root / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_delivery": {
+                        "compiled_runtime_fingerprints": [
+                            {
+                                "module_name": "enc_rt_demo",
+                                "compiled_relative_path": "pkg/enc_rt_demo.pyd",
+                                "algorithm": "sha256",
+                                "digest_hex": expected_digest,
+                            }
+                        ],
+                        "trust_policy": {"require_runtime_fingerprint": True},
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str(mod_file),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str(runtime_file)
+        runtime_stub.__spec__ = type("SpecStub", (), {"origin": str(runtime_file)})()
+        runtime_stub.SOENC_RUNTIME_API_MARKER = encryption_helper.RUNTIME_API_MARKER
+        runtime_stub.SOENC_RUNTIME_API_VERSION = encryption_helper.RUNTIME_API_VERSION
+        runtime_stub._x = lambda *_args, **_kwargs: None
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            with self.assertRaisesRegex(RuntimeError, "runtime fingerprint mismatch for module: enc_rt_demo"):
+                exec(protected, module_globals, module_globals)
 
     def test_protect_source_native_loader_guard_fails_on_runtime_marker_mismatch(self):
         source = "\n".join(
@@ -928,6 +1098,27 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         mod_file.write_text("", encoding="utf-8")
         runtime_file = other_pkg / "enc_rt_demo.pyd"
         runtime_file.write_bytes(b"native")
+        runtime_digest = hashlib.sha256(runtime_file.read_bytes()).hexdigest()
+        (root / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_delivery": {
+                        "compiled_runtime_fingerprints": [
+                            {
+                                "module_name": "enc_rt_demo",
+                                "compiled_relative_path": "other_pkg/enc_rt_demo.pyd",
+                                "algorithm": "sha256",
+                                "digest_hex": runtime_digest,
+                            }
+                        ],
+                        "trust_policy": {"require_runtime_fingerprint": True},
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         module_globals = {
             "__name__": "pkg.mod",
@@ -947,6 +1138,153 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError,
                 "runtime module path escaped expected package directory for module: enc_rt_demo",
+            ):
+                exec(protected, module_globals, module_globals)
+
+    def test_protect_source_native_loader_guard_accepts_trusted_relocation(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        root = self.make_case_root("native_guard_trusted_reloc_ok")
+        expected_pkg = root / "pkg"
+        trusted_root = root / "trusted_rt"
+        expected_pkg.mkdir(parents=True, exist_ok=True)
+        trusted_root.mkdir(parents=True, exist_ok=True)
+        mod_file = expected_pkg / "mod.py"
+        mod_file.write_text("", encoding="utf-8")
+        runtime_file = trusted_root / "enc_rt_demo.pyd"
+        runtime_file.write_bytes(b"native")
+        runtime_digest = hashlib.sha256(runtime_file.read_bytes()).hexdigest()
+        (root / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_delivery": {
+                        "compiled_runtime_fingerprints": [
+                            {
+                                "module_name": "enc_rt_demo",
+                                "compiled_relative_path": "trusted_rt/enc_rt_demo.pyd",
+                                "algorithm": "sha256",
+                                "digest_hex": runtime_digest,
+                            }
+                        ],
+                        "trust_policy": {
+                            "require_runtime_fingerprint": True,
+                            "runtime_path_policy": "trusted-relocation",
+                            "runtime_relocation_allowed": True,
+                            "trusted_runtime_roots": ["trusted_rt"],
+                        },
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str(mod_file),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str(runtime_file)
+        runtime_stub.__spec__ = type("SpecStub", (), {"origin": str(runtime_file)})()
+        runtime_stub.SOENC_RUNTIME_API_MARKER = encryption_helper.RUNTIME_API_MARKER
+        runtime_stub.SOENC_RUNTIME_API_VERSION = encryption_helper.RUNTIME_API_VERSION
+        runtime_stub._x = lambda *_args, _ns=None, **_kwargs: (_args[2].update({"VALUE": 7}) if len(_args) >= 3 else None)
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            exec(protected, module_globals, module_globals)
+        self.assertEqual(module_globals["VALUE"], 7)
+
+    def test_protect_source_native_loader_guard_rejects_untrusted_relocation_root(self):
+        source = "\n".join(
+            [
+                "def protected_value():",
+                "    return 7",
+                "",
+            ]
+        )
+        symbols = encryption_helper.top_level_symbols(source)
+        chosen = [item for item in symbols if item.kind == "function" and item.name == "protected_value"]
+        protected = encryption_helper.protect_source(
+            source,
+            runtime_module="enc_rt_demo",
+            symbols_to_encrypt=chosen,
+            key_mode="local-embedded",
+            require_native_runtime_loader=True,
+        )
+
+        root = self.make_case_root("native_guard_trusted_reloc_bad")
+        expected_pkg = root / "pkg"
+        other_pkg = root / "other_pkg"
+        expected_pkg.mkdir(parents=True, exist_ok=True)
+        other_pkg.mkdir(parents=True, exist_ok=True)
+        mod_file = expected_pkg / "mod.py"
+        mod_file.write_text("", encoding="utf-8")
+        runtime_file = other_pkg / "enc_rt_demo.pyd"
+        runtime_file.write_bytes(b"native")
+        runtime_digest = hashlib.sha256(runtime_file.read_bytes()).hexdigest()
+        (root / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_delivery": {
+                        "compiled_runtime_fingerprints": [
+                            {
+                                "module_name": "enc_rt_demo",
+                                "compiled_relative_path": "other_pkg/enc_rt_demo.pyd",
+                                "algorithm": "sha256",
+                                "digest_hex": runtime_digest,
+                            }
+                        ],
+                        "trust_policy": {
+                            "require_runtime_fingerprint": True,
+                            "runtime_path_policy": "trusted-relocation",
+                            "runtime_relocation_allowed": True,
+                            "trusted_runtime_roots": ["trusted_rt"],
+                        },
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        module_globals = {
+            "__name__": "pkg.mod",
+            "__package__": "pkg",
+            "__file__": str(mod_file),
+            "__builtins__": __builtins__,
+        }
+        runtime_stub = type("RuntimeStub", (), {})()
+        runtime_stub.__name__ = "pkg.enc_rt_demo"
+        runtime_stub.__file__ = str(runtime_file)
+        runtime_stub.__spec__ = type("SpecStub", (), {"origin": str(runtime_file)})()
+        runtime_stub.SOENC_RUNTIME_API_MARKER = encryption_helper.RUNTIME_API_MARKER
+        runtime_stub.SOENC_RUNTIME_API_VERSION = encryption_helper.RUNTIME_API_VERSION
+        runtime_stub._x = lambda *_args, **_kwargs: None
+
+        with mock.patch("importlib.import_module", return_value=runtime_stub):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime relocation root not trusted for module: enc_rt_demo",
             ):
                 exec(protected, module_globals, module_globals)
 
@@ -980,7 +1318,23 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             trust_policy.get("runtime_path_policy"),
             encryption_helper.RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
         )
+        self.assertFalse(trust_policy.get("runtime_relocation_allowed"))
+        self.assertEqual(trust_policy.get("trusted_runtime_roots"), [])
+        self.assertEqual(
+            trust_policy.get("runtime_suffix_policy"),
+            encryption_helper.RUNTIME_SUFFIX_POLICY_STRICT_SINGLE,
+        )
+        self.assertTrue(trust_policy.get("runtime_native_suffixes"))
         self.assertTrue(trust_policy.get("spec_origin_match"))
+        self.assertEqual(
+            trust_policy.get("runtime_fingerprint_algorithm"),
+            encryption_helper.RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+        )
+        self.assertEqual(
+            trust_policy.get("runtime_fingerprint_binding"),
+            encryption_helper.RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED,
+        )
+        self.assertTrue(trust_policy.get("require_runtime_fingerprint"))
 
     def test_cli_overrides_soenc_config_values(self):
         root = self.make_case_root("soenc_cfg_override")

@@ -488,7 +488,7 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ### CARD `ENC-P1-011`
 
-- Status: `in_progress`
+- Status: `done`
 - Goal: move the most sensitive runtime decrypt path toward a native loader
 - Type: hardening
 - Depends on: `ENC-P0-003`, `ENC-P0-008`
@@ -574,6 +574,59 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Remaining sub-scope to complete card:
   - strengthen runtime authenticity beyond marker/version by binding loader checks to signed per-build runtime identity data (e.g., manifest-linked runtime fingerprint) and enforce it in protected stubs.
   - add compile/runtime packaging guardrails for mixed-platform native suffix resolution and explicit policy controls for trusted relocation scenarios.
+- Notes (2026-05-09, iteration 4):
+  - Delivered manifest-linked runtime fingerprint binding for native-loader enforcement:
+    - `validate_runtime_delivery` now records per-runtime compiled fingerprint metadata in `build_manifest.json`:
+      - `runtime_delivery.compiled_runtime_fingerprints[]` with `module_name`, source/compiled relative paths, `sha256` algorithm, and digest.
+    - trust policy metadata now includes:
+      - `runtime_delivery.trust_policy.runtime_fingerprint_algorithm`
+      - `runtime_delivery.trust_policy.runtime_fingerprint_binding`
+      - `runtime_delivery.trust_policy.require_runtime_fingerprint`
+    - native-loader protected stubs now fail closed unless runtime integrity matches manifest fingerprint metadata:
+      - locate `build_manifest.json` from package context
+      - require matching runtime fingerprint entry for the expected runtime module
+      - hash loaded native runtime artifact and compare against expected digest
+      - enforce compiled-runtime relative path match against manifest metadata
+  - Added focused regression coverage:
+    - `tests/test_encryption_helper.py`:
+      - extended runtime-delivery manifest validation assertions for fingerprint metadata/defaults
+      - native-loader success path now supplies matching manifest fingerprint metadata
+      - fail-closed runtime fingerprint mismatch coverage
+      - trust policy assertions for fingerprint policy fields under `--runtime-native-loader`
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_validate or native_loader or runtime_native_loader"` => `6 passed, 2 skipped, 26 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_decryption_helper.py` => `33 passed, 4 skipped`
+    - `python -m pytest -q` => `102 passed, 5 skipped`
+- Remaining sub-scope to complete card:
+  - add compile/runtime packaging guardrails for mixed-platform native suffix resolution and explicit policy controls for trusted relocation scenarios.
+- Notes (2026-05-09, iteration 5):
+  - Completed packaging-policy guardrails for native-loader runtime authenticity enforcement:
+    - `runtime_delivery.trust_policy` now includes explicit mixed-platform suffix controls:
+      - `runtime_suffix_policy` (`strict-single-platform` default, `prefer-host-platform` supported)
+      - `runtime_native_suffixes` (normalized allow-list used for compile/runtime verification and loader checks)
+    - `runtime_delivery.trust_policy` now includes explicit relocation controls:
+      - `runtime_relocation_allowed`
+      - `trusted_runtime_roots` (manifest-root-relative allowed runtime directories)
+      - `runtime_path_policy` now supports `same-package-dir` (default) and `trusted-relocation`.
+  - Validation/runtime enforcement behavior:
+    - `validate_runtime_delivery` now fail-closes on invalid trust-policy combinations and unsupported policy values.
+    - strict suffix policy rejects mixed-platform runtime artifacts for one runtime source.
+    - trusted-relocation policy requires explicit allow + non-empty trusted roots and enforces root safety constraints.
+    - native-loader protected stubs now enforce:
+      - allowed runtime suffix set
+      - suffix policy compatibility against manifest fingerprint path metadata
+      - trusted-relocation root checks when relocation mode is selected.
+  - Added focused regression coverage:
+    - `tests/test_encryption_helper.py`:
+      - trust-policy default assertions for relocation/suffix controls
+      - mixed-platform suffix rejection under strict policy
+      - trusted-relocation policy requires roots
+      - native-loader trusted-relocation success and untrusted-root fail-closed paths
+      - native-loader manifest toggle assertions include new trust-policy fields.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_validate or native_loader or runtime_native_loader"` => `8 passed, 2 skipped, 28 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_decryption_helper.py tests/test_soenc_config.py` => `40 passed, 5 skipped`
+    - `python -m pytest -q` => `106 passed, 5 skipped`
 
 ### CARD `ENC-P1-012`
 

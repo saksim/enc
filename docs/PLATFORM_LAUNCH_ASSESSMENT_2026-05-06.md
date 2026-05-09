@@ -204,7 +204,13 @@ Residual risk:
     - runtime path must remain in the same package directory as the protected module
     - runtime API marker/version contract is validated before decrypt execution
   - `build_manifest.json` runtime delivery metadata now records trust policy (`trust_policy`) and validation defaults are backfilled for older manifests.
-  - further hardening is still required to add stronger runtime authenticity/trust-boundary checks beyond loader-mode policy.
+  - runtime authenticity is now bound to per-build compiled-runtime identity metadata:
+    - `validate_runtime_delivery` records `runtime_delivery.compiled_runtime_fingerprints[]` with per-runtime `sha256` digests and relative paths
+    - native-loader stubs verify loaded runtime artifact digest/path against manifest metadata and fail closed on mismatch
+  - compile/runtime packaging-policy guardrails are now implemented:
+    - runtime trust policy supports explicit suffix controls (`runtime_suffix_policy`, `runtime_native_suffixes`) and rejects mixed-platform ambiguity in strict mode.
+    - runtime trust policy supports explicit trusted relocation (`runtime_path_policy=trusted-relocation`, `runtime_relocation_allowed`, `trusted_runtime_roots`) with fail-closed root validation.
+  - `ENC-P1-011` hardening scope is complete; remaining launch-risk focus shifts to productization (`ENC-P1-012`, `ENC-P1-013`).
 
 ## 5. Non-Blocking But Important Gaps
 
@@ -330,7 +336,9 @@ Current go-live gate note (2026-05-07):
 - As of 2026-05-08, `ENC-P1-011` has an initial native-loader enforcement slice in place (config/CLI + manifest loader policy + fail-closed loader guard in protected stubs) but still requires deeper runtime-native hardening before completion.
 - As of 2026-05-08 (iteration 2), native-loader compiled-flow integration tests are in place (compiled success + Python runtime substitution fail path), and runtime key buffer zeroization is applied in decrypt execution paths.
 - As of 2026-05-08 (iteration 3), runtime native-loader trust boundaries are tightened with fail-closed module-name/origin/path checks and runtime API marker/version contract validation.
-- Remaining critical hardening work is completion of runtime native-loader progression (`ENC-P1-011`) by binding runtime authenticity to signed per-build identity data, then subsequent productization cards.
+- As of 2026-05-09 (iteration 4), runtime authenticity is bound to manifest-linked compiled runtime fingerprints, and native-loader stubs fail closed on runtime digest/path mismatch.
+- As of 2026-05-09 (iteration 5), `ENC-P1-011` is completed with explicit mixed-platform suffix policy and trusted-relocation guardrails enforced in both runtime-delivery validation and native-loader stubs.
+- Remaining critical go-live work is productization progression (`ENC-P1-012` unified CLI entrypoint, then `ENC-P1-013` release bundle contract).
 
 ## 9. Assessment Status
 
