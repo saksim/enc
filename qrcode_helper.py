@@ -618,17 +618,23 @@ class AirgapTransportLayer(object):
         manifest_sidecar_supported = PIL_AVAILABLE and bool(manifest) and self._manifest_has_page_entries(
             manifest
         )
+        manifest_structured_supported = bool(manifest) and (
+            bool(page_layouts) or self._manifest_has_page_entries(manifest)
+        )
         sidecar_supported = render_layout_sidecar_supported or manifest_sidecar_supported
         tesseract_mode = _tesseract_runtime_mode()
 
         backend = backend.lower().strip()
         if backend == "auto":
             candidates = []
+            sidecar_without_manifest_supported = (not manifest) and PIL_AVAILABLE and bool(tesseract_mode)
+            if sidecar_supported or sidecar_without_manifest_supported:
+                candidates.append("sidecar")
+            if manifest_structured_supported and tesseract_mode:
+                candidates.append("tesseract")
             if ocr_provider_cmd:
                 candidates.append("external")
-            if sidecar_supported or PIL_AVAILABLE:
-                candidates.append("sidecar")
-            if tesseract_mode:
+            if tesseract_mode and "tesseract" not in candidates:
                 candidates.append("tesseract")
             if _easyocr_available():
                 candidates.append("easyocr")
@@ -809,17 +815,26 @@ class AirgapTransportLayer(object):
         page_layouts = self._get_render_layout_pages(manifest) if manifest else []
         render_layout_sidecar_supported = self._page_layouts_support_sidecar(page_layouts) if manifest else False
         manifest_sidecar_supported = PIL_AVAILABLE and bool(manifest) and self._manifest_has_page_entries(manifest)
+        manifest_structured_supported = bool(manifest) and (
+            bool(page_layouts) or self._manifest_has_page_entries(manifest)
+        )
         sidecar_supported = render_layout_sidecar_supported or manifest_sidecar_supported
 
         candidates: List[str]
         if backend == "auto":
             candidates = []
+            sidecar_without_manifest_supported = (not manifest) and PIL_AVAILABLE and bool(
+                _tesseract_runtime_mode()
+            )
+            if sidecar_supported or sidecar_without_manifest_supported:
+                candidates.append("sidecar")
+            if manifest_structured_supported and _tesseract_runtime_mode():
+                candidates.append("tesseract")
             if ocr_provider_cmd:
                 candidates.append("external")
-            if sidecar_supported:
-                candidates.append("sidecar")
             if _tesseract_runtime_mode():
-                candidates.append("tesseract")
+                if "tesseract" not in candidates:
+                    candidates.append("tesseract")
             if _easyocr_available():
                 candidates.append("easyocr")
             if not candidates:

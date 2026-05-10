@@ -1,0 +1,58 @@
+{
+  "schema": "enc2sop-promotion-policy/v1",
+  "required_branches": [
+    {
+      "name": "main",
+      "required_status_checks": [
+        "Signed Approval Promotion Gate"
+      ]
+    },
+    {
+      "name": "release/**",
+      "required_status_checks": [
+        "Signed Approval Promotion Gate"
+      ]
+    }
+  ],
+  "required_environments": [
+    {
+      "name": "production-promotion",
+      "min_required_reviewers": 1
+    }
+  ],
+  "required_secrets": [
+    "SOENC_RELEASE_APPROVAL_KEY_B64"
+  ],
+  "workflow": {
+    "relative_path": ".github/workflows/release_promotion.yml",
+    "required_fragments": [
+      "name: release-promotion-gate",
+      "environment:",
+      "name: production-promotion",
+      "python ./soenc.py approve-release",
+      "python ./soenc.py release",
+      "--require-release-approval",
+      "python ./soenc.py promotion-dry-run",
+      "python ./soenc.py verify-promotion-artifacts",
+      "--require-ci-context-match",
+      "GITHUB_TOKEN",
+      "SKIP_PROMOTION_COLLECT",
+      "SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64",
+      "rotation_rehearsal",
+      "promotion_evidence_file",
+      "promotion_report_file",
+      "promotion_artifact_audit_report_file",
+      "rotation_report_file",
+      "promotion_run_receipt_file",
+      "PROMOTION_ARTIFACT_AUDIT_REPORT_FILE",
+      "PROMOTION_RUN_RECEIPT_FILE",
+      "ROTATION_REPORT_FILE",
+      "promotion_artifact_audit_report.json",
+      "promotion_run_receipt.json",
+      "enc2sop-rotation-rehearsal/v1",
+      "if: ${{ always() }}",
+      "SOENC_RELEASE_APPROVAL_KEY_B64",
+      "if-no-files-found: error"
+    ]
+  }
+}

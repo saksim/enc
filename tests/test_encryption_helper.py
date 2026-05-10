@@ -1,6 +1,7 @@
 import json
 import importlib
 import hashlib
+import hmac
 import os
 import shutil
 import sys
@@ -16,6 +17,7 @@ import soenc_config
 
 TEST_ROOT = Path(__file__).resolve().parents[1]
 TEST_RUNS_ROOT = TEST_ROOT / ".tmp_test_runs"
+RELEASE_APPROVAL_KEY = b"0123456789abcdef0123456789abcdef"
 
 
 def _make_case_root(prefix):
@@ -33,6 +35,30 @@ class WorkspaceTempMixin(object):
 
 
 class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
+    def _write_signed_release_approval(self, *, release_dir, release_bundle_rel="release_bundle.json", key=RELEASE_APPROVAL_KEY):
+        bundle_path = release_dir / release_bundle_rel
+        approval_payload = {
+            "schema": encryption_helper.RELEASE_APPROVAL_SCHEMA,
+            "approved_at_utc": "2026-05-09T00:00:00Z",
+            "release_bundle_relative_path": release_bundle_rel,
+            "release_bundle_sha256": encryption_helper._sha256_file(bundle_path),
+            "approvers": ["ops-a", "security-b"],
+            "notes": "approved for launch",
+        }
+        approval_digest = hmac.new(
+            key,
+            encryption_helper._canonical_json_bytes(approval_payload),
+            hashlib.sha256,
+        ).hexdigest()
+        approval_payload["signature"] = {
+            "algorithm": encryption_helper.SIGNATURE_ALGORITHM_HMAC_SHA256,
+            "key_id": "ops-approval-main",
+            "digest_hex": approval_digest,
+        }
+        approval_path = release_dir / "release_approval.json"
+        approval_path.write_text(json.dumps(approval_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return approval_path
+
     def _ensure_compile_integration_ready(self):
         if importlib.util.find_spec("Cython") is None:
             self.skipTest("Cython is not installed; skipping compile integration test")
@@ -309,6 +335,507 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         loaded, signature = encryption_helper.verify_manifest_signature_file(manifest_path, key)
         self.assertEqual(signature["key_id"], "team-main")
         self.assertTrue(loaded["runtime_delivery"]["validated"])
+
+    def test_copy_release_requires_validated_runtime_delivery_for_runtime_files(self):
+        root = self.make_case_root("release_runtime_validation_required")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        dist_dir = root / "dist"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (build_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (build_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (build_dir / "pkg" / "enc_rt_pkg_1234.pyd").write_bytes(b"native")
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+                    "runtime_delivery": {
+                        "mode": encryption_helper.RUNTIME_DELIVERY_MODE,
+                        "validated": False,
+                        "compiled_runtime_files": [],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "runtime delivery must be validated"):
+            encryption_helper.copy_release(build_dir, dist_dir, staging_dir)
+
+    def test_copy_release_writes_release_bundle_contract(self):
+        root = self.make_case_root("release_bundle_contract")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        dist_dir = root / "dist"
+        (build_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (build_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        runtime_native = build_dir / "pkg" / "enc_rt_pkg_1234.pyd"
+        runtime_native.write_bytes(b"native-binary")
+        module_native = build_dir / "pkg" / "mod.pyd"
+        module_native.write_bytes(b"native-module")
+        runtime_digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+        manifest_payload = {
+            "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+            "runtime_modules": [
+                {
+                    "module_name": "enc_rt_pkg_1234",
+                    "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                    "package_relative_path": "pkg",
+                }
+            ],
+            "runtime_delivery": {
+                "mode": encryption_helper.RUNTIME_DELIVERY_MODE,
+                "validated": True,
+                "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                        "compiled_relative_path": "pkg/enc_rt_pkg_1234.pyd",
+                        "package_relative_path": "pkg",
+                        "algorithm": "sha256",
+                        "digest_hex": runtime_digest,
+                    }
+                ],
+            },
+            "key_management": {
+                "mode": "license-file",
+                "license_file": "licenses/customer.license.json",
+            },
+            "config": {
+                "source": str((root / "soenc.toml").resolve()),
+                "package_metadata": {
+                    "name": "demo",
+                    "version": "1.2.3",
+                    "channel": "stable",
+                },
+            },
+        }
+        (staging_dir / "licenses").mkdir(parents=True, exist_ok=True)
+        (staging_dir / "licenses" / "customer.license.json").write_text(
+            json.dumps({"schema": "enc2sop-license/v1"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        encryption_helper.write_manifest(
+            staging_dir,
+            manifest_payload,
+            signing_key=b"0123456789abcdef0123456789abcdef",
+            key_id="ops-signing",
+        )
+
+        out_dir, copied = encryption_helper.copy_release(
+            build_dir=build_dir,
+            dist_dir=dist_dir,
+            staging_dir=staging_dir,
+            package_metadata={"name": "demo", "version": "1.2.3", "vendor": "acme"},
+            require_manifest_signature=True,
+        )
+
+        self.assertEqual(out_dir, dist_dir.resolve())
+        copied_rel = {str(path.relative_to(out_dir)).replace("\\", "/") for path in copied}
+        self.assertIn("build_manifest.json", copied_rel)
+        self.assertIn("licenses/customer.license.json", copied_rel)
+        self.assertIn(encryption_helper.RELEASE_BUNDLE_FILENAME, copied_rel)
+        self.assertIn("pkg/__init__.py", copied_rel)
+        self.assertIn("pkg/mod.pyd", copied_rel)
+        self.assertIn("pkg/enc_rt_pkg_1234.pyd", copied_rel)
+
+        bundle = json.loads((out_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(bundle.get("schema"), encryption_helper.RELEASE_BUNDLE_SCHEMA)
+        self.assertEqual(bundle.get("layout_version"), encryption_helper.RELEASE_LAYOUT_VERSION)
+        self.assertEqual(bundle.get("build_manifest", {}).get("relative_path"), "build_manifest.json")
+        self.assertTrue(bundle.get("build_manifest", {}).get("is_signed"))
+        self.assertEqual(bundle.get("build_manifest", {}).get("signature", {}).get("key_id"), "ops-signing")
+        self.assertIn("pkg/mod.pyd", bundle.get("bundle_contents", {}).get("native_extension_files", []))
+        self.assertIn("pkg/enc_rt_pkg_1234.pyd", bundle.get("bundle_contents", {}).get("runtime_compiled_files", []))
+        self.assertIn("pkg/__init__.py", bundle.get("bundle_contents", {}).get("package_init_files", []))
+        self.assertEqual(
+            (bundle.get("bundle_contents", {}).get("license_file") or {}).get("relative_path"),
+            "licenses/customer.license.json",
+        )
+        self.assertEqual(
+            bundle.get("runtime_integrity", {}).get("compiled_runtime_fingerprints", [{}])[0].get("digest_hex"),
+            runtime_digest,
+        )
+        self.assertEqual(bundle.get("package_metadata", {}).get("name"), "demo")
+        self.assertEqual(bundle.get("package_metadata", {}).get("vendor"), "acme")
+
+    def test_copy_release_rejects_unsigned_manifest_when_signature_required(self):
+        root = self.make_case_root("release_require_signed_manifest")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        dist_dir = root / "dist"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (build_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (build_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (build_dir / "pkg" / "enc_rt_pkg_1234.pyd").write_bytes(b"native")
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+                    "runtime_delivery": {
+                        "validated": True,
+                        "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "build manifest signature is required"):
+            encryption_helper.copy_release(
+                build_dir=build_dir,
+                dist_dir=dist_dir,
+                staging_dir=staging_dir,
+                require_manifest_signature=True,
+            )
+
+    def test_write_release_receipt_validates_bundle_and_runtime_fingerprints(self):
+        root = self.make_case_root("release_receipt")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        runtime_native = release_dir / "pkg" / "enc_rt_pkg_1234.pyd"
+        runtime_native.write_bytes(b"runtime-binary")
+        module_native = release_dir / "pkg" / "mod.pyd"
+        module_native.write_bytes(b"module-binary")
+        runtime_digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+
+        manifest_payload = {
+            "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+            "runtime_delivery": {
+                "validated": True,
+                "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+            },
+            "key_management": {
+                "mode": "license-file",
+                "license_file": "licenses/customer.license.json",
+            },
+        }
+        (release_dir / "licenses").mkdir(parents=True, exist_ok=True)
+        (release_dir / "licenses" / "customer.license.json").write_text(
+            json.dumps({"schema": "enc2sop-license/v1"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        encryption_helper.write_manifest(
+            release_dir,
+            manifest_payload,
+            signing_key=b"0123456789abcdef0123456789abcdef",
+            key_id="ops-release",
+        )
+        signed_manifest = encryption_helper.read_manifest(release_dir / "build_manifest.json")
+
+        release_bundle_payload = {
+            "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+            "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+            "build_manifest": {
+                "relative_path": "build_manifest.json",
+                "is_signed": True,
+                "signature": signed_manifest["signature"],
+            },
+            "bundle_contents": {
+                "native_extension_files": ["pkg/enc_rt_pkg_1234.pyd", "pkg/mod.pyd"],
+                "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "package_init_files": ["pkg/__init__.py"],
+                "license_file": {
+                    "relative_path": "licenses/customer.license.json",
+                    "required_for_runtime": True,
+                },
+            },
+            "runtime_integrity": {
+                "validated": True,
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                        "compiled_relative_path": "pkg/enc_rt_pkg_1234.pyd",
+                        "package_relative_path": "pkg",
+                        "algorithm": "sha256",
+                        "digest_hex": runtime_digest,
+                    }
+                ],
+            },
+        }
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(release_bundle_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        receipt_path, receipt = encryption_helper.write_release_receipt(
+            dist_dir=release_dir,
+            required_manifest_signature=True,
+            key_mode="license-file",
+            package_metadata={"name": "demo", "version": "2.0.0"},
+        )
+
+        self.assertEqual(receipt_path, release_dir / encryption_helper.RELEASE_RECEIPT_FILENAME)
+        self.assertEqual(receipt["schema"], encryption_helper.RELEASE_RECEIPT_SCHEMA)
+        self.assertTrue(receipt["manifest_signature_required"])
+        self.assertTrue(receipt["manifest_signature_present"])
+        self.assertEqual(receipt["manifest_signature_key_id"], "ops-release")
+        self.assertEqual(receipt["runtime_artifacts_verified"], 1)
+        self.assertEqual(receipt["native_artifacts_verified"], 2)
+        self.assertEqual(receipt["key_mode"], "license-file")
+        self.assertEqual(receipt["package_metadata"]["version"], "2.0.0")
+
+    def test_write_release_receipt_rejects_runtime_fingerprint_mismatch(self):
+        root = self.make_case_root("release_receipt_digest_mismatch")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (release_dir / "pkg" / "enc_rt_pkg_1234.pyd").write_bytes(b"runtime-binary")
+        (release_dir / "pkg" / "mod.pyd").write_bytes(b"module-binary")
+        (release_dir / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+                    "runtime_delivery": {
+                        "validated": True,
+                        "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        release_bundle_payload = {
+            "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+            "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+            "build_manifest": {
+                "relative_path": "build_manifest.json",
+                "is_signed": False,
+                "signature": None,
+            },
+            "bundle_contents": {
+                "native_extension_files": ["pkg/enc_rt_pkg_1234.pyd", "pkg/mod.pyd"],
+                "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "package_init_files": ["pkg/__init__.py"],
+                "license_file": None,
+            },
+            "runtime_integrity": {
+                "validated": True,
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                        "compiled_relative_path": "pkg/enc_rt_pkg_1234.pyd",
+                        "package_relative_path": "pkg",
+                        "algorithm": "sha256",
+                        "digest_hex": "0" * 64,
+                    }
+                ],
+            },
+        }
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(release_bundle_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "release runtime fingerprint mismatch"):
+            encryption_helper.write_release_receipt(dist_dir=release_dir)
+
+    def test_write_release_receipt_requires_signed_approval_when_enabled(self):
+        root = self.make_case_root("release_receipt_with_approval")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        runtime_native = release_dir / "pkg" / "enc_rt_pkg_1234.pyd"
+        runtime_native.write_bytes(b"runtime-binary")
+        (release_dir / "pkg" / "mod.pyd").write_bytes(b"module-binary")
+        runtime_digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+        manifest_payload = {
+            "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+            "runtime_delivery": {
+                "validated": True,
+                "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+            },
+        }
+        encryption_helper.write_manifest(
+            release_dir,
+            manifest_payload,
+            signing_key=b"0123456789abcdef0123456789abcdef",
+            key_id="ops-release",
+        )
+        signed_manifest = encryption_helper.read_manifest(release_dir / "build_manifest.json")
+        release_bundle_payload = {
+            "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+            "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+            "build_manifest": {
+                "relative_path": "build_manifest.json",
+                "is_signed": True,
+                "signature": signed_manifest["signature"],
+            },
+            "bundle_contents": {
+                "native_extension_files": ["pkg/enc_rt_pkg_1234.pyd", "pkg/mod.pyd"],
+                "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "package_init_files": ["pkg/__init__.py"],
+                "license_file": None,
+            },
+            "runtime_integrity": {
+                "validated": True,
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                        "compiled_relative_path": "pkg/enc_rt_pkg_1234.pyd",
+                        "package_relative_path": "pkg",
+                        "algorithm": "sha256",
+                        "digest_hex": runtime_digest,
+                    }
+                ],
+            },
+        }
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(release_bundle_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._write_signed_release_approval(release_dir=release_dir)
+
+        receipt_path, receipt = encryption_helper.write_release_receipt(
+            dist_dir=release_dir,
+            required_manifest_signature=True,
+            require_approval=True,
+            approval_file=release_dir / "release_approval.json",
+            approval_key=RELEASE_APPROVAL_KEY,
+        )
+
+        self.assertEqual(receipt_path, release_dir / encryption_helper.RELEASE_RECEIPT_FILENAME)
+        self.assertTrue(receipt["release_approval_required"])
+        self.assertTrue(receipt["release_approval_verified"])
+        self.assertEqual(receipt["release_approval_key_id"], "ops-approval-main")
+
+    def test_write_release_receipt_rejects_approval_digest_mismatch(self):
+        root = self.make_case_root("release_receipt_approval_digest_mismatch")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        runtime_native = release_dir / "pkg" / "enc_rt_pkg_1234.pyd"
+        runtime_native.write_bytes(b"runtime-binary")
+        (release_dir / "pkg" / "mod.pyd").write_bytes(b"module-binary")
+        runtime_digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+        (release_dir / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+                    "runtime_delivery": {
+                        "validated": True,
+                        "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        release_bundle_payload = {
+            "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+            "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+            "build_manifest": {
+                "relative_path": "build_manifest.json",
+                "is_signed": False,
+                "signature": None,
+            },
+            "bundle_contents": {
+                "native_extension_files": ["pkg/enc_rt_pkg_1234.pyd", "pkg/mod.pyd"],
+                "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "package_init_files": ["pkg/__init__.py"],
+                "license_file": None,
+            },
+            "runtime_integrity": {
+                "validated": True,
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                        "compiled_relative_path": "pkg/enc_rt_pkg_1234.pyd",
+                        "package_relative_path": "pkg",
+                        "algorithm": "sha256",
+                        "digest_hex": runtime_digest,
+                    }
+                ],
+            },
+        }
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(release_bundle_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        approval_path = self._write_signed_release_approval(release_dir=release_dir)
+        approval_payload = json.loads(approval_path.read_text(encoding="utf-8"))
+        approval_payload["release_bundle_sha256"] = "0" * 64
+        approval_path.write_text(json.dumps(approval_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        with self.assertRaisesRegex(RuntimeError, "release approval bundle digest mismatch"):
+            encryption_helper.write_release_receipt(
+                dist_dir=release_dir,
+                require_approval=True,
+                approval_file=approval_path,
+                approval_key=RELEASE_APPROVAL_KEY,
+            )
+
+    def test_write_release_approval_generates_signed_payload(self):
+        root = self.make_case_root("release_approval_write")
+        release_dir = root / "release"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+                    "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        key = b"abcdef0123456789abcdef0123456789"
+
+        approval_path, payload = encryption_helper.write_release_approval(
+            dist_dir=release_dir,
+            approvers=["ops-a", "security-b", "ops-a"],
+            approval_key=key,
+            approval_key_id="ops-approval-main",
+            notes="ready for promotion",
+        )
+
+        self.assertEqual(approval_path, release_dir / "release_approval.json")
+        self.assertEqual(payload["schema"], encryption_helper.RELEASE_APPROVAL_SCHEMA)
+        self.assertEqual(payload["release_bundle_relative_path"], encryption_helper.RELEASE_BUNDLE_FILENAME)
+        self.assertEqual(payload["approvers"], ["ops-a", "security-b"])
+        self.assertEqual(payload["notes"], "ready for promotion")
+        signature = payload.get("signature") or {}
+        self.assertEqual(signature.get("algorithm"), encryption_helper.SIGNATURE_ALGORITHM_HMAC_SHA256)
+        self.assertEqual(signature.get("key_id"), "ops-approval-main")
+        signed_payload = dict(payload)
+        digest_hex = signed_payload.pop("signature")["digest_hex"]
+        expected_digest = hmac.new(key, encryption_helper._canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
+        self.assertEqual(digest_hex, expected_digest)
+
+    def test_write_release_approval_requires_approver(self):
+        root = self.make_case_root("release_approval_no_approver")
+        release_dir = root / "release"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+                    "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "requires at least one approver"):
+            encryption_helper.write_release_approval(
+                dist_dir=release_dir,
+                approvers=[],
+                approval_key=RELEASE_APPROVAL_KEY,
+            )
 
     def test_validate_runtime_delivery_rejects_mixed_platform_artifacts_under_strict_policy(self):
         root = self.make_case_root("runtime_validate_mixed_suffix")

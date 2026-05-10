@@ -167,6 +167,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
         (
             "output_dir",
             "dist_dir",
+            "release_dir",
             "compile",
             "runtime_native_loader",
             "precheck_only",
@@ -179,6 +180,10 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
 
     output_dir = _resolve_path_text(_optional_text(build_table.get("output_dir"), "build.output_dir"), config_dir)
     dist_dir = _resolve_path_text(_optional_text(build_table.get("dist_dir"), "build.dist_dir"), config_dir)
+    release_dir = _resolve_path_text(_optional_text(build_table.get("release_dir"), "build.release_dir"), config_dir)
+    if dist_dir is not None and release_dir is not None:
+        raise SoencConfigError("build.dist_dir and build.release_dir are mutually exclusive; use only one")
+    resolved_release_dir = release_dir if release_dir is not None else dist_dir
     compile_enabled = _optional_bool(build_table.get("compile"), "build.compile")
     runtime_native_loader = _optional_bool(build_table.get("runtime_native_loader"), "build.runtime_native_loader")
     precheck_only = _optional_bool(build_table.get("precheck_only"), "build.precheck_only")
@@ -196,7 +201,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
 
     return {
         "output_dir": output_dir,
-        "dist_dir": dist_dir,
+        "dist_dir": resolved_release_dir,
         "compile": compile_enabled,
         "runtime_native_loader": runtime_native_loader,
         "precheck_only": precheck_only,
@@ -304,6 +309,32 @@ def _parse_package_section(package_table: Mapping[str, Any]) -> Dict[str, str]:
     return metadata
 
 
+def _parse_release_section(release_table: Mapping[str, Any], config_dir: Path) -> Dict[str, Any]:
+    _reject_unknown_keys(
+        "release",
+        release_table,
+        (
+            "require_approval",
+            "approval_file",
+            "approval_key_file",
+            "approval_key_id",
+        ),
+    )
+    require_approval = _optional_bool(release_table.get("require_approval"), "release.require_approval")
+    approval_file = _resolve_path_text(_optional_text(release_table.get("approval_file"), "release.approval_file"), config_dir)
+    approval_key_file = _resolve_path_text(
+        _optional_text(release_table.get("approval_key_file"), "release.approval_key_file"),
+        config_dir,
+    )
+    approval_key_id = _optional_text(release_table.get("approval_key_id"), "release.approval_key_id")
+    return {
+        "require_release_approval": require_approval,
+        "release_approval_file": approval_file,
+        "release_approval_key_file": approval_key_file,
+        "release_approval_key_id": approval_key_id,
+    }
+
+
 def load_project_config(
     config_path: Optional[str] = None,
     base_dir: Optional[Path] = None,
@@ -313,7 +344,7 @@ def load_project_config(
         return None
 
     payload = _load_toml_payload(resolved_path)
-    _reject_unknown_keys("root", payload, ("project", "build", "keys", "package"))
+    _reject_unknown_keys("root", payload, ("project", "build", "keys", "package", "release"))
     config_dir = resolved_path.parent
 
     cli_defaults = {}  # type: Dict[str, Any]
@@ -338,6 +369,7 @@ def load_project_config(
         }
     )
     package_metadata = _parse_package_section(_as_table(payload, "package"))
+    cli_defaults.update(_parse_release_section(_as_table(payload, "release"), config_dir))
     return SoencProjectConfig(
         path=resolved_path,
         cli_defaults=cli_defaults,

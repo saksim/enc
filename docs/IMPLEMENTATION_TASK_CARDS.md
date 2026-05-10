@@ -1,4 +1,4 @@
-# enc2sop Implementation Task Cards
+﻿# enc2sop Implementation Task Cards
 
 This file is the executable backlog for future Codex or GPT-5.5 coding iterations.
 
@@ -630,7 +630,7 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ### CARD `ENC-P1-012`
 
-- Status: `todo`
+- Status: `done`
 - Goal: unify the platform command surface into a single CLI entrypoint
 - Type: productization
 - Depends on: `ENC-P0-006`
@@ -642,10 +642,33 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - compatibility wrappers or migration notes for old commands
 - Acceptance:
   - one documented CLI becomes the preferred entrypoint
+- Notes (2026-05-09, iteration 6):
+  - Added unified CLI module and entrypoints:
+    - `enc2sop/cli.py` now exposes a single command surface with:
+      - `soenc protect` (staging protection flow; compile/package split out into dedicated commands)
+      - `soenc build` (batch compile + runtime-delivery validation)
+      - `soenc package` (release copy for compiled artifacts + manifest/license sidecars)
+      - `soenc verify` (runtime-delivery integrity validation against staging/build pair)
+    - `enc2sop/__main__.py` enables module invocation via `python -m enc2sop ...`.
+    - `soenc.py` provides a repository wrapper entrypoint for direct script invocation.
+  - Command wiring is compatibility-first and reuses existing hardened implementation paths:
+    - protect delegates to `encryption_helper.main(...)` with explicit compile disablement.
+    - build delegates to `compile_with_batch_builder(...)`.
+    - package delegates to `copy_release(...)`.
+    - verify delegates to `validate_runtime_delivery(...)`.
+    - config and key-signature settings are resolved through existing `soenc.toml` contract.
+  - Added focused CLI regression coverage in `tests/test_soenc_cli.py`:
+    - protect creates staging manifest and rejects compile flags in command scope.
+    - build resolves defaults from `soenc.toml` and dispatches into batch builder.
+    - package copies native artifacts, `__init__.py`, manifest, and license sidecar.
+    - verify validates runtime-delivery metadata and persists validated fingerprints.
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py` => `5 passed`
+    - `python -m pytest -q` => `111 passed, 5 skipped`
 
 ### CARD `ENC-P1-013`
 
-- Status: `todo`
+- Status: `done`
 - Goal: define a standard release bundle format for downstream product teams
 - Type: packaging
 - Depends on: `ENC-P0-007`, `ENC-P1-012`
@@ -656,13 +679,41 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - signed manifest
   - native artifacts
   - runtime dependencies
-  - release metadata
+- release metadata
 - Acceptance:
   - bundle layout is stable and documented
+- Notes (2026-05-09, iteration 7):
+  - Added normalized release-bundle contract generation in `encryption_helper.py`:
+    - new versioned metadata file `release_bundle.json` with schema `enc2sop-release-bundle/v1`.
+    - bundle metadata records:
+      - source roots (`staging_dir`, `build_dir`, `release_root`)
+      - manifest signature presence/details
+      - copied native/runtime/package-init artifacts
+      - runtime fingerprint records linked to `build_manifest.json`
+      - key-management/config/package metadata context.
+  - Hardened `copy_release(...)` release guardrails:
+    - fails closed when `build_manifest.json` is missing.
+    - fails closed when runtime files exist but runtime-delivery validation metadata is missing/incomplete.
+    - supports explicit signature requirement (`require_manifest_signature`) for packaging flows.
+    - license sidecar declared in manifest is now required and copied as a first-class release artifact.
+  - Updated unified CLI package command (`enc2sop/cli.py`):
+    - `soenc package` now supports `--require-manifest-signature/--no-require-manifest-signature`.
+    - package command now forwards config package metadata into release-bundle metadata.
+  - Added focused regression coverage:
+    - `tests/test_soenc_cli.py`:
+      - package flow asserts `release_bundle.json` schema/layout contents and runtime/license artifact presence.
+      - package flow rejects unsigned manifest when signature requirement is enabled via `soenc.toml`.
+    - `tests/test_encryption_helper.py`:
+      - release packaging requires validated runtime-delivery metadata when runtime files exist.
+      - release packaging emits stable `release_bundle.json` with signed-manifest + runtime fingerprint fields.
+      - release packaging rejects unsigned manifests when signature enforcement is requested.
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_encryption_helper.py -k "package or release or copy_release"` => passed
+    - `python -m pytest -q` => passed
 
 ### CARD `ENC-P1-014`
 
-- Status: `todo`
+- Status: `done`
 - Goal: convert airgap transport into an optional plugin package
 - Type: modularization
 - Depends on: `ENC-P0-002`, `ENC-P1-012`
@@ -674,10 +725,34 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - optional install or optional import path
 - Acceptance:
   - mainline protect/build/package flow works without OCR dependencies installed
+- Notes (2026-05-09, iteration 8):
+  - Added explicit optional plugin registry in `enc2sop/plugin_registry.py`:
+    - versioned plugin spec metadata (`module_check`, `entrypoint`, install hint).
+    - fail-closed plugin invoke path with clear unavailability error.
+    - plugin availability/status rows for operator-facing CLI help.
+  - Added transport plugin entrypoint `enc2sop/transport_plugin.py`:
+    - binds optional `soenc transport ...` commands to `enc2sop.transport.cli`.
+    - imports legacy compatibility facade (`qrcode_helper.AirgapTransportLayer`) only inside optional plugin path.
+  - Updated unified CLI (`enc2sop/cli.py`):
+    - added `soenc transport` optional command group.
+    - forwards plugin arguments through registry to transport plugin entrypoint.
+    - when invoked without subcommand, prints optional-plugin availability/status and usage hint.
+  - Added focused tests:
+    - `tests/test_plugin_registry.py`:
+      - transport plugin registration contract
+      - entrypoint dispatch
+      - fail-closed unavailable plugin behavior
+    - `tests/test_soenc_cli.py`:
+      - `soenc transport` argument forwarding
+      - optional-plugin unavailable propagation
+      - no-arg plugin status/help output
+  - Verification:
+    - `python -m pytest -q tests/test_plugin_registry.py tests/test_soenc_cli.py -k "transport or plugin"` => passed
+    - `python -m pytest -q` => passed
 
 ### CARD `ENC-P1-015`
 
-- Status: `todo`
+- Status: `done`
 - Goal: rebuild airgap recovery around sidecar-first structured recovery
 - Type: transport reliability
 - Depends on: `ENC-P1-014`
@@ -687,13 +762,29 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 - Deliverables:
   - sidecar-first recovery path
   - manifest-guided fallback
-  - generic OCR as last resort only
+- generic OCR as last resort only
 - Acceptance:
   - docs and code reflect the new priority order
+- Notes (2026-05-09, iteration 9):
+  - Enforced deterministic sidecar-first recovery ordering in `qrcode_helper.py` auto-mode paths:
+    - `extract_text_from_images --backend auto` now prioritizes:
+      1. sidecar decode (manifest sidecar layout or no-manifest embedded-sidecar extraction path)
+      2. manifest-guided structured tesseract extraction
+      3. external OCR provider (`--ocr-provider-cmd`)
+      4. generic OCR fallback (`tesseract`, then `easyocr` when available)
+    - `recover_from_images --backend auto` now uses the same ordering policy and no longer front-loads external OCR ahead of sidecar/structured candidates.
+  - Added focused regression coverage in `tests/test_qrcode_helper_sidecar.py`:
+    - auto recovery prioritizes sidecar before external when sidecar is available.
+    - when sidecar is unavailable, auto recovery prefers external provider before generic OCR fallback.
+    - existing auto sidecar recovery tests remain green.
+  - Verification:
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py -k "auto and (sidecar or external or recover_images)"` => `4 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`
+    - `python -m pytest -q` => `123 passed, 5 skipped`
 
 ### CARD `ENC-P1-016`
 
-- Status: `todo`
+- Status: `done`
 - Goal: create operator-facing manuals for protect/build/package/release and transport plugin usage
 - Type: documentation
 - Depends on: `ENC-P1-012`, `ENC-P1-013`, `ENC-P1-015`
@@ -708,22 +799,501 @@ If one card is too large for one iteration, the agent should deliver a vertical 
   - transport plugin path
 - Acceptance:
   - a new operator can follow the docs without repository archaeology
+- Notes (2026-05-09, iteration 10):
+  - Rewrote operator documentation around the unified `soenc` command surface and product mainline:
+    - `README.md` now presents `protect -> build -> package -> verify -> release` as the primary flow and positions `transport` as optional plugin scope.
+    - `USAGE_MANUAL.md` now provides an operator runbook for mainline commands (`soenc protect/build/verify/package`) with release handoff expectations and guardrails.
+    - `QRCODE_AIRGAP_MANUAL.md` now documents transport plugin usage via `soenc transport ...` and formal sidecar-first fallback ordering for `--backend auto`.
+  - Updated architecture baseline note in `docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md` to record completion of operator manual/runbook readiness.
+  - Verification:
+    - `python .\soenc.py --help`
+    - `python .\soenc.py build --help`
+    - `python .\soenc.py package --help`
+    - `python .\soenc.py verify --help`
+    - `python .\soenc.py transport`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_plugin_registry.py`
+
+### CARD `ENC-P0-009`
+
+- Status: `done`
+- Goal: land a first-class `release` gate for the mainline so package output is validated and auditable before downstream handoff
+- Type: launch governance + integrity
+- Depends on: `ENC-P0-007`, `ENC-P1-012`, `ENC-P1-013`
+- Main files:
+  - `enc2sop/cli.py`
+  - `encryption_helper.py`
+  - `soenc_config.py`
+  - tests and operator docs
+- Deliverables:
+  - `soenc release` command in unified CLI
+  - fail-closed validation of packaged release directory against manifest + bundle contract
+  - generated `release_receipt.json` audit artifact
+  - config alias for release output path (`[build].release_dir`)
+- Acceptance:
+  - release command fails on missing/mismatched release bundle data
+  - runtime artifact fingerprints are re-verified from packaged artifacts
+  - signature-required policy can be enforced at release step
+- Notes (2026-05-09, iteration 11):
+  - Added first-class `soenc release` command to `enc2sop/cli.py`:
+    - resolves release directory from `--dist-dir` or `soenc.toml` `[build].dist_dir`
+    - supports `--require-manifest-signature/--no-require-manifest-signature`
+    - writes and reports `release_receipt.json`
+  - Added release governance helpers in `encryption_helper.py`:
+    - `RELEASE_RECEIPT_SCHEMA`, `RELEASE_RECEIPT_FILENAME`
+    - `release_bundle_path(...)`, `release_receipt_path(...)`
+    - `write_release_receipt(...)` with fail-closed checks:
+      - release bundle schema/layout validation
+      - `build_manifest.json` presence + optional signature requirement
+      - bundle-manifest signature/state consistency checks
+      - packaged native/runtime/init artifact inventory match checks
+      - runtime compiled fingerprint re-hash checks on packaged runtime artifacts
+      - license-file sidecar presence checks when declared by key management metadata
+  - Added config compatibility alias in `soenc_config.py`:
+    - `[build].release_dir` is accepted as alias for release output directory
+    - mutually exclusive with `[build].dist_dir` to prevent ambiguous routing
+  - Added focused tests:
+    - `tests/test_soenc_cli.py`:
+      - `test_release_command_generates_release_receipt`
+      - `test_release_command_rejects_missing_release_bundle`
+    - `tests/test_encryption_helper.py`:
+      - `test_write_release_receipt_validates_bundle_and_runtime_fingerprints`
+      - `test_write_release_receipt_rejects_runtime_fingerprint_mismatch`
+    - `tests/test_soenc_config.py`:
+      - rejects conflicting `dist_dir` + `release_dir`
+      - accepts `release_dir` alias mapping to CLI `dist_dir` default
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_encryption_helper.py tests/test_soenc_config.py -k "release or receipt or release_dir"`
+    - `python -m pytest -q`
 
 ## Recommended Immediate Execution Order
 
-1. `ENC-P0-001`
-2. `ENC-P0-003`
-3. `ENC-P0-004`
-4. `ENC-P0-005`
-5. `ENC-P0-006`
-6. `ENC-P0-007`
-7. `ENC-P0-008`
-8. `ENC-P0-002`
+1. Post-enforcement production dry run and key-rotation drill
+2. Protected-branch environment rollout validation
 
 Rationale:
 
-- first stop stability and import coupling damage
-- then repair the protection chain
-- then prove the chain with tests
-- then make the platform configurable
-- then strengthen security and product surface
+- release-governance validation is complete in core command paths; promotion artifact generation and signed release gating are implemented; remaining launch risk is operational custody/rotation discipline and branch protection rollout correctness
+
+### CARD `ENC-P0-015`
+
+- Status: `done`
+- Goal: provide a single fail-closed promotion dry-run gate command that executes rollout evidence collection plus policy audit
+- Type: launch governance + operator hardening
+- Depends on: `ENC-P0-014`
+- Main files:
+  - `enc2sop/cli.py`
+  - `tests/test_soenc_cli.py`
+  - `README.md`
+  - `USAGE_MANUAL.md`
+- Deliverables:
+  - first-class `soenc promotion-dry-run` command
+  - online mode: collect evidence from GitHub APIs then audit policy in one call
+  - offline mode: `--skip-collect` audits an existing evidence file
+  - fail-closed exit behavior for missing repo/token, missing offline evidence, and audit failures
+- Acceptance:
+  - command exits non-zero when rollout evidence collection or policy audit fails
+  - command exits non-zero when `--skip-collect` is used without a valid evidence file
+  - operator docs position dry-run command as preferred rollout validation gate
+- Notes (2026-05-10, iteration 17):
+  - Added unified CLI command in `enc2sop/cli.py`:
+    - `soenc promotion-dry-run [--skip-collect] [--github-repo ...] [--github-token ...] [--github-api-url ...] [--policy-file ...] [--workflow-file ...] [--evidence-file ...] [--report-file ...]`
+    - online mode runs `collect-promotion-evidence` then `audit-promotion` in-process with shared paths.
+    - offline mode requires existing `--evidence-file` and audits it directly.
+    - outputs policy/evidence/report paths and fail reasons; exits `1` on audit failure.
+  - Added focused CLI regression tests in `tests/test_soenc_cli.py`:
+    - online success path with mocked collect/audit wiring.
+    - offline mode missing evidence fail-closed path.
+    - offline mode audit-failure propagation path.
+    - online mode repo/token requirement fail-closed paths.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include command surface and runbook usage for `promotion-dry-run`.
+- Verification:
+  - `python -m pytest -q tests/test_soenc_cli.py -k "promotion_dry_run or collect_promotion_evidence or audit_promotion"`
+
+### CARD `ENC-P0-016`
+
+- Status: `in_progress`
+- Goal: execute a real protected-branch promotion dry run with key-rotation rehearsal and archived evidence artifacts
+- Type: launch governance + operational execution
+- Depends on: `ENC-P0-015`
+- Main files:
+  - `.github/workflows/release_promotion.yml`
+  - `docs/PROMOTION_ROLLOUT_POLICY.json`
+  - `USAGE_MANUAL.md`
+- Deliverables:
+  - CI-executed `soenc promotion-dry-run` gate using real repository/environment state
+  - archived dry-run evidence and audit report artifacts from protected branch context
+  - documented approval-key rotation rehearsal output and rollback notes
+- Acceptance:
+  - dry-run fails closed when rollout controls are intentionally removed in rehearsal
+  - dry-run passes with expected branch/environment/secret rollout configuration
+  - rotation rehearsal confirms old approval key no longer passes release gate
+- Notes (2026-05-10, iteration 18):
+  - Delivered executable in-repo vertical slice for protected-branch promotion rehearsal in `.github/workflows/release_promotion.yml`:
+    - workflow now runs `soenc promotion-dry-run` in CI after signed approval gate enforcement.
+    - dry-run supports collection mode by default and offline mode through workflow input `skip_promotion_collect`.
+    - workflow archives promotion evidence + audit artifacts alongside release artifacts:
+      - `promotion_evidence.json`
+      - `promotion_audit_report.json`
+    - workflow adds optional key-rotation rehearsal input (`rotation_rehearsal`) that fail-closes unless stale approval key verification is rejected.
+    - workflow consumes `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64` for stale-key negative verification and fails if secret is missing when rehearsal is requested.
+  - Extended promotion policy workflow-fragment contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require:
+    - `promotion-dry-run` execution,
+    - offline-collect guard variable wiring,
+    - rotation rehearsal input and stale-key secret wiring,
+    - promotion evidence/report artifact paths.
+  - Added focused workflow contract coverage in `tests/test_release_promotion_workflow.py` for new dry-run and rotation rehearsal fragments.
+  - Remaining scope to complete card:
+    - run workflow in real protected branch/environment with live GitHub rollout state,
+    - capture and archive real generated artifacts from CI run,
+    - execute rotation rehearsal with real old-key material to produce operator evidence.
+- Notes (2026-05-10, iteration 19):
+  - Hardened CI evidence capture for rotation rehearsal outcomes in `.github/workflows/release_promotion.yml`:
+    - added `workflow_dispatch` input `rotation_report_file` (default `.tmp_ci/ops/rotation_rehearsal_report.json`).
+    - workflow now initializes `enc2sop-rotation-rehearsal/v1` report payload for every run and records:
+      - request state (`requested`),
+      - execution state (`executed`),
+      - stale-key rejection outcome (`old_key_rejected`),
+      - terminal status/details (`not-requested`/`pending`/`blocked`/`failed`/`passed`).
+    - rotation rehearsal step now writes fail-closed report states for:
+      - missing `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64` (`blocked`),
+      - unexpected old-key acceptance (`failed`),
+      - expected old-key rejection (`passed`).
+    - artifact upload now runs under `if: ${{ always() }}` and includes `rotation_rehearsal_report.json` so failed rehearsals still preserve evidence.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require rotation report wiring and schema fragment presence.
+  - Updated operator runbook (`USAGE_MANUAL.md`) with required rotation report artifact checks.
+  - Extended workflow contract regression coverage (`tests/test_release_promotion_workflow.py`) for new rotation-report fragments and artifact requirements.
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 20):
+  - Added fail-closed promotion artifact integrity gate command `soenc verify-promotion-artifacts` in `enc2sop/cli.py`:
+    - validates release artifacts (`release_bundle.json`, `release_approval.json`, `release_receipt.json`) for schema-critical integrity fields.
+    - verifies approval digest binding (`release_approval.release_bundle_sha256`) against current `release_bundle.json`.
+    - validates promotion evidence/report artifacts and enforces `promotion_audit_report.passed=true`.
+    - validates rotation rehearsal artifact schema/state and supports strict enforcement via `--require-rotation-pass`.
+    - writes machine-readable `promotion_artifact_audit_report.json` and exits non-zero on any mismatch.
+  - Added new module `enc2sop/promotion_artifacts.py` encapsulating promotion artifact validation policy.
+  - Updated CI promotion workflow `.github/workflows/release_promotion.yml`:
+    - now runs `soenc verify-promotion-artifacts` after `promotion-dry-run` and optional rotation rehearsal.
+    - automatically enforces `--require-rotation-pass` when `rotation_rehearsal=true`.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require `verify-promotion-artifacts` workflow fragment.
+  - Added focused tests:
+    - `tests/test_promotion_artifacts.py` for artifact-audit pass and fail-closed rotation-pass enforcement.
+    - `tests/test_soenc_cli.py` coverage for CLI wiring and fail-closed exit behavior.
+    - `tests/test_release_promotion_workflow.py` coverage for workflow command fragment.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include `verify-promotion-artifacts` command and CI gate sequencing.
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 21):
+  - Extended promotion artifact verification to emit deterministic run receipt evidence:
+    - `enc2sop/promotion_artifacts.py` now writes `promotion_run_receipt.json` (`enc2sop-promotion-run-receipt/v1`) by default alongside `promotion_artifact_audit_report.json`.
+    - run receipt captures SHA256 digests for:
+      - `release_bundle.json`
+      - `release_approval.json`
+      - `release_receipt.json`
+      - `promotion_evidence.json`
+      - `promotion_audit_report.json`
+      - `rotation_rehearsal_report.json`
+      - `promotion_artifact_audit_report.json`
+    - run receipt also records available GitHub context keys (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_SHA`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`).
+  - Updated CLI surface (`enc2sop/cli.py`):
+    - `soenc verify-promotion-artifacts` now supports `--run-receipt-file`.
+    - command output now prints `promotion_run_receipt=<path>`.
+  - Updated CI workflow `.github/workflows/release_promotion.yml`:
+    - new dispatch inputs:
+      - `promotion_artifact_audit_report_file`
+      - `promotion_run_receipt_file`
+    - verification step now passes explicit `--report-file` and `--run-receipt-file`.
+    - artifact upload now includes:
+      - `promotion_artifact_audit_report.json`
+      - `promotion_run_receipt.json`
+  - Updated promotion rollout policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require run-receipt and artifact-audit file wiring fragments.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` validates run receipt schema, digest fields, and artifact coverage.
+    - `tests/test_soenc_cli.py` validates CLI wiring for `run_receipt_file`.
+    - `tests/test_release_promotion_workflow.py` validates workflow contract fragments and uploaded artifact paths.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include promotion run receipt behavior and checks.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `30 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 22):
+  - Added fail-closed CI-context binding for promotion evidence artifacts:
+    - `enc2sop/promotion_evidence.py` now embeds `github_context` into `promotion_evidence.json` with available runtime keys (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_SHA`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`).
+    - `enc2sop/promotion_artifacts.py` now supports strict context consistency enforcement via `require_ci_context_match`:
+      - rejects runs when runtime GitHub context is unavailable but strict mode is requested,
+      - rejects mismatched `GITHUB_REPOSITORY`, `GITHUB_REF`, or `GITHUB_RUN_ID`,
+      - rejects mismatched `GITHUB_SHA` when both evidence and runtime SHA are present.
+    - `soenc verify-promotion-artifacts` now exposes `--require-ci-context-match`.
+  - Updated CI workflow `.github/workflows/release_promotion.yml`:
+    - promotion artifact gate now always runs with `--require-ci-context-match`.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require `--require-ci-context-match` workflow fragment.
+  - Added focused coverage:
+    - `tests/test_promotion_evidence.py` validates evidence includes `github_context`.
+    - `tests/test_promotion_artifacts.py` validates fail-closed behavior on CI-context mismatches under strict mode.
+    - `tests/test_soenc_cli.py` validates CLI wiring for `--require-ci-context-match`.
+    - `tests/test_release_promotion_workflow.py` validates workflow fragment presence.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `34 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 23):
+  - Added fail-closed promotion-report input digest binding to prevent audit-report/evidence substitution:
+    - `enc2sop/promotion_audit.py` now writes `inputs` metadata into `promotion_audit_report.json`:
+      - `policy_file` + `policy_sha256`
+      - `evidence_file` + `evidence_sha256`
+      - `workflow_file` + `workflow_sha256`
+    - `enc2sop/promotion_artifacts.py` now rejects artifact gates when report/evidence binding is missing or mismatched:
+      - `promotion_audit_report.inputs.evidence_file` must match the current evidence artifact path.
+      - `promotion_audit_report.inputs.evidence_sha256` must match the current evidence artifact digest.
+  - Added focused tests:
+    - `tests/test_promotion_audit.py` validates `audit-promotion` emits `inputs` digest/path metadata.
+    - `tests/test_promotion_artifacts.py` adds fail-closed mismatch coverage for report/evidence digest binding.
+    - updated promotion report fixtures in existing promotion tests to include new `inputs` schema fields.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_audit.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `33 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+
+### CARD `ENC-P0-013`
+
+- Status: `done`
+- Goal: make protected-branch/environment rollout validation executable and fail-closed in repository automation flows
+- Type: launch governance + operational hardening
+- Depends on: `ENC-P0-012`
+- Main files:
+  - `enc2sop/cli.py`
+  - new `enc2sop/promotion_audit.py`
+  - new `docs/PROMOTION_ROLLOUT_POLICY.json`
+  - release governance tests and runbook docs
+- Deliverables:
+  - first-class `soenc audit-promotion` command
+  - versioned promotion rollout policy contract for required branch checks, environment reviewers, and CI approval-key secret evidence
+  - fail-closed audit report artifact for promotion readiness checks
+  - focused tests for pass/fail audit behavior
+- Acceptance:
+  - audit exits non-zero when branch/environment/secret evidence does not satisfy policy
+  - audit reports include actionable failure reasons and summary counts
+  - policy defaults validate current `release_promotion.yml` enforcement fragments
+- Notes (2026-05-10, iteration 15):
+  - Added promotion-audit module `enc2sop/promotion_audit.py`:
+    - versioned policy/evidence/report schemas:
+      - `enc2sop-promotion-policy/v1`
+      - `enc2sop-promotion-evidence/v1`
+      - `enc2sop-promotion-audit-report/v1`
+    - validates required branch status checks, protected environment reviewer thresholds, required secret evidence, and workflow fragment invariants.
+    - emits `promotion_audit_report.json` with pass/fail summary and categorized failures.
+  - Added new unified CLI command in `enc2sop/cli.py`:
+    - `soenc audit-promotion --evidence-file ... [--policy-file ...] [--workflow-file ...] [--report-file ...]`
+    - default policy path: `docs/PROMOTION_ROLLOUT_POLICY.json`.
+    - returns exit code `1` on policy violations (fail closed), `0` on pass.
+  - Added baseline policy file `docs/PROMOTION_ROLLOUT_POLICY.json` capturing:
+    - required branch checks for `main` and `release/**`.
+    - required environment reviewer floor for `production-promotion`.
+    - required approval-key secret evidence (`SOENC_RELEASE_APPROVAL_KEY_B64`).
+    - required workflow fragments in `.github/workflows/release_promotion.yml`.
+  - Added focused CLI regression tests in `tests/test_soenc_cli.py`:
+    - pass case with fully compliant evidence payload.
+    - fail case with missing gates/secrets and non-zero command exit.
+- Verification:
+  - `python -m pytest -q tests/test_soenc_cli.py -k "audit_promotion or release or approve_release"` => `9 passed`
+  - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+
+### CARD `ENC-P0-014`
+
+- Status: `done`
+- Goal: automate promotion evidence collection from GitHub APIs so `soenc audit-promotion` can run without manual JSON assembly
+- Type: launch governance + operational automation
+- Depends on: `ENC-P0-013`
+- Main files:
+  - `enc2sop/cli.py`
+  - new collector module under `enc2sop/`
+  - operator docs under `USAGE_MANUAL.md`
+- Deliverables:
+  - `soenc collect-promotion-evidence` command that emits `enc2sop-promotion-evidence/v1` JSON
+  - branch protection required-status-check extraction for `main` and `release/**`
+  - protected environment reviewer-count extraction for `production-promotion`
+  - required-secret presence evidence extraction for `SOENC_RELEASE_APPROVAL_KEY_B64` (without exposing secret values)
+- Acceptance:
+  - collected evidence file is directly consumable by `soenc audit-promotion`
+  - command fails closed on API permission gaps or missing required rollout objects
+- Notes (2026-05-10, iteration 16):
+  - Added new collector module `enc2sop/promotion_evidence.py`:
+    - versioned evidence output schema: `enc2sop-promotion-evidence/v1`.
+    - policy-driven target extraction from `enc2sop-promotion-policy/v1` contract.
+    - GitHub API collector for:
+      - branch status-check evidence via branch-rules API probes for policy branch targets.
+      - environment reviewer evidence via environment protection rules.
+      - required secret presence evidence (name-only) via repository/org/environment secret listings.
+    - fail-closed behavior on missing required rollout objects, missing required secret evidence, and API access/permission errors.
+  - Added new unified CLI command in `enc2sop/cli.py`:
+    - `soenc collect-promotion-evidence --github-repo ... --github-token ... [--github-api-url ...] [--policy-file ...] [--evidence-file ...]`
+    - supports env fallbacks:
+      - `GITHUB_REPOSITORY`
+      - `GITHUB_TOKEN`
+      - `GITHUB_API_URL`
+    - writes audit-ready evidence JSON and summary output for downstream `soenc audit-promotion`.
+  - Added focused tests:
+    - `tests/test_promotion_evidence.py`:
+      - success payload generation (branch checks + environment reviewers + required secret evidence).
+      - fail-closed missing required secret evidence.
+      - fail-closed missing branch-rules/status-check evidence.
+    - `tests/test_soenc_cli.py`:
+      - CLI success wiring for `collect-promotion-evidence`.
+      - fail-closed argument validation when repo/token inputs are missing.
+  - Updated operator docs (`USAGE_MANUAL.md`) with:
+    - command surface entry for `soenc collect-promotion-evidence`.
+    - usage, env fallback contract, and fail-closed behavior notes.
+- Verification:
+  - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py -k "collect_promotion_evidence or audit_promotion"`
+
+### CARD `ENC-P0-010`
+
+- Status: `done`
+- Goal: add a fail-closed signed-approval gate to `soenc release` for CI promotion/signoff control
+- Type: launch governance + integrity
+- Depends on: `ENC-P0-009`
+- Main files:
+  - `enc2sop/cli.py`
+  - `encryption_helper.py`
+  - `soenc_config.py`
+  - release tests and docs
+- Deliverables:
+  - `[release]` config contract for signed approval policy
+  - `soenc release` options for approval file/key policy
+  - fail-closed approval validation bound to `release_bundle.json` digest and signature
+  - `release_receipt.json` fields recording approval verification status
+- Acceptance:
+  - release command fails when approval is required but missing/invalid
+  - release command verifies approval signature + bundle digest before receipt write
+  - receipt explicitly records approval gate state for audit
+- Notes (2026-05-09, iteration 12):
+  - Added `[release]` config section to `soenc.toml` contract in `soenc_config.py`:
+    - `require_approval`
+    - `approval_file`
+    - `approval_key_file`
+    - `approval_key_id`
+  - Extended `soenc release` command in `enc2sop/cli.py`:
+    - new flags:
+      - `--require-release-approval`
+      - `--no-require-release-approval`
+      - `--release-approval-file`
+      - `--release-approval-key-file`
+      - `--release-approval-key-b64`
+      - `--release-approval-key-id`
+    - fail-closed guard when approval is required but no approval verification key is provided.
+  - Hardened release governance in `encryption_helper.py`:
+    - added release approval schema constant: `enc2sop-release-approval/v1`
+    - `write_release_receipt(...)` now validates signed approval metadata when required:
+      - approval file exists and schema is valid
+      - approval bundle target is `release_bundle.json`
+      - declared `release_bundle_sha256` matches current bundle digest
+      - non-empty `approvers` list
+      - HMAC-SHA256 signature verification with provided approval key
+      - optional key-id pin check when expected key id is configured
+    - release receipt now records:
+      - `release_approval_required`
+      - `release_approval_verified`
+      - `release_approval_file`
+      - `release_approval_key_id`
+  - Added focused tests:
+    - `tests/test_soenc_config.py`:
+      - release section parsing and path resolution
+      - unknown key rejection in `[release]`
+    - `tests/test_soenc_cli.py`:
+      - release command success with required signed approval via config
+      - fail-closed path when approval is required but approval key is missing
+    - `tests/test_encryption_helper.py`:
+      - release receipt success with required signed approval
+      - release receipt rejects approval bundle digest mismatch
+- Verification:
+  - `python -m pytest -q tests/test_soenc_config.py tests/test_soenc_cli.py tests/test_encryption_helper.py -k "release or approval or receipt or release_dir"` => `15 passed`
+
+### CARD `ENC-P0-011`
+
+- Status: `done`
+- Goal: add first-class release-approval artifact generation command for CI promotion/signoff workflows
+- Type: launch governance + integrity
+- Depends on: `ENC-P0-010`
+- Main files:
+  - `enc2sop/cli.py`
+  - `encryption_helper.py`
+  - tests and operator docs
+- Deliverables:
+  - `soenc approve-release` command to emit signed `release_approval.json`
+  - fail-closed key + approver requirements for approval artifact generation
+  - deterministic approval payload bound to current `release_bundle.json` digest
+  - docs updated to position approval generation before `soenc release` in operator flow
+- Acceptance:
+  - approval command fails when signing key or approvers are missing
+  - generated approval signature validates against payload digest and key-id policy
+  - release gate can consume generated artifact unchanged under `--require-release-approval`
+- Notes (2026-05-10, iteration 13):
+  - Added `encryption_helper.write_release_approval(...)`:
+    - verifies `release_bundle.json` exists in target release dir.
+    - computes `release_bundle_sha256`.
+    - requires non-empty approver set + approval signing key.
+    - emits `enc2sop-release-approval/v1` JSON with HMAC-SHA256 signature metadata.
+  - Added unified CLI command `soenc approve-release` in `enc2sop/cli.py`:
+    - supports config fallback for dist/approval key/file defaults.
+    - supports repeated `--approver` flags and optional `--notes` / `--approved-at-utc`.
+    - supports key-id policy metadata via `--release-approval-key-id`.
+  - Added focused regression tests:
+    - `tests/test_soenc_cli.py`:
+      - approve-release success path writes deterministic signed approval payload.
+      - approve-release fails closed when approval signing key is missing.
+    - `tests/test_encryption_helper.py`:
+      - `write_release_approval(...)` emits valid signed payload bound to bundle digest.
+      - `write_release_approval(...)` rejects empty approver list.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include:
+    - explicit `approve-release` command in primary command surface.
+    - recommended sequence: `package -> approve-release -> release`.
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_encryption_helper.py -k "approve_release or approval or release"`
+
+### CARD `ENC-P0-012`
+
+- Status: `done`
+- Goal: enforce signed approval release gate in CI promotion pipeline for protected branches/environments
+- Type: launch governance + CI hardening
+- Depends on: `ENC-P0-011`
+- Main files:
+  - CI workflow files under `.github/workflows/` (or equivalent pipeline config)
+  - operator launch docs under `docs/` and `USAGE_MANUAL.md`
+- Deliverables:
+  - pipeline step that runs `soenc approve-release` with CI-managed approval key and approver identity inputs
+  - mandatory promotion gate step running `soenc release --require-release-approval`
+  - fail-closed pipeline behavior on missing/invalid approval artifact
+  - operator dry-run checklist for approval-key custody and rotation in CI secrets
+- Acceptance:
+  - protected branch promotion fails when approval artifact is missing/invalid
+  - successful promotion emits `release_approval.json` + `release_receipt.json` artifacts
+  - docs include operational rollout and rollback instructions
+- Notes (2026-05-10, iteration 14):
+  - Added CI promotion workflow `.github/workflows/release_promotion.yml` with fail-closed signed-approval enforcement:
+    - trigger scope: `push` on `main` and `release/**` plus `workflow_dispatch` dry-run.
+    - builds a deterministic protected release fixture through mainline commands:
+      - `soenc protect` -> `soenc build` -> `soenc verify` -> `soenc package`.
+    - generates signed approval artifact in CI:
+      - `soenc approve-release --release-approval-key-b64 $SOENC_RELEASE_APPROVAL_KEY_B64`.
+    - enforces promotion gate:
+      - `soenc release --require-release-approval` with explicit approval file/key/key-id inputs.
+    - uploads required audit artifacts with fail-closed artifact policy:
+      - `release_bundle.json`, `release_approval.json`, `release_receipt.json`.
+  - Added focused regression test `tests/test_release_promotion_workflow.py` asserting workflow contract includes:
+    - approval generation command,
+    - required release gate flag,
+    - required CI key secret reference,
+    - fail-closed artifact upload behavior.
+  - Updated `USAGE_MANUAL.md` with CI rollout guidance:
+    - required GitHub environment/secret configuration,
+    - dry-run checklist,
+    - rollback and key-rotation safety procedure.
+- Verification:
+  - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_soenc_cli.py -k "promotion or approve_release or release"`
+  - `python -m pytest -q`
+

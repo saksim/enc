@@ -1282,6 +1282,174 @@ class SidecarRecoveryTests(WorkspaceTempMixin, unittest.TestCase):
         )
         self.assertEqual(Path(recover["output_file"]).read_bytes(), src.read_bytes())
 
+    def test_recover_images_auto_prefers_sidecar_before_external(self) -> None:
+        _root, transport, src, manifest_path = self._build_fixture()
+        images_dir = manifest_path.parent / "pages"
+        restored = manifest_path.parent.parent / "restored_auto_sidecar_priority.bin"
+        attempts = []
+
+        def fake_extract(
+            self_obj,
+            image_input_path,
+            output_text_path,
+            backend="tesseract",
+            lang="eng",
+            psm=6,
+            manifest_path=None,
+            ocr_provider_cmd=None,
+            ocr_provider_timeout_sec=120,
+        ):
+            attempts.append(str(backend))
+            if backend != "sidecar":
+                raise RuntimeError("backend should not run after sidecar success")
+            merged = "".join(
+                path.read_text(encoding="ascii")
+                for path in sorted((Path(manifest_path).parent / "pages_txt").glob("*.txt"))
+            )
+            Path(output_text_path).write_text(merged, encoding="utf-8")
+            return {
+                "success": True,
+                "backend": backend,
+                "language": lang,
+                "ocr_languages": [],
+                "psm": psm,
+                "manifest_path": manifest_path,
+                "image_count": 1,
+                "image_files": [str(images_dir / "case_0001.png")],
+                "output_text_path": str(output_text_path),
+                "structured_layout_used": True,
+                "structured_page_count": 1,
+                "sidecar_supported": True,
+                "tesseract_mode": None,
+                "tesseract_command": None,
+                "text_length": len(merged),
+                "ocr_provider_mode": None,
+                "ocr_provider_cmd": None,
+            }
+
+        with mock.patch.object(
+            qrcode_helper.AirgapTransportLayer,
+            "extract_text_from_images",
+            autospec=True,
+            side_effect=fake_extract,
+        ):
+            recover = transport.recover_from_images(
+                manifest_path=str(manifest_path),
+                image_input_path=str(images_dir),
+                output_file=str(restored),
+                backend="auto",
+                ocr_provider_cmd="dummy {image_path}",
+                ocr_text_output=str(manifest_path.parent.parent / "ocr_auto_sidecar_priority.txt"),
+                max_list=20,
+            )
+
+        self.assertTrue(recover["success"])
+        self.assertEqual(recover["backend_selected"], "sidecar")
+        self.assertEqual(attempts, ["sidecar"])
+        self.assertEqual(restored.read_bytes(), src.read_bytes())
+
+    def test_recover_images_auto_prefers_external_before_generic_ocr(self) -> None:
+        root = self.make_case_root("recover_auto_external_priority")
+        src = root / "payload_auto_external_priority.bin"
+        src.write_bytes((b"recover-auto-external-priority\n" * 12) + bytes(range(16)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=6,
+            max_compressed_kib=64,
+        )
+        pkg = root / "pkg_auto_external_priority"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=1,
+            parity_group_size=0,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        pages_txt_dir = manifest_path.parent / "pages_txt"
+        images_dir = manifest_path.parent / "pages"
+        restored = root / "restored_auto_external_priority.bin"
+        attempts = []
+
+        def fake_extract(
+            self_obj,
+            image_input_path,
+            output_text_path,
+            backend="tesseract",
+            lang="eng",
+            psm=6,
+            manifest_path=None,
+            ocr_provider_cmd=None,
+            ocr_provider_timeout_sec=120,
+        ):
+            attempts.append(str(backend))
+            merged = "".join(path.read_text(encoding="ascii") for path in sorted(pages_txt_dir.glob("*.txt")))
+            Path(output_text_path).write_text(merged, encoding="utf-8")
+            if backend == "external":
+                return {
+                    "success": True,
+                    "backend": backend,
+                    "language": lang,
+                    "ocr_languages": [lang],
+                    "psm": psm,
+                    "manifest_path": manifest_path,
+                    "image_count": 1,
+                    "image_files": [str(images_dir / "case_0001.png")],
+                    "output_text_path": str(output_text_path),
+                    "structured_layout_used": False,
+                    "structured_page_count": 0,
+                    "sidecar_supported": False,
+                    "tesseract_mode": None,
+                    "tesseract_command": None,
+                    "ocr_provider_mode": "external_cmd",
+                    "ocr_provider_cmd": ocr_provider_cmd,
+                    "text_length": len(merged),
+                }
+            raise RuntimeError("unexpected backend {}".format(backend))
+
+        with mock.patch.object(
+            qrcode_helper.AirgapTransportLayer,
+            "extract_text_from_images",
+            autospec=True,
+            side_effect=fake_extract,
+        ), mock.patch.object(
+            qrcode_helper,
+            "PIL_AVAILABLE",
+            False,
+        ), mock.patch.object(
+            qrcode_helper,
+            "TESSERACT_PYTHON_AVAILABLE",
+            False,
+        ), mock.patch.object(
+            qrcode_helper,
+            "TESSERACT_CLI_AVAILABLE",
+            True,
+        ), mock.patch.object(
+            qrcode_helper,
+            "TESSERACT_CMD",
+            "tesseract",
+        ), mock.patch.object(
+            qrcode_helper,
+            "EASYOCR_AVAILABLE",
+            True,
+        ):
+            recover = transport.recover_from_images(
+                manifest_path=None,
+                image_input_path=str(images_dir),
+                output_file=str(restored),
+                backend="auto",
+                ocr_provider_cmd="dummy {image_path}",
+                ocr_text_output=str(root / "ocr_auto_external_priority.txt"),
+                max_list=20,
+            )
+
+        self.assertTrue(recover["success"])
+        self.assertEqual(recover["backend_selected"], "external")
+        self.assertEqual(attempts, ["external"])
+        self.assertEqual(restored.read_bytes(), src.read_bytes())
+
     def test_single_page_sidecar_extract_uses_filename_page_number(self) -> None:
         _root, transport, manifest_path = self._build_multi_page_fixture()
 

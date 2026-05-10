@@ -9,6 +9,8 @@ New workflow:
 import argparse
 import ast
 import base64
+from datetime import datetime
+from datetime import timezone
 import hashlib
 import hmac
 import io
@@ -65,6 +67,13 @@ RUNTIME_FINGERPRINT_ALGORITHM_SHA256 = "sha256"
 RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED = "manifest-compiled-runtime-v1"
 RUNTIME_SUFFIX_POLICY_STRICT_SINGLE = "strict-single-platform"
 RUNTIME_SUFFIX_POLICY_PREFER_HOST = "prefer-host-platform"
+RELEASE_BUNDLE_SCHEMA = "enc2sop-release-bundle/v1"
+RELEASE_BUNDLE_FILENAME = "release_bundle.json"
+RELEASE_LAYOUT_VERSION = "v1"
+RELEASE_RECEIPT_SCHEMA = "enc2sop-release-receipt/v1"
+RELEASE_RECEIPT_FILENAME = "release_receipt.json"
+RELEASE_APPROVAL_SCHEMA = "enc2sop-release-approval/v1"
+DEFAULT_RELEASE_APPROVAL_KEY_ID = "release-approval-hmac-v1"
 
 
 class SymbolRange(NamedTuple):
@@ -242,6 +251,10 @@ def _load_manifest_sign_key(key_file=None, key_b64=None):
     if len(key) < 16:
         raise ValueError("manifest signing key must be at least 16 bytes")
     return key
+
+
+def load_release_approval_key(key_file=None, key_b64=None):
+    return _load_manifest_sign_key(key_file=key_file, key_b64=key_b64)
 
 
 def _manifest_payload_without_signature(manifest):
@@ -1197,6 +1210,430 @@ def _normalized_relpath_text(value):
     return str(value).replace("\\", "/")
 
 
+def _utc_now_iso8601_seconds():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _select_release_runtime_fingerprints(manifest, native_relative_set):
+    delivery = (manifest.get("runtime_delivery") or {}) if isinstance(manifest, dict) else {}
+    entries = delivery.get("compiled_runtime_fingerprints")
+    if not isinstance(entries, list):
+        return []
+    selected = []  # type: List[Dict[str, str]]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        compiled_relative = _normalized_relpath_text(entry.get("compiled_relative_path") or "").strip()
+        if not compiled_relative:
+            continue
+        if compiled_relative not in native_relative_set:
+            continue
+        selected.append(
+            {
+                "module_name": str(entry.get("module_name") or ""),
+                "source_relative_path": str(entry.get("source_relative_path") or ""),
+                "compiled_relative_path": compiled_relative,
+                "package_relative_path": str(entry.get("package_relative_path") or ""),
+                "algorithm": str(entry.get("algorithm") or RUNTIME_FINGERPRINT_ALGORITHM_SHA256),
+                "digest_hex": str(entry.get("digest_hex") or ""),
+            }
+        )
+    return sorted(selected, key=lambda item: (item.get("module_name") or "", item.get("compiled_relative_path") or ""))
+
+
+def build_release_bundle_metadata(
+    *,
+    dist_dir,
+    staging_dir,
+    build_dir,
+    manifest,
+    package_metadata=None,
+    license_relative_path=None,
+):
+    release_root = normalize_path(dist_dir)
+    staging_root = normalize_path(staging_dir)
+    build_root = normalize_path(build_dir)
+
+    runtime_files = []  # type: List[str]
+    runtime_delivery = manifest.get("runtime_delivery") if isinstance(manifest, dict) else None
+    if isinstance(runtime_delivery, dict):
+        values = runtime_delivery.get("compiled_runtime_files")
+        if isinstance(values, list):
+            runtime_files = [
+                _normalized_relpath_text(item).strip()
+                for item in values
+                if isinstance(item, str) and _normalized_relpath_text(item).strip()
+            ]
+
+    native_files = []  # type: List[str]
+    for native_path in native_extension_files(release_root):
+        native_files.append(_normalized_relpath_text(native_path.relative_to(release_root)))
+    native_files = sorted(set(native_files))
+    native_set = set(native_files)
+
+    package_inits = []  # type: List[str]
+    for init_path in release_root.rglob("__init__.py"):
+        package_inits.append(_normalized_relpath_text(init_path.relative_to(release_root)))
+    package_inits = sorted(set(package_inits))
+
+    package_metadata_payload = {}
+    if isinstance(package_metadata, dict):
+        for key, value in package_metadata.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                package_metadata_payload[str(key)] = text
+
+    license_payload = None
+    if license_relative_path:
+        license_payload = {
+            "relative_path": _normalized_relpath_text(license_relative_path),
+            "required_for_runtime": True,
+        }
+
+    build_manifest_payload = {
+        "relative_path": "build_manifest.json",
+        "is_signed": isinstance(manifest.get("signature"), dict),
+        "signature": manifest.get("signature"),
+    }
+
+    runtime_fingerprints = _select_release_runtime_fingerprints(manifest, native_set)
+
+    return {
+        "schema": RELEASE_BUNDLE_SCHEMA,
+        "layout_version": RELEASE_LAYOUT_VERSION,
+        "generated_at_utc": _utc_now_iso8601_seconds(),
+        "release_root": str(release_root),
+        "source": {
+            "staging_dir": str(staging_root),
+            "build_dir": str(build_root),
+        },
+        "build_manifest": build_manifest_payload,
+        "bundle_contents": {
+            "native_extension_files": native_files,
+            "runtime_compiled_files": sorted(set(item for item in runtime_files if item in native_set)),
+            "package_init_files": package_inits,
+            "license_file": license_payload,
+        },
+        "runtime_integrity": {
+            "validation_required": True,
+            "compiled_runtime_fingerprints": runtime_fingerprints,
+            "validated": bool((runtime_delivery or {}).get("validated")) if isinstance(runtime_delivery, dict) else False,
+        },
+        "key_management": manifest.get("key_management"),
+        "config": manifest.get("config"),
+        "package_metadata": package_metadata_payload,
+    }
+
+
+def write_release_bundle_metadata(
+    *,
+    dist_dir,
+    staging_dir,
+    build_dir,
+    manifest,
+    package_metadata=None,
+    license_relative_path=None,
+):
+    release_root = normalize_path(dist_dir)
+    payload = build_release_bundle_metadata(
+        dist_dir=release_root,
+        staging_dir=staging_dir,
+        build_dir=build_dir,
+        manifest=manifest,
+        package_metadata=package_metadata,
+        license_relative_path=license_relative_path,
+    )
+    metadata_path = release_root / RELEASE_BUNDLE_FILENAME
+    metadata_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return metadata_path
+
+
+def release_bundle_path(dist_dir):
+    release_dir = normalize_path(dist_dir)
+    return release_dir / RELEASE_BUNDLE_FILENAME
+
+
+def release_receipt_path(dist_dir):
+    release_dir = normalize_path(dist_dir)
+    return release_dir / RELEASE_RECEIPT_FILENAME
+
+
+def write_release_approval(
+    *,
+    dist_dir,
+    approvers,
+    approval_key,
+    approval_file=None,
+    approval_key_id=None,
+    approved_at_utc=None,
+    notes=None,
+):
+    release_dir = normalize_path(dist_dir)
+    if not release_dir.exists():
+        raise FileNotFoundError("release directory not found: {0}".format(release_dir))
+    bundle_path = release_bundle_path(release_dir)
+    if not bundle_path.exists():
+        raise RuntimeError("release bundle metadata missing: {0}".format(bundle_path))
+    if approval_key is None:
+        raise ValueError("release approval signing key is required")
+
+    normalized_approvers = []  # type: List[str]
+    for item in approvers or ():
+        text = str(item).strip()
+        if text:
+            normalized_approvers.append(text)
+    if not normalized_approvers:
+        raise ValueError("release approval requires at least one approver")
+    normalized_approvers = sorted(set(normalized_approvers))
+
+    approved_at = str(approved_at_utc or "").strip() or _utc_now_iso8601_seconds()
+    key_id = str(approval_key_id or "").strip() or DEFAULT_RELEASE_APPROVAL_KEY_ID
+    payload = {
+        "schema": RELEASE_APPROVAL_SCHEMA,
+        "approved_at_utc": approved_at,
+        "release_bundle_relative_path": RELEASE_BUNDLE_FILENAME,
+        "release_bundle_sha256": _sha256_file(bundle_path),
+        "approvers": normalized_approvers,
+    }
+    notes_text = str(notes or "").strip()
+    if notes_text:
+        payload["notes"] = notes_text
+
+    signature_digest = hmac.new(
+        approval_key,
+        _canonical_json_bytes(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    payload["signature"] = {
+        "algorithm": SIGNATURE_ALGORITHM_HMAC_SHA256,
+        "key_id": key_id,
+        "digest_hex": signature_digest,
+    }
+
+    approval_path = normalize_path(approval_file) if approval_file is not None else (release_dir / "release_approval.json")
+    ensure_parent(approval_path)
+    approval_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return approval_path, payload
+
+
+def write_release_receipt(
+    *,
+    dist_dir,
+    required_manifest_signature=False,
+    key_mode=None,
+    package_metadata=None,
+    require_approval=False,
+    approval_file=None,
+    approval_key=None,
+    approval_key_id=None,
+):
+    release_dir = normalize_path(dist_dir)
+    if not release_dir.exists():
+        raise FileNotFoundError("release directory not found: {0}".format(release_dir))
+
+    bundle_path = release_bundle_path(release_dir)
+    if not bundle_path.exists():
+        raise RuntimeError("release bundle metadata missing: {0}".format(bundle_path))
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    if bundle.get("schema") != RELEASE_BUNDLE_SCHEMA:
+        raise RuntimeError("unsupported release bundle schema: {0}".format(bundle.get("schema")))
+    if bundle.get("layout_version") != RELEASE_LAYOUT_VERSION:
+        raise RuntimeError("unsupported release bundle layout_version: {0}".format(bundle.get("layout_version")))
+
+    manifest_path = release_dir / "build_manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError("build_manifest.json missing in release directory: {0}".format(release_dir))
+    manifest = read_manifest(manifest_path)
+
+    manifest_signature = manifest.get("signature")
+    has_manifest_signature = isinstance(manifest_signature, dict)
+    if required_manifest_signature and not has_manifest_signature:
+        raise RuntimeError("build manifest signature is required for release")
+
+    bundle_manifest = bundle.get("build_manifest") or {}
+    if not isinstance(bundle_manifest, dict):
+        raise RuntimeError("release bundle build_manifest metadata is invalid")
+    if _normalized_relpath_text(bundle_manifest.get("relative_path") or "") != "build_manifest.json":
+        raise RuntimeError("release bundle build_manifest.relative_path must be build_manifest.json")
+    if bool(bundle_manifest.get("is_signed")) != has_manifest_signature:
+        raise RuntimeError("release bundle signed-manifest state does not match build_manifest.json")
+    if has_manifest_signature:
+        bundle_sig = bundle_manifest.get("signature")
+        if bundle_sig != manifest_signature:
+            raise RuntimeError("release bundle manifest signature metadata does not match build_manifest.json")
+
+    bundle_contents = bundle.get("bundle_contents") or {}
+    if not isinstance(bundle_contents, dict):
+        raise RuntimeError("release bundle bundle_contents metadata is invalid")
+    runtime_delivery = (manifest.get("runtime_delivery") or {}) if isinstance(manifest, dict) else {}
+    runtime_files = manifest.get("runtime_files") or []
+    if runtime_files:
+        if not isinstance(runtime_delivery, dict) or not runtime_delivery.get("validated"):
+            raise RuntimeError("runtime delivery is not validated in build_manifest.json")
+        if not runtime_delivery.get("compiled_runtime_files"):
+            raise RuntimeError("runtime delivery compiled_runtime_files missing in build_manifest.json")
+
+    native_rel = sorted(
+        set(_normalized_relpath_text(path.relative_to(release_dir)) for path in native_extension_files(release_dir))
+    )
+    if native_rel != sorted(set(_normalized_relpath_text(item) for item in bundle_contents.get("native_extension_files") or [])):
+        raise RuntimeError("release bundle native_extension_files do not match release directory contents")
+
+    runtime_compiled_rel = sorted(
+        set(_normalized_relpath_text(item) for item in runtime_delivery.get("compiled_runtime_files") or [])
+    )
+    if runtime_compiled_rel:
+        missing_runtime = [item for item in runtime_compiled_rel if not (release_dir / item).exists()]
+        if missing_runtime:
+            raise RuntimeError("release runtime artifact missing from release directory: {0}".format(", ".join(missing_runtime)))
+    bundle_runtime_rel = sorted(
+        set(_normalized_relpath_text(item) for item in bundle_contents.get("runtime_compiled_files") or [])
+    )
+    if bundle_runtime_rel != runtime_compiled_rel:
+        raise RuntimeError("release bundle runtime_compiled_files do not match validated manifest metadata")
+
+    package_init_rel = sorted(
+        set(_normalized_relpath_text(path.relative_to(release_dir)) for path in release_dir.rglob("__init__.py"))
+    )
+    bundle_package_init_rel = sorted(
+        set(_normalized_relpath_text(item) for item in bundle_contents.get("package_init_files") or [])
+    )
+    if bundle_package_init_rel != package_init_rel:
+        raise RuntimeError("release bundle package_init_files do not match release directory contents")
+
+    key_mgmt = manifest.get("key_management") if isinstance(manifest, dict) else None
+    key_mode_resolved = str(key_mode or "").strip() or str((key_mgmt or {}).get("mode") or "").strip()
+    if not key_mode_resolved:
+        key_mode_resolved = DEFAULT_KEY_MODE
+    license_declared = bool((key_mgmt or {}).get("license_file"))
+    license_payload = bundle_contents.get("license_file")
+    if license_declared:
+        if not isinstance(license_payload, dict):
+            raise RuntimeError("release bundle license_file metadata missing for license-file key mode")
+        license_rel = _normalized_relpath_text(license_payload.get("relative_path") or "").strip()
+        if not license_rel:
+            raise RuntimeError("release bundle license_file.relative_path is required")
+        if not (release_dir / license_rel).exists():
+            raise RuntimeError("release license sidecar missing from release directory: {0}".format(license_rel))
+    elif license_payload is not None:
+        raise RuntimeError("release bundle license_file metadata present but build_manifest.json has no license_file")
+
+    runtime_integrity = bundle.get("runtime_integrity") or {}
+    if not isinstance(runtime_integrity, dict):
+        raise RuntimeError("release bundle runtime_integrity metadata is invalid")
+    if bool(runtime_integrity.get("validated")) != bool(runtime_delivery.get("validated")):
+        raise RuntimeError("release bundle runtime_integrity.validated mismatch with build_manifest.json")
+    bundle_fingerprints = runtime_integrity.get("compiled_runtime_fingerprints") or []
+    if not isinstance(bundle_fingerprints, list):
+        raise RuntimeError("release bundle runtime_integrity.compiled_runtime_fingerprints must be a list")
+    bundle_fingerprint_by_path = {}
+    for entry in bundle_fingerprints:
+        if not isinstance(entry, dict):
+            continue
+        rel = _normalized_relpath_text(entry.get("compiled_relative_path") or "").strip()
+        if not rel:
+            continue
+        bundle_fingerprint_by_path[rel] = entry
+    for runtime_rel in runtime_compiled_rel:
+        bundle_entry = bundle_fingerprint_by_path.get(runtime_rel)
+        if bundle_entry is None:
+            raise RuntimeError("release bundle fingerprint missing for runtime artifact: {0}".format(runtime_rel))
+        algorithm = str(bundle_entry.get("algorithm") or "").strip().lower()
+        if algorithm != RUNTIME_FINGERPRINT_ALGORITHM_SHA256:
+            raise RuntimeError("unsupported runtime fingerprint algorithm for release artifact {0}".format(runtime_rel))
+        digest_hex = str(bundle_entry.get("digest_hex") or "").strip().lower()
+        actual_digest = _sha256_file(release_dir / runtime_rel)
+        if digest_hex != actual_digest:
+            raise RuntimeError("release runtime fingerprint mismatch for artifact: {0}".format(runtime_rel))
+
+    if require_approval:
+        approval_path = normalize_path(approval_file) if approval_file is not None else (release_dir / "release_approval.json")
+        if not approval_path.exists():
+            raise RuntimeError("release approval file missing: {0}".format(approval_path))
+        approval_payload = json.loads(approval_path.read_text(encoding="utf-8"))
+        if approval_payload.get("schema") != RELEASE_APPROVAL_SCHEMA:
+            raise RuntimeError("unsupported release approval schema: {0}".format(approval_payload.get("schema")))
+        approval_release_bundle = _normalized_relpath_text(approval_payload.get("release_bundle_relative_path") or "").strip()
+        if approval_release_bundle != RELEASE_BUNDLE_FILENAME:
+            raise RuntimeError("release approval file must target release_bundle.json")
+        approval_digest = str(approval_payload.get("release_bundle_sha256") or "").strip().lower()
+        if len(approval_digest) != 64 or any(ch not in "0123456789abcdef" for ch in approval_digest):
+            raise RuntimeError("release approval file has invalid release_bundle_sha256")
+        current_bundle_digest = _sha256_file(bundle_path)
+        if approval_digest != current_bundle_digest:
+            raise RuntimeError("release approval bundle digest mismatch")
+        approvers = approval_payload.get("approvers")
+        if not isinstance(approvers, list) or not approvers or not all(isinstance(item, str) and item.strip() for item in approvers):
+            raise RuntimeError("release approval file requires non-empty approvers list")
+        signature = approval_payload.get("signature")
+        if not isinstance(signature, dict):
+            raise RuntimeError("release approval signature missing")
+        algorithm = str(signature.get("algorithm") or "").strip().lower()
+        if algorithm != SIGNATURE_ALGORITHM_HMAC_SHA256:
+            raise RuntimeError("unsupported release approval signature algorithm: {0}".format(algorithm))
+        digest_hex = str(signature.get("digest_hex") or "").strip().lower()
+        if len(digest_hex) != 64 or any(ch not in "0123456789abcdef" for ch in digest_hex):
+            raise RuntimeError("release approval signature digest is invalid")
+        if approval_key is None:
+            raise RuntimeError("release approval validation key is required")
+        signed_payload = dict(approval_payload)
+        signed_payload.pop("signature", None)
+        expected_digest = hmac.new(approval_key, _canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected_digest, digest_hex):
+            raise RuntimeError("release approval signature mismatch")
+        actual_approval_key_id = str(signature.get("key_id") or "").strip() or None
+        expected_approval_key_id = str(approval_key_id or "").strip() or None
+        if expected_approval_key_id is not None and actual_approval_key_id != expected_approval_key_id:
+            raise RuntimeError(
+                "release approval key_id mismatch: expected {0}, got {1}".format(
+                    expected_approval_key_id,
+                    actual_approval_key_id,
+                )
+            )
+        approval_verified = True
+        approval_file_value = str(approval_path)
+    else:
+        approval_verified = False
+        actual_approval_key_id = None
+        approval_file_value = None
+
+    package_payload = {}
+    if isinstance(package_metadata, dict):
+        for key, value in package_metadata.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                package_payload[str(key)] = text
+
+    receipt = {
+        "schema": RELEASE_RECEIPT_SCHEMA,
+        "generated_at_utc": _utc_now_iso8601_seconds(),
+        "release_root": str(release_dir),
+        "build_manifest_relative_path": "build_manifest.json",
+        "release_bundle_relative_path": RELEASE_BUNDLE_FILENAME,
+        "bundle_schema": RELEASE_BUNDLE_SCHEMA,
+        "layout_version": RELEASE_LAYOUT_VERSION,
+        "manifest_signature_required": bool(required_manifest_signature),
+        "manifest_signature_present": has_manifest_signature,
+        "manifest_signature_key_id": manifest_signature.get("key_id") if has_manifest_signature else None,
+        "runtime_artifacts_verified": len(runtime_compiled_rel),
+        "native_artifacts_verified": len(native_rel),
+        "package_init_files_verified": len(package_init_rel),
+        "key_mode": key_mode_resolved,
+        "release_approval_required": bool(require_approval),
+        "release_approval_verified": approval_verified,
+        "release_approval_file": approval_file_value,
+        "release_approval_key_id": actual_approval_key_id,
+        "package_metadata": package_payload,
+    }
+    receipt_path = release_receipt_path(release_dir)
+    receipt_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False), encoding="utf-8")
+    return receipt_path, receipt
+
+
 def _runtime_fingerprints_from_manifest(manifest, build_dir, source_to_compiled):
     fingerprints = []  # type: List[Dict[str, str]]
     runtime_modules = manifest.get("runtime_modules")
@@ -1398,8 +1835,32 @@ def native_extension_files(root):
     return tuple(sorted(found))
 
 
-def copy_release(build_dir, dist_dir, staging_dir):
+def copy_release(
+    build_dir,
+    dist_dir,
+    staging_dir,
+    package_metadata=None,
+    require_manifest_signature=False,
+):
+    build_dir = normalize_path(build_dir)
+    staging_dir = normalize_path(staging_dir)
     dist_dir = reset_directory(dist_dir)
+
+    manifest = staging_dir / "build_manifest.json"
+    if not manifest.exists():
+        raise RuntimeError("build manifest missing in staging directory: {0}".format(staging_dir))
+    payload = read_manifest(manifest)
+    if require_manifest_signature and not isinstance(payload.get("signature"), dict):
+        raise RuntimeError("build manifest signature is required for release packaging")
+
+    runtime_files = payload.get("runtime_files") or []
+    runtime_delivery = payload.get("runtime_delivery") or {}
+    if runtime_files:
+        if not isinstance(runtime_delivery, dict) or not runtime_delivery.get("validated"):
+            raise RuntimeError("runtime delivery must be validated before release packaging")
+        compiled_runtime_files = runtime_delivery.get("compiled_runtime_files") or []
+        if not compiled_runtime_files:
+            raise RuntimeError("runtime delivery compiled files missing; run soenc build/verify before package")
 
     copied = []  # type: List[Path]
     for native_file in native_extension_files(build_dir):
@@ -1414,27 +1875,36 @@ def copy_release(build_dir, dist_dir, staging_dir):
         target = dist_dir / relative
         ensure_parent(target)
         shutil.copy2(init_file, target)
+        copied.append(target)
 
-    manifest = staging_dir / "build_manifest.json"
-    if manifest.exists():
-        shutil.copy2(manifest, dist_dir / manifest.name)
-        copied.append(dist_dir / manifest.name)
+    shutil.copy2(manifest, dist_dir / manifest.name)
+    copied.append(dist_dir / manifest.name)
 
-    license_file = None
-    if manifest.exists():
-        payload = read_manifest(manifest)
-        license_file = ((payload.get("key_management") or {}).get("license_file")) or None
+    license_file = ((payload.get("key_management") or {}).get("license_file")) or None
+    copied_license_relative = None
     if license_file:
         source_license = (staging_dir / license_file).resolve()
-        if source_license.exists():
-            try:
-                source_license.relative_to(staging_dir.resolve())
-            except ValueError:
-                raise RuntimeError("license_file escapes staging directory: {0}".format(license_file))
-            target_license = dist_dir / license_file
-            ensure_parent(target_license)
-            shutil.copy2(source_license, target_license)
-            copied.append(target_license)
+        try:
+            source_license.relative_to(staging_dir.resolve())
+        except ValueError:
+            raise RuntimeError("license_file escapes staging directory: {0}".format(license_file))
+        if not source_license.exists():
+            raise RuntimeError("license_file declared in manifest but missing: {0}".format(license_file))
+        target_license = dist_dir / license_file
+        ensure_parent(target_license)
+        shutil.copy2(source_license, target_license)
+        copied.append(target_license)
+        copied_license_relative = license_file
+
+    bundle_path = write_release_bundle_metadata(
+        dist_dir=dist_dir,
+        staging_dir=staging_dir,
+        build_dir=build_dir,
+        manifest=payload,
+        package_metadata=package_metadata,
+        license_relative_path=copied_license_relative,
+    )
+    copied.append(bundle_path)
     return dist_dir, tuple(copied)
 
 

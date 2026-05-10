@@ -1,0 +1,288 @@
+﻿name: release-promotion-gate
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+  workflow_dispatch:
+    inputs:
+      release_dir:
+        description: "Release directory output path (default: .tmp_ci/release)"
+        required: false
+        default: ".tmp_ci/release"
+      promotion_evidence_file:
+        description: "Promotion evidence output path (default: .tmp_ci/ops/promotion_evidence.json)"
+        required: false
+        default: ".tmp_ci/ops/promotion_evidence.json"
+      promotion_report_file:
+        description: "Promotion audit report output path (default: .tmp_ci/ops/promotion_audit_report.json)"
+        required: false
+        default: ".tmp_ci/ops/promotion_audit_report.json"
+      promotion_artifact_audit_report_file:
+        description: "Promotion artifact audit report output path (default: .tmp_ci/ops/promotion_artifact_audit_report.json)"
+        required: false
+        default: ".tmp_ci/ops/promotion_artifact_audit_report.json"
+      rotation_report_file:
+        description: "Rotation rehearsal report output path (default: .tmp_ci/ops/rotation_rehearsal_report.json)"
+        required: false
+        default: ".tmp_ci/ops/rotation_rehearsal_report.json"
+      promotion_run_receipt_file:
+        description: "Promotion run receipt output path (default: .tmp_ci/ops/promotion_run_receipt.json)"
+        required: false
+        default: ".tmp_ci/ops/promotion_run_receipt.json"
+      skip_promotion_collect:
+        description: "Use existing promotion evidence file instead of GitHub API collection."
+        required: false
+        default: false
+        type: boolean
+      rotation_rehearsal:
+        description: "Require old approval-key rejection rehearsal."
+        required: false
+        default: false
+        type: boolean
+      approver:
+        description: "Approver identity written into release_approval.json"
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+
+concurrency:
+  group: release-promotion-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promotion-gate:
+    name: Signed Approval Promotion Gate
+    runs-on: ubuntu-latest
+    environment:
+      name: production-promotion
+    env:
+      APPROVER_INPUT: ${{ github.event.inputs.approver }}
+      RELEASE_DIR: ${{ github.event.inputs.release_dir || '.tmp_ci/release' }}
+      PROMOTION_EVIDENCE_FILE: ${{ github.event.inputs.promotion_evidence_file || '.tmp_ci/ops/promotion_evidence.json' }}
+      PROMOTION_REPORT_FILE: ${{ github.event.inputs.promotion_report_file || '.tmp_ci/ops/promotion_audit_report.json' }}
+      PROMOTION_ARTIFACT_AUDIT_REPORT_FILE: ${{ github.event.inputs.promotion_artifact_audit_report_file || '.tmp_ci/ops/promotion_artifact_audit_report.json' }}
+      ROTATION_REPORT_FILE: ${{ github.event.inputs.rotation_report_file || '.tmp_ci/ops/rotation_rehearsal_report.json' }}
+      PROMOTION_RUN_RECEIPT_FILE: ${{ github.event.inputs.promotion_run_receipt_file || '.tmp_ci/ops/promotion_run_receipt.json' }}
+      SKIP_PROMOTION_COLLECT: ${{ github.event.inputs.skip_promotion_collect || 'false' }}
+      ROTATION_REHEARSAL_INPUT: ${{ github.event.inputs.rotation_rehearsal || 'false' }}
+      GITHUB_TOKEN: ${{ github.token }}
+      SOENC_RELEASE_APPROVAL_KEY_B64: ${{ secrets.SOENC_RELEASE_APPROVAL_KEY_B64 }}
+      SOENC_RELEASE_APPROVAL_KEY_ID: ${{ secrets.SOENC_RELEASE_APPROVAL_KEY_ID }}
+      SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64: ${{ secrets.SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Mainline Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pycryptodome setuptools Cython
+
+      - name: Resolve Promotion Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          approver="${APPROVER_INPUT:-}"
+          if [ -z "$approver" ]; then
+            approver="ci:${GITHUB_ACTOR}"
+          fi
+          if [ -z "${SOENC_RELEASE_APPROVAL_KEY_B64:-}" ]; then
+            echo "::error::Missing required secret SOENC_RELEASE_APPROVAL_KEY_B64"
+            exit 1
+          fi
+          key_id="${SOENC_RELEASE_APPROVAL_KEY_ID:-ci-approval-hmac-v1}"
+          echo "SOENC_PROMOTION_APPROVER=${approver}" >> "$GITHUB_ENV"
+          echo "SOENC_PROMOTION_KEY_ID=${key_id}" >> "$GITHUB_ENV"
+
+      - name: Initialize Rotation Rehearsal Report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ROTATION_REPORT_FILE")"
+          requested="false"
+          status="not-requested"
+          details="rotation rehearsal not requested"
+          if [ "${ROTATION_REHEARSAL_INPUT}" = "true" ]; then
+            requested="true"
+            status="pending"
+            details="rotation rehearsal requested"
+          fi
+          cat <<JSON > "$ROTATION_REPORT_FILE"
+          {
+            "schema": "enc2sop-rotation-rehearsal/v1",
+            "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "workflow_run_id": "${GITHUB_RUN_ID}",
+            "workflow_sha": "${GITHUB_SHA}",
+            "workflow_ref": "${GITHUB_REF}",
+            "requested": ${requested},
+            "executed": false,
+            "old_key_rejected": null,
+            "status": "${status}",
+            "details": "${details}"
+          }
+          JSON
+
+      - name: Build Mainline Release Fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace_root=".tmp_ci/workspace"
+          source_root="${workspace_root}/src_pkg"
+          staging_dir="${workspace_root}/staging"
+          scope_file="${workspace_root}/scope.json"
+          rm -rf "$workspace_root" "$RELEASE_DIR"
+          mkdir -p "$source_root/pkg"
+          cat <<'PYCODE' > "$source_root/__init__.py"
+          """fixture package root"""
+          PYCODE
+          cat <<'PYCODE' > "$source_root/pkg/__init__.py"
+          """fixture module package"""
+          PYCODE
+          cat <<'PYCODE' > "$source_root/pkg/mod.py"
+          def protected_add(a, b):
+              return a + b + 7
+          PYCODE
+          cat <<'JSON' > "$scope_file"
+          {
+            "pkg/mod.py": {
+              "functions": [
+                "protected_add"
+              ],
+              "all": false
+            }
+          }
+          JSON
+          python ./soenc.py protect -t "$source_root" -o "$staging_dir" --scope-config "$scope_file"
+          python ./soenc.py build --staging-dir "$staging_dir" --build-profile native
+          python ./soenc.py verify --staging-dir "$staging_dir"
+          python ./soenc.py package --staging-dir "$staging_dir" --dist-dir "$RELEASE_DIR"
+
+      - name: Generate Signed Release Approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ./soenc.py approve-release \
+            --dist-dir "$RELEASE_DIR" \
+            --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64" \
+            --release-approval-key-id "$SOENC_PROMOTION_KEY_ID" \
+            --approver "$SOENC_PROMOTION_APPROVER" \
+            --notes "ci promotion ${GITHUB_SHA}"
+
+      - name: Enforce Mandatory Release Approval Gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ./soenc.py release \
+            --dist-dir "$RELEASE_DIR" \
+            --require-release-approval \
+            --release-approval-file "$RELEASE_DIR/release_approval.json" \
+            --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64" \
+            --release-approval-key-id "$SOENC_PROMOTION_KEY_ID"
+
+      - name: Run Promotion Dry Run Gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          dry_run_args=(
+            "--github-repo" "$GITHUB_REPOSITORY"
+            "--github-token" "$GITHUB_TOKEN"
+            "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
+            "--report-file" "$PROMOTION_REPORT_FILE"
+          )
+          if [ "${SKIP_PROMOTION_COLLECT}" = "true" ]; then
+            dry_run_args=(
+              "--skip-collect"
+              "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
+              "--report-file" "$PROMOTION_REPORT_FILE"
+            )
+          fi
+          python ./soenc.py promotion-dry-run "${dry_run_args[@]}"
+
+      - name: Rehearse Approval Key Rotation (old key must fail)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rotation_rehearsal == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          write_report() {
+            local old_key_rejected="$1"
+            local status="$2"
+            local details="$3"
+            cat <<JSON > "$ROTATION_REPORT_FILE"
+            {
+              "schema": "enc2sop-rotation-rehearsal/v1",
+              "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "workflow_run_id": "${GITHUB_RUN_ID}",
+              "workflow_sha": "${GITHUB_SHA}",
+              "workflow_ref": "${GITHUB_REF}",
+              "requested": true,
+              "executed": true,
+              "old_key_rejected": ${old_key_rejected},
+              "status": "${status}",
+              "details": "${details}"
+            }
+            JSON
+          }
+          if [ -z "${SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64:-}" ]; then
+            write_report "null" "blocked" "missing SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64"
+            echo "::error::Missing required secret SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64 for rotation rehearsal"
+            exit 1
+          fi
+          set +e
+          python ./soenc.py release \
+            --dist-dir "$RELEASE_DIR" \
+            --require-release-approval \
+            --release-approval-file "$RELEASE_DIR/release_approval.json" \
+            --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64" \
+            --release-approval-key-id "$SOENC_PROMOTION_KEY_ID"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            write_report "false" "failed" "old approval key unexpectedly passed release gate"
+            echo "::error::rotation rehearsal failed: old approval key unexpectedly passed release gate"
+            exit 1
+          fi
+          write_report "true" "passed" "old approval key rejected by release gate"
+
+      - name: Verify Promotion Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_args=(
+            "--dist-dir" "$RELEASE_DIR"
+            "--promotion-evidence-file" "$PROMOTION_EVIDENCE_FILE"
+            "--promotion-report-file" "$PROMOTION_REPORT_FILE"
+            "--rotation-report-file" "$ROTATION_REPORT_FILE"
+            "--report-file" "$PROMOTION_ARTIFACT_AUDIT_REPORT_FILE"
+            "--run-receipt-file" "$PROMOTION_RUN_RECEIPT_FILE"
+          )
+          if [ "${ROTATION_REHEARSAL_INPUT}" = "true" ]; then
+            artifact_args+=("--require-rotation-pass")
+          fi
+          artifact_args+=("--require-ci-context-match")
+          python ./soenc.py verify-promotion-artifacts "${artifact_args[@]}"
+
+      - name: Upload Promotion Artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: soenc-promotion-${{ github.run_id }}
+          path: |
+            ${{ env.RELEASE_DIR }}/release_bundle.json
+            ${{ env.RELEASE_DIR }}/release_approval.json
+            ${{ env.RELEASE_DIR }}/release_receipt.json
+            ${{ env.PROMOTION_EVIDENCE_FILE }}
+            ${{ env.PROMOTION_REPORT_FILE }}
+            ${{ env.PROMOTION_ARTIFACT_AUDIT_REPORT_FILE }}
+            ${{ env.ROTATION_REPORT_FILE }}
+            ${{ env.PROMOTION_RUN_RECEIPT_FILE }}
+          if-no-files-found: error

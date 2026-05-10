@@ -1,4 +1,4 @@
-# enc2sop Platform Launch Assessment
+﻿# enc2sop Platform Launch Assessment
 
 Date: `2026-05-06`
 Project root: `D:\Download\gaming\new_program\data_helper\6_so_enc`
@@ -253,9 +253,25 @@ Resolution status (2026-05-07):
 
 The current repo still behaves like a set of engineer-facing scripts rather than a single coherent platform product.
 
+Progress status (2026-05-09):
+
+- Operator-facing product documentation baseline is now complete (`ENC-P1-016`):
+  - `README.md` now presents `soenc` as the preferred platform entrypoint and centers the mainline release flow.
+  - `USAGE_MANUAL.md` now documents the end-to-end operator runbook for `protect/build/verify/package/release`.
+  - `QRCODE_AIRGAP_MANUAL.md` now positions airgap/OCR workflows under optional `soenc transport` plugin commands and preserves sidecar-first auto recovery policy.
+
 ### [P1] G-003 Incomplete Release Packaging Story
 
 There is no normalized signed release bundle structure for customers or downstream product teams.
+
+Progress status (2026-05-09):
+
+- Release-bundle contract is now implemented for mainline packaging (`ENC-P1-013`):
+  - `soenc package` emits versioned `release_bundle.json` (`enc2sop-release-bundle/v1`) alongside copied release artifacts.
+  - bundle metadata captures signed-manifest state, runtime fingerprint records, native/runtime/init artifact lists, and key/config/package metadata context.
+  - packaging now fails closed if runtime-delivery validation metadata is incomplete when runtime files are present.
+  - packaging can enforce signed manifests (`--require-manifest-signature` / `keys.require_manifest_signature`) for release output.
+  - license sidecars declared by manifest are treated as required release artifacts and copied with path-safety checks.
 
 ## 6. Target Platform Architecture
 
@@ -338,10 +354,124 @@ Current go-live gate note (2026-05-07):
 - As of 2026-05-08 (iteration 3), runtime native-loader trust boundaries are tightened with fail-closed module-name/origin/path checks and runtime API marker/version contract validation.
 - As of 2026-05-09 (iteration 4), runtime authenticity is bound to manifest-linked compiled runtime fingerprints, and native-loader stubs fail closed on runtime digest/path mismatch.
 - As of 2026-05-09 (iteration 5), `ENC-P1-011` is completed with explicit mixed-platform suffix policy and trusted-relocation guardrails enforced in both runtime-delivery validation and native-loader stubs.
-- Remaining critical go-live work is productization progression (`ENC-P1-012` unified CLI entrypoint, then `ENC-P1-013` release bundle contract).
+- With `ENC-P1-012` through `ENC-P1-015` complete, no open P0 technical gate items remain; remaining launch-readiness focus is operator documentation/runbook completion (`ENC-P1-016`).
+- As of 2026-05-09 (iteration 8), `ENC-P1-014` is completed with optional transport plugin wiring:
+  - unified CLI now exposes `soenc transport ...` through an explicit plugin registry and transport plugin entrypoint.
+  - transport command loading is fail-closed and isolated from mainline protect/build/package/verify command paths.
+  - mainline platform command surface remains independent from OCR transport plugin availability.
+- As of 2026-05-09 (iteration 9), `ENC-P1-015` is completed with sidecar-first recovery ordering hardening:
+  - auto recovery/extraction now deterministically prioritizes sidecar decode before OCR providers.
+  - manifest-guided structured extraction is preferred ahead of external/generic OCR when manifest structure is available.
+  - external OCR provider path remains optional and now sits behind sidecar/structured candidates but ahead of generic OCR fallback when sidecar is unavailable.
+- As of 2026-05-09 (iteration 10), `ENC-P1-016` is completed:
+  - operator-facing mainline runbooks are aligned to unified `soenc protect/build/package/verify` command paths.
+  - transport workflows are documented as optional plugin scope (`soenc transport ...`) and no longer presented as mandatory product flow.
+  - remaining launch risk is shifted from baseline documentation gaps to final operational rollout execution and release governance.
+- As of 2026-05-09 (iteration 11), `ENC-P0-009` release-governance slice is completed:
+  - unified CLI now includes first-class `soenc release` command for mainline handoff gate execution.
+  - release command fail-closes on release bundle/manifest/runtime-integrity mismatch and writes `release_receipt.json`.
+  - release runtime artifacts are re-verified via fingerprint hash checks at handoff time.
+  - `soenc.toml` now supports `[build].release_dir` alias for release output routing (mutually exclusive with `dist_dir`).
+- As of 2026-05-09 (iteration 12), `ENC-P0-010` release approval gate slice is completed:
+  - `soenc release` now supports an optional fail-closed signed approval policy for CI promotion/signoff workflows.
+  - release approval metadata is bound to the exact `release_bundle.json` digest and verified by HMAC signature before receipt generation.
+  - `soenc.toml` now supports `[release]` policy defaults (`require_approval`, `approval_file`, `approval_key_file`, `approval_key_id`).
+  - `release_receipt.json` now records approval verification state for downstream audit.
+- As of 2026-05-10 (iteration 13), `ENC-P0-011` CI-promotion artifact generation slice is completed:
+  - unified CLI now includes `soenc approve-release` for deterministic generation of signed `release_approval.json`.
+  - approval artifact generation is fail-closed on missing approval signing key or empty approver set.
+  - generated approval metadata is explicitly bound to current `release_bundle.json` digest before release gate execution.
+  - operator runbook now defines `package -> approve-release -> release` as the promotion-signoff sequence.
+- As of 2026-05-10 (iteration 14), `ENC-P0-012` CI promotion enforcement slice is completed:
+  - added `.github/workflows/release_promotion.yml` as a fail-closed promotion workflow on `main` and `release/**`.
+  - workflow now executes `soenc approve-release` using CI-managed approval key secret and then enforces `soenc release --require-release-approval`.
+  - promotion artifacts (`release_bundle.json`, `release_approval.json`, `release_receipt.json`) are always uploaded with `if-no-files-found: error`.
+  - operator runbook now includes rollout/rollback checklist for protected-environment reviewers and approval-key rotation custody.
+- As of 2026-05-10 (iteration 15), `ENC-P0-013` promotion rollout audit slice is completed:
+  - unified CLI now includes `soenc audit-promotion` for fail-closed validation of branch protection/environment-reviewer/approval-secret rollout evidence.
+  - repository now includes baseline promotion policy contract `docs/PROMOTION_ROLLOUT_POLICY.json` with required checks for `main`, `release/**`, `production-promotion`, and `SOENC_RELEASE_APPROVAL_KEY_B64`.
+  - audit output now writes machine-readable `promotion_audit_report.json` with categorized failure reasons for operational readiness gating.
+  - remaining launch risk is reduced to external platform-state execution (actual branch/environment settings and secret custody), with repository enforcement and policy verification now codified.
+- As of 2026-05-10 (iteration 16), `ENC-P0-014` promotion evidence collection automation is completed:
+  - unified CLI now includes `soenc collect-promotion-evidence` to gather policy-targeted rollout evidence from GitHub APIs without manual JSON assembly.
+  - evidence collector writes `enc2sop-promotion-evidence/v1` payloads directly consumable by `soenc audit-promotion`.
+  - collector is fail-closed on missing branch-rule/status-check rollout objects, missing required secret visibility evidence, and GitHub API permission/access failures.
+  - operational launch risk is now primarily external rollout execution discipline (actual branch protection, environment reviewers, and secret custody), with automated evidence generation/audit enforcement codified in-repo.
+- As of 2026-05-10 (iteration 17), `ENC-P0-015` promotion dry-run gate orchestration is completed:
+  - unified CLI now includes `soenc promotion-dry-run` to execute promotion evidence collection and policy audit as one fail-closed command.
+  - dry-run command supports:
+    - online mode (`collect-promotion-evidence` + `audit-promotion` in one call),
+    - offline mode (`--skip-collect`) for auditing pre-collected evidence artifacts.
+  - command returns non-zero when collection requirements fail, policy audit fails, or required evidence file is missing in offline mode.
+  - operator docs now define `promotion-dry-run` as the preferred rollout-validation gate before protected branch promotion activation.
+- As of 2026-05-10 (iteration 18), `ENC-P0-016` has an execution-ready CI vertical slice landed:
+  - `.github/workflows/release_promotion.yml` now runs `soenc promotion-dry-run` after signed release gate enforcement and uploads `promotion_evidence.json` + `promotion_audit_report.json` artifacts.
+  - workflow now supports rehearsal controls through `workflow_dispatch` inputs:
+    - `skip_promotion_collect` for offline audit mode on pre-collected evidence,
+    - `rotation_rehearsal` for stale-key rejection verification.
+  - optional stale-key rehearsal now fail-closes when enabled:
+    - requires `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64`,
+    - fails the workflow if old-key validation unexpectedly passes.
+  - remaining launch risk is external operational execution:
+    - real protected-branch/environment run evidence,
+    - real key-rotation rehearsal artifacts and rollback-proof records.
+- As of 2026-05-10 (iteration 19), `ENC-P0-016` adds structured rotation rehearsal evidence capture in CI:
+  - promotion workflow now emits `rotation_rehearsal_report.json` (`enc2sop-rotation-rehearsal/v1`) with explicit requested/executed/outcome/status fields.
+  - stale-key rehearsal fail states (`blocked`/`failed`) and pass state (`passed`) are persisted as artifacts.
+  - artifact upload now runs under `always()` so rehearsal evidence is retained even on fail-closed execution.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-10 (iteration 20), `ENC-P0-016` adds fail-closed promotion artifact integrity verification in CI:
+  - unified CLI now includes `soenc verify-promotion-artifacts` for schema/integrity validation of:
+    - `release_bundle.json`, `release_approval.json`, `release_receipt.json`,
+    - `promotion_evidence.json`, `promotion_audit_report.json`,
+    - `rotation_rehearsal_report.json`.
+  - promotion workflow now executes `verify-promotion-artifacts` after `promotion-dry-run` and optional rotation rehearsal, and enforces `--require-rotation-pass` during rotation rehearsal runs.
+  - promotion policy workflow-fragment contract now requires `verify-promotion-artifacts` command presence.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-10 (iteration 21), `ENC-P0-016` adds deterministic promotion run receipt evidence capture:
+  - `soenc verify-promotion-artifacts` now emits `promotion_run_receipt.json` (`enc2sop-promotion-run-receipt/v1`) by default.
+  - run receipt includes SHA256 digests for release/promotion/rotation/audit artifacts plus GitHub run context (`GITHUB_RUN_ID`, `GITHUB_SHA`, `GITHUB_REF`, when present).
+  - promotion workflow now exposes `promotion_artifact_audit_report_file` and `promotion_run_receipt_file` inputs, passes them into `verify-promotion-artifacts`, and uploads both artifacts under `always()`.
+  - promotion policy workflow-fragment contract now requires promotion run receipt wiring fragments.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-10 (iteration 22), `ENC-P0-016` adds fail-closed CI-context binding for archived promotion evidence:
+  - `collect-promotion-evidence` now records `github_context` in `promotion_evidence.json`.
+  - `soenc verify-promotion-artifacts` now supports `--require-ci-context-match` to enforce evidence/run identity consistency:
+    - requires `promotion_evidence.github_context` values for `GITHUB_REPOSITORY`, `GITHUB_REF`, and `GITHUB_RUN_ID` to match the current workflow run,
+    - enforces `GITHUB_SHA` match when both evidence and runtime SHA values are present.
+  - promotion workflow now enables `--require-ci-context-match` for the CI artifact integrity gate.
+  - promotion policy contract now requires `--require-ci-context-match` workflow fragment presence.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-10 (iteration 23), `ENC-P0-016` adds fail-closed promotion-report input digest binding:
+  - `soenc audit-promotion` now writes `inputs` metadata into `promotion_audit_report.json`, including absolute input file paths and SHA256 digests for:
+    - policy file,
+    - evidence file,
+    - workflow file.
+  - `soenc verify-promotion-artifacts` now validates that `promotion_audit_report.inputs` binds to the exact `promotion_evidence.json` artifact under verification:
+    - `inputs.evidence_file` must match the audited evidence path,
+    - `inputs.evidence_sha256` must match the current evidence file digest.
+  - this closes the tamper window where an audit pass report could previously be reused against a different evidence payload.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
 
 ## 9. Assessment Status
 
 Status: `[APPROVED BASELINE]`
 
 This file is the current architectural truth for future iterations until a later iteration updates it explicitly.
+
+
