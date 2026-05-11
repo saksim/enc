@@ -722,6 +722,91 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             approval_payload["signature"]["digest_hex"],
         )
 
+    def test_write_release_receipt_preserves_signed_approval_github_context(self):
+        root = self.make_case_root("release_receipt_approval_github_context")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        runtime_native = release_dir / "pkg" / "enc_rt_pkg_1234.pyd"
+        runtime_native.write_bytes(b"runtime-binary")
+        (release_dir / "pkg" / "mod.pyd").write_bytes(b"module-binary")
+        runtime_digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+        (release_dir / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_files": ["pkg/enc_rt_pkg_1234.py"],
+                    "runtime_delivery": {
+                        "validated": True,
+                        "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+                    "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+                    "build_manifest": {
+                        "relative_path": "build_manifest.json",
+                        "is_signed": False,
+                        "signature": None,
+                    },
+                    "bundle_contents": {
+                        "native_extension_files": ["pkg/enc_rt_pkg_1234.pyd", "pkg/mod.pyd"],
+                        "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                        "package_init_files": ["pkg/__init__.py"],
+                        "license_file": None,
+                    },
+                    "runtime_integrity": {
+                        "validated": True,
+                        "compiled_runtime_fingerprints": [
+                            {
+                                "module_name": "enc_rt_pkg_1234",
+                                "source_relative_path": "pkg/enc_rt_pkg_1234.py",
+                                "compiled_relative_path": "pkg/enc_rt_pkg_1234.pyd",
+                                "package_relative_path": "pkg",
+                                "algorithm": "sha256",
+                                "digest_hex": runtime_digest,
+                            }
+                        ],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        github_context = {
+            "GITHUB_REPOSITORY": "acme/demo",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_SHA": "deadbeef",
+            "GITHUB_RUN_ID": "12345",
+            "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_EVENT_NAME": "push",
+        }
+        with mock.patch.dict(os.environ, github_context, clear=False):
+            approval_path, approval_payload = encryption_helper.write_release_approval(
+                dist_dir=release_dir,
+                approvers=["ops-a"],
+                approval_key=RELEASE_APPROVAL_KEY,
+                approval_key_id="ops-approval-main",
+            )
+        self.assertEqual(approval_payload["github_context"], github_context)
+
+        _, receipt = encryption_helper.write_release_receipt(
+            dist_dir=release_dir,
+            require_approval=True,
+            approval_file=approval_path,
+            approval_key=RELEASE_APPROVAL_KEY,
+        )
+
+        self.assertEqual(receipt["release_approval_github_context"], github_context)
+
     def test_write_release_receipt_rejects_approval_digest_mismatch(self):
         root = self.make_case_root("release_receipt_approval_digest_mismatch")
         release_dir = root / "release"
@@ -823,6 +908,46 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         signature = payload.get("signature") or {}
         self.assertEqual(signature.get("algorithm"), encryption_helper.SIGNATURE_ALGORITHM_HMAC_SHA256)
         self.assertEqual(signature.get("key_id"), "ops-approval-main")
+        signed_payload = dict(payload)
+        digest_hex = signed_payload.pop("signature")["digest_hex"]
+        expected_digest = hmac.new(key, encryption_helper._canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
+        self.assertEqual(digest_hex, expected_digest)
+
+    def test_write_release_approval_signs_github_context_when_available(self):
+        root = self.make_case_root("release_approval_github_context")
+        release_dir = root / "release"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        (release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
+                    "layout_version": encryption_helper.RELEASE_LAYOUT_VERSION,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        key = b"abcdef0123456789abcdef0123456789"
+        github_context = {
+            "GITHUB_REPOSITORY": "acme/demo",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_SHA": "deadbeef",
+            "GITHUB_RUN_ID": "12345",
+            "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_EVENT_NAME": "push",
+        }
+
+        with mock.patch.dict(os.environ, github_context, clear=False):
+            _, payload = encryption_helper.write_release_approval(
+                dist_dir=release_dir,
+                approvers=["ops-a"],
+                approval_key=key,
+                approval_key_id="ops-approval-main",
+            )
+
+        self.assertEqual(payload["github_context"], github_context)
         signed_payload = dict(payload)
         digest_hex = signed_payload.pop("signature")["digest_hex"]
         expected_digest = hmac.new(key, encryption_helper._canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()

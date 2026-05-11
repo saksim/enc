@@ -93,7 +93,9 @@ def _validate_release_artifacts(
     approval_key: Optional[bytes],
     expected_approval_key_id: Optional[str],
     require_approval_signature: bool,
+    require_ci_context_match: bool,
 ) -> None:
+    runtime_context = _github_context_snapshot() if require_ci_context_match else None
     bundle_path = release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME
     approval_path = release_dir / "release_approval.json"
     receipt_path = release_dir / encryption_helper.RELEASE_RECEIPT_FILENAME
@@ -169,6 +171,14 @@ def _validate_release_artifacts(
             failures.append(
                 "release approval verification key is required when --require-release-approval-signature is enabled"
             )
+    if require_ci_context_match:
+        if runtime_context:
+            _validate_ci_context_binding(
+                runtime_context=runtime_context,
+                artifact_context=approval_payload.get("github_context"),
+                context_label="release_approval.github_context",
+                failures=failures,
+            )
 
     receipt_payload = _load_json_object(receipt_path, "release receipt")
     if receipt_payload.get("schema") != encryption_helper.RELEASE_RECEIPT_SCHEMA:
@@ -210,6 +220,21 @@ def _validate_release_artifacts(
         signature_key_id = str(signature.get("key_id") or "").strip()
         if signature_key_id and receipt_key_id != signature_key_id:
             failures.append("release_receipt.release_approval_key_id does not match release_approval.signature.key_id")
+    receipt_approval_context = receipt_payload.get("release_approval_github_context")
+    approval_context = approval_payload.get("github_context")
+    if isinstance(approval_context, dict):
+        if receipt_approval_context != approval_context:
+            failures.append("release_receipt.release_approval_github_context does not match release_approval.github_context")
+    elif receipt_approval_context is not None:
+        failures.append("release_receipt.release_approval_github_context present but release_approval.github_context is missing")
+    if require_ci_context_match:
+        if runtime_context:
+            _validate_ci_context_binding(
+                runtime_context=runtime_context,
+                artifact_context=receipt_approval_context,
+                context_label="release_receipt.release_approval_github_context",
+                failures=failures,
+            )
     runtime_verified = receipt_payload.get("runtime_artifacts_verified")
     if isinstance(runtime_verified, bool) or not isinstance(runtime_verified, int) or runtime_verified < 1:
         failures.append("release_receipt.runtime_artifacts_verified must be an integer >= 1")
@@ -756,6 +781,7 @@ def run_promotion_artifact_audit(
         approval_key=release_approval_key,
         expected_approval_key_id=release_approval_key_id,
         require_approval_signature=require_release_approval_signature,
+        require_ci_context_match=require_ci_context_match,
     )
     _validate_promotion_evidence(evidence_path, failures)
     evidence_payload = _load_json_object(evidence_path, "promotion evidence")

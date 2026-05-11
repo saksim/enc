@@ -261,7 +261,7 @@ Behavior:
 
 1. Validates `release_bundle.json`, `release_approval.json`, and `release_receipt.json` schema-critical fields.
 2. Verifies `release_approval.release_bundle_sha256` matches current `release_bundle.json`.
-3. Verifies `release_receipt.json` is bound to the current `release_bundle.json` and `release_approval.json` through SHA256 digest fields, and that the receipt approval key/signature metadata matches the approval artifact.
+3. Verifies `release_receipt.json` is bound to the current `release_bundle.json` and `release_approval.json` through SHA256 digest fields, and that the receipt approval key/signature/GitHub-context metadata matches the approval artifact.
 4. Optional release-approval signature verification:
    - provide `--release-approval-key-file` or `--release-approval-key-b64` to validate `release_approval.signature.digest_hex` against canonical payload bytes.
    - optional `--release-approval-key-id` enforces signature key-id pinning.
@@ -270,6 +270,7 @@ Behavior:
 6. Validates rotation report schema and status fields.
 7. Optional `--require-rotation-pass` enforces `status=passed` and `old_key_rejected=true`.
 8. Optional `--require-ci-context-match` enforces CI-context binding across:
+   - signed `release_approval.github_context` plus mirrored `release_receipt.release_approval_github_context` for the approval artifact produced by the governed workflow run.
    - `promotion_evidence.github_context` identity (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) plus required workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) and optional `GITHUB_SHA`/`GITHUB_RUN_ATTEMPT` checks when both sides are present.
    - `rotation_rehearsal_report.json` run metadata (`workflow_run_id`, `workflow_ref`, `workflow_sha`, `workflow_run_attempt`, `workflow_name`, `workflow_event`) against the current workflow run context when runtime values are present.
    - pre-existing `promotion_run_receipt.json` `github_context` identity (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) plus required workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) and optional `GITHUB_SHA`/`GITHUB_RUN_ATTEMPT` checks when both sides are present.

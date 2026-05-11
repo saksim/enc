@@ -74,6 +74,15 @@ RELEASE_RECEIPT_SCHEMA = "enc2sop-release-receipt/v1"
 RELEASE_RECEIPT_FILENAME = "release_receipt.json"
 RELEASE_APPROVAL_SCHEMA = "enc2sop-release-approval/v1"
 DEFAULT_RELEASE_APPROVAL_KEY_ID = "release-approval-hmac-v1"
+GITHUB_CONTEXT_KEYS = (
+    "GITHUB_REPOSITORY",
+    "GITHUB_REF",
+    "GITHUB_SHA",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_WORKFLOW",
+    "GITHUB_EVENT_NAME",
+)
 
 
 class SymbolRange(NamedTuple):
@@ -1214,6 +1223,15 @@ def _utc_now_iso8601_seconds():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _github_context_snapshot():
+    context = {}
+    for key in GITHUB_CONTEXT_KEYS:
+        value = os.environ.get(key)
+        if value:
+            context[key] = value
+    return context
+
+
 def _select_release_runtime_fingerprints(manifest, native_relative_set):
     delivery = (manifest.get("runtime_delivery") or {}) if isinstance(manifest, dict) else {}
     entries = delivery.get("compiled_runtime_fingerprints")
@@ -1397,6 +1415,9 @@ def write_release_approval(
         "release_bundle_sha256": _sha256_file(bundle_path),
         "approvers": normalized_approvers,
     }
+    github_context = _github_context_snapshot()
+    if github_context:
+        payload["github_context"] = github_context
     notes_text = str(notes or "").strip()
     if notes_text:
         payload["notes"] = notes_text
@@ -1551,6 +1572,7 @@ def write_release_receipt(
     current_bundle_digest = _sha256_file(bundle_path)
     release_approval_sha256 = None
     approval_signature_digest = None
+    approval_github_context = None
 
     if require_approval:
         approval_path = normalize_path(approval_file) if approval_file is not None else (release_dir / "release_approval.json")
@@ -1599,6 +1621,7 @@ def write_release_receipt(
         approval_file_value = str(approval_path)
         release_approval_sha256 = _sha256_file(approval_path)
         approval_signature_digest = digest_hex
+        approval_github_context = approval_payload.get("github_context")
     else:
         approval_verified = False
         actual_approval_key_id = None
@@ -1635,6 +1658,7 @@ def write_release_receipt(
         "release_approval_sha256": release_approval_sha256,
         "release_approval_key_id": actual_approval_key_id,
         "release_approval_signature_digest": approval_signature_digest,
+        "release_approval_github_context": approval_github_context if isinstance(approval_github_context, dict) else None,
         "package_metadata": package_payload,
     }
     receipt_path = release_receipt_path(release_dir)

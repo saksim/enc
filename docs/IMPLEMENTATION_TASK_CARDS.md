@@ -1231,6 +1231,34 @@ Rationale:
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 32):
+  - Hardened strict CI-context provenance for release approval artifacts:
+    - `encryption_helper.write_release_approval(...)` now embeds available GitHub workflow context into signed `release_approval.json`.
+    - `encryption_helper.write_release_receipt(...)` now records `release_approval_github_context` after validating the signed approval.
+    - `enc2sop/promotion_artifacts.py` now enforces, under `--require-ci-context-match`, that:
+      - `release_approval.github_context` matches the current governed workflow run,
+      - `release_receipt.release_approval_github_context` mirrors the approval artifact and also matches the current workflow run.
+    - this reduces approval replay risk where a valid signed approval from another governed run/workflow could otherwise be archived with current promotion evidence.
+  - Updated docs/policy contracts:
+    - `README.md` and `USAGE_MANUAL.md` document signed approval GitHub-context binding in `verify-promotion-artifacts`.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires GitHub context fragments used by the approval provenance contract.
+  - Added focused coverage:
+    - `tests/test_encryption_helper.py` verifies approval generation signs GitHub context and release receipts preserve it.
+    - `tests/test_promotion_artifacts.py` verifies strict artifact gates reject mismatched release approval context.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py` => `62 passed, 4 skipped`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 33):
+  - Tightened promotion artifact gate consistency:
+    - `enc2sop/promotion_artifacts.py` now snapshots GitHub runtime context once per validation pass and reuses that view for both release approval and release receipt CI-context checks.
+    - this keeps the strict approval provenance check and mirrored receipt provenance check aligned to the same runtime state within a single verification run.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `91 passed, 4 skipped`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
 
 ### CARD `ENC-P0-013`
 
