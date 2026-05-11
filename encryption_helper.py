@@ -1548,6 +1548,10 @@ def write_release_receipt(
         if digest_hex != actual_digest:
             raise RuntimeError("release runtime fingerprint mismatch for artifact: {0}".format(runtime_rel))
 
+    current_bundle_digest = _sha256_file(bundle_path)
+    release_approval_sha256 = None
+    approval_signature_digest = None
+
     if require_approval:
         approval_path = normalize_path(approval_file) if approval_file is not None else (release_dir / "release_approval.json")
         if not approval_path.exists():
@@ -1561,7 +1565,6 @@ def write_release_receipt(
         approval_digest = str(approval_payload.get("release_bundle_sha256") or "").strip().lower()
         if len(approval_digest) != 64 or any(ch not in "0123456789abcdef" for ch in approval_digest):
             raise RuntimeError("release approval file has invalid release_bundle_sha256")
-        current_bundle_digest = _sha256_file(bundle_path)
         if approval_digest != current_bundle_digest:
             raise RuntimeError("release approval bundle digest mismatch")
         approvers = approval_payload.get("approvers")
@@ -1594,6 +1597,8 @@ def write_release_receipt(
             )
         approval_verified = True
         approval_file_value = str(approval_path)
+        release_approval_sha256 = _sha256_file(approval_path)
+        approval_signature_digest = digest_hex
     else:
         approval_verified = False
         actual_approval_key_id = None
@@ -1614,6 +1619,7 @@ def write_release_receipt(
         "release_root": str(release_dir),
         "build_manifest_relative_path": "build_manifest.json",
         "release_bundle_relative_path": RELEASE_BUNDLE_FILENAME,
+        "release_bundle_sha256": current_bundle_digest,
         "bundle_schema": RELEASE_BUNDLE_SCHEMA,
         "layout_version": RELEASE_LAYOUT_VERSION,
         "manifest_signature_required": bool(required_manifest_signature),
@@ -1626,7 +1632,9 @@ def write_release_receipt(
         "release_approval_required": bool(require_approval),
         "release_approval_verified": approval_verified,
         "release_approval_file": approval_file_value,
+        "release_approval_sha256": release_approval_sha256,
         "release_approval_key_id": actual_approval_key_id,
+        "release_approval_signature_digest": approval_signature_digest,
         "package_metadata": package_payload,
     }
     receipt_path = release_receipt_path(release_dir)

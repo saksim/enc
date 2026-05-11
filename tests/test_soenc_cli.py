@@ -946,7 +946,13 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(mocked_verify.call_args.kwargs["promotion_evidence_file"], str(root / "promotion_evidence.json"))
         self.assertEqual(mocked_verify.call_args.kwargs["promotion_report_file"], str(root / "promotion_audit_report.json"))
         self.assertEqual(mocked_verify.call_args.kwargs["rotation_report_file"], str(root / "rotation_rehearsal_report.json"))
+        self.assertIsNone(mocked_verify.call_args.kwargs["release_approval_key_file"])
+        self.assertIsNone(mocked_verify.call_args.kwargs["release_approval_key_b64"])
+        self.assertIsNone(mocked_verify.call_args.kwargs["release_approval_key_id"])
+        self.assertIsNone(mocked_verify.call_args.kwargs["promotion_policy_file"])
+        self.assertIsNone(mocked_verify.call_args.kwargs["promotion_workflow_file"])
         self.assertIsNone(mocked_verify.call_args.kwargs["run_receipt_file"])
+        self.assertFalse(mocked_verify.call_args.kwargs["require_release_approval_signature"])
         self.assertFalse(mocked_verify.call_args.kwargs["require_rotation_pass"])
         self.assertFalse(mocked_verify.call_args.kwargs["require_ci_context_match"])
 
@@ -976,14 +982,62 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                     str(root / "promotion_audit_report.json"),
                     "--rotation-report-file",
                     str(root / "rotation_rehearsal_report.json"),
+                    "--release-approval-key-b64",
+                    "Zm9v",
+                    "--release-approval-key-id",
+                    "ops-approval-main",
+                    "--require-release-approval-signature",
                     "--require-rotation-pass",
                     "--require-ci-context-match",
                 ]
             )
 
         self.assertEqual(exit_code, 1)
+        self.assertEqual(mocked_verify.call_args.kwargs["release_approval_key_b64"], "Zm9v")
+        self.assertEqual(mocked_verify.call_args.kwargs["release_approval_key_id"], "ops-approval-main")
+        self.assertTrue(mocked_verify.call_args.kwargs["require_release_approval_signature"])
         self.assertTrue(mocked_verify.call_args.kwargs["require_rotation_pass"])
         self.assertTrue(mocked_verify.call_args.kwargs["require_ci_context_match"])
+
+    def test_verify_promotion_artifacts_command_wires_policy_and_workflow_overrides(self):
+        root = self.make_case_root("soenc_verify_promotion_artifacts_policy_workflow")
+        report_path = root / "promotion_artifact_audit_report.json"
+        fake_report = {
+            "schema": "enc2sop-promotion-artifact-audit/v1",
+            "passed": True,
+            "failures": [],
+            "summary": {"total_failures": 0},
+        }
+        policy_path = root / "policy_override.json"
+        workflow_path = root / "workflow_override.yml"
+        with mock.patch.object(
+            promotion_artifacts,
+            "run_promotion_artifact_audit",
+            autospec=True,
+            return_value=(report_path, fake_report),
+        ) as mocked_verify:
+            exit_code = soenc_cli.main(
+                [
+                    "verify-promotion-artifacts",
+                    "--dist-dir",
+                    str(root / "release"),
+                    "--promotion-evidence-file",
+                    str(root / "promotion_evidence.json"),
+                    "--promotion-report-file",
+                    str(root / "promotion_audit_report.json"),
+                    "--rotation-report-file",
+                    str(root / "rotation_rehearsal_report.json"),
+                    "--promotion-policy-file",
+                    str(policy_path),
+                    "--promotion-workflow-file",
+                    str(workflow_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_verify.assert_called_once()
+        self.assertEqual(mocked_verify.call_args.kwargs["promotion_policy_file"], str(policy_path))
+        self.assertEqual(mocked_verify.call_args.kwargs["promotion_workflow_file"], str(workflow_path))
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ Primary commands:
 5. `soenc release`
 6. `soenc approve-release`
 7. `soenc promotion-dry-run`
-8. `soenc verify-promotion-artifacts` (emits `promotion_artifact_audit_report.json` and `promotion_run_receipt.json`; supports strict `--require-ci-context-match` and report/evidence digest binding checks)
+8. `soenc verify-promotion-artifacts` (emits `promotion_artifact_audit_report.json` and `promotion_run_receipt.json`; supports strict `--require-ci-context-match` across promotion evidence identity, workflow/event binding, rotation report run metadata, and pre-existing run-receipt context with optional SHA/attempt checks; supports report input digest binding checks for policy/workflow/evidence; verifies release receipt digest binding to the archived bundle/approval; and can enforce release-approval signature verification via `--require-release-approval-signature` + approval key inputs)
 9. `soenc transport` (optional plugin)
 
 ## Operator Quickstart

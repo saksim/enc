@@ -708,6 +708,19 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue(receipt["release_approval_required"])
         self.assertTrue(receipt["release_approval_verified"])
         self.assertEqual(receipt["release_approval_key_id"], "ops-approval-main")
+        self.assertEqual(
+            receipt["release_bundle_sha256"],
+            encryption_helper._sha256_file(release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME),
+        )
+        self.assertEqual(
+            receipt["release_approval_sha256"],
+            encryption_helper._sha256_file(release_dir / "release_approval.json"),
+        )
+        approval_payload = json.loads((release_dir / "release_approval.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            receipt["release_approval_signature_digest"],
+            approval_payload["signature"]["digest_hex"],
+        )
 
     def test_write_release_receipt_rejects_approval_digest_mismatch(self):
         root = self.make_case_root("release_receipt_approval_digest_mismatch")

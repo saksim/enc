@@ -467,6 +467,86 @@ Current go-live gate note (2026-05-07):
     - run protected-branch/environment workflow against live rollout controls,
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 24), `ENC-P0-016` adds fail-closed policy/workflow digest binding at the promotion artifact gate:
+  - `soenc verify-promotion-artifacts` now validates `promotion_audit_report.inputs` against all three audited inputs under verification:
+    - `inputs.policy_file` + `inputs.policy_sha256`,
+    - `inputs.workflow_file` + `inputs.workflow_sha256`,
+    - `inputs.evidence_file` + `inputs.evidence_sha256`.
+  - CI workflow now wires shared policy/workflow inputs across both `promotion-dry-run` and `verify-promotion-artifacts`:
+    - `promotion_policy_file` -> `PROMOTION_POLICY_FILE`,
+    - `promotion_workflow_file` -> `PROMOTION_WORKFLOW_FILE`.
+  - promotion policy contract now requires these workflow fragments.
+  - this closes the remaining audit-input substitution window where policy/workflow files could diverge between audit and artifact verification.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 25), `ENC-P0-016` tightens strict CI-context replay resistance for archived promotion evidence:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now additionally enforces `GITHUB_RUN_ATTEMPT` match when both runtime and evidence context values are present.
+  - promotion policy workflow-fragment contract now requires `GITHUB_RUN_ATTEMPT` wiring visibility.
+  - this reduces replay ambiguity across repeated workflow attempts of the same run while preserving compatibility for evidence payloads that omit run-attempt context.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 26), `ENC-P0-016` adds rotation-report CI-context binding under strict artifact verification:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now validates rotation rehearsal report run metadata against current workflow context:
+    - `workflow_run_id` vs `GITHUB_RUN_ID`,
+    - `workflow_ref` vs `GITHUB_REF`,
+    - `workflow_sha` vs `GITHUB_SHA`,
+    - `workflow_run_attempt` vs `GITHUB_RUN_ATTEMPT`.
+  - verification now fail-closes on missing/mismatched rotation metadata for available runtime context keys, reducing stale rotation-report replay risk.
+  - promotion policy workflow-fragment contract now requires these rotation metadata fragments in `.github/workflows/release_promotion.yml`.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 28), `ENC-P0-016` adds pre-existing run-receipt CI-context binding under strict artifact verification:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now also validates `promotion_run_receipt.github_context` when a prior `promotion_run_receipt.json` exists before rewrite.
+  - verification fail-closes when required identity keys mismatch (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) and when optional run keys mismatch where both sides are present (`GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`).
+  - this tightens replay resistance for archived/tampered run-receipt reuse across protected-branch reruns.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 29), `ENC-P0-016` tightens strict CI-context governance binding for archived promotion evidence:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now requires workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) for:
+    - `promotion_evidence.github_context`,
+    - pre-existing `promotion_run_receipt.github_context`.
+  - rotation rehearsal evidence binding now includes:
+    - `rotation_rehearsal_report.workflow_name` vs `GITHUB_WORKFLOW`,
+    - `rotation_rehearsal_report.workflow_event` vs `GITHUB_EVENT_NAME`.
+  - `.github/workflows/release_promotion.yml` now writes `workflow_name` and `workflow_event` into `rotation_rehearsal_report.json` for both initialization and executed rehearsal states.
+  - this reduces acceptance risk for artifacts produced from non-governed workflow/event contexts while preserving compatibility for optional SHA/run-attempt checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 30), `ENC-P0-016` adds cryptographic release-approval signature verification to the promotion artifact gate:
+  - `soenc verify-promotion-artifacts` now supports release-approval signature verification inputs:
+    - `--release-approval-key-file`,
+    - `--release-approval-key-b64`,
+    - `--release-approval-key-id`,
+    - `--require-release-approval-signature`.
+  - promotion artifact validation now verifies `release_approval.signature.digest_hex` against canonical payload bytes when a verification key is provided, and fail-closes when signature verification is required but key material is missing.
+  - CI promotion workflow now enforces release-approval signature verification in the artifact gate using CI approval-key inputs.
+  - promotion workflow policy contract now requires release-approval signature verification fragments.
+  - this closes the residual gap where artifact verification previously checked approval schema/digest binding but did not enforce cryptographic signature verification at that final CI artifact gate.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-11 (iteration 31), `ENC-P0-016` adds release-receipt provenance binding to the promotion artifact gate:
+  - `release_receipt.json` now records:
+    - `release_bundle_sha256`,
+    - `release_approval_sha256`,
+    - `release_approval_signature_digest`.
+  - `soenc verify-promotion-artifacts` now fail-closes when the release receipt does not bind to the current archived `release_bundle.json` and `release_approval.json`, or when receipt approval key/signature metadata diverges from `release_approval.json`.
+  - this closes a remaining artifact-substitution window where an old receipt with `release_approval_verified=true` could be reused against a different approval artifact.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
 
 ## 9. Assessment Status
 

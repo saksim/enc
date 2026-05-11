@@ -261,21 +261,37 @@ Behavior:
 
 1. Validates `release_bundle.json`, `release_approval.json`, and `release_receipt.json` schema-critical fields.
 2. Verifies `release_approval.release_bundle_sha256` matches current `release_bundle.json`.
-3. Validates promotion evidence/report schema state and requires `promotion_audit_report.passed=true`.
-4. Validates rotation report schema and status fields.
-5. Optional `--require-rotation-pass` enforces `status=passed` and `old_key_rejected=true`.
-6. Optional `--require-ci-context-match` enforces `promotion_evidence.github_context` match for `GITHUB_REPOSITORY`, `GITHUB_REF`, and `GITHUB_RUN_ID` (plus `GITHUB_SHA` when both values are present).
-7. Writes `promotion_artifact_audit_report.json` and `promotion_run_receipt.json` and exits non-zero on any mismatch.
-8. Enforces promotion audit/evidence input binding:
+3. Verifies `release_receipt.json` is bound to the current `release_bundle.json` and `release_approval.json` through SHA256 digest fields, and that the receipt approval key/signature metadata matches the approval artifact.
+4. Optional release-approval signature verification:
+   - provide `--release-approval-key-file` or `--release-approval-key-b64` to validate `release_approval.signature.digest_hex` against canonical payload bytes.
+   - optional `--release-approval-key-id` enforces signature key-id pinning.
+   - `--require-release-approval-signature` fail-closes when no approval verification key is supplied.
+5. Validates promotion evidence/report schema state and requires `promotion_audit_report.passed=true`.
+6. Validates rotation report schema and status fields.
+7. Optional `--require-rotation-pass` enforces `status=passed` and `old_key_rejected=true`.
+8. Optional `--require-ci-context-match` enforces CI-context binding across:
+   - `promotion_evidence.github_context` identity (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) plus required workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) and optional `GITHUB_SHA`/`GITHUB_RUN_ATTEMPT` checks when both sides are present.
+   - `rotation_rehearsal_report.json` run metadata (`workflow_run_id`, `workflow_ref`, `workflow_sha`, `workflow_run_attempt`, `workflow_name`, `workflow_event`) against the current workflow run context when runtime values are present.
+   - pre-existing `promotion_run_receipt.json` `github_context` identity (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) plus required workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) and optional `GITHUB_SHA`/`GITHUB_RUN_ATTEMPT` checks when both sides are present.
+9. Writes `promotion_artifact_audit_report.json` and `promotion_run_receipt.json` and exits non-zero on any mismatch.
+10. Enforces promotion audit/evidence input binding:
    - `promotion_audit_report.inputs.evidence_file` must match the evidence artifact path under verification.
    - `promotion_audit_report.inputs.evidence_sha256` must match the evidence artifact digest.
+   - `promotion_audit_report.inputs.policy_file` / `policy_sha256` must match the policy file used by verification.
+   - `promotion_audit_report.inputs.workflow_file` / `workflow_sha256` must match the workflow file used by verification.
 
 Optional:
 
 1. `--report-file`
 2. `--run-receipt-file`
-3. `--require-rotation-pass`
-4. `--require-ci-context-match`
+3. `--release-approval-key-file`
+4. `--release-approval-key-b64`
+5. `--release-approval-key-id`
+6. `--require-release-approval-signature`
+7. `--require-rotation-pass`
+8. `--require-ci-context-match`
+9. `--promotion-policy-file`
+10. `--promotion-workflow-file`
 
 Expected release directory includes:
 
@@ -418,6 +434,10 @@ The workflow enforces the signed approval gate in CI by running:
    - includes SHA256 digests for release/promotion/rotation/audit artifacts plus GitHub run context
 9. CI-context binding enforcement via `soenc verify-promotion-artifacts --require-ci-context-match`
    - ensures archived `promotion_evidence.json` context matches the current protected-branch run identity
+   - ensures archived `rotation_rehearsal_report.json` run metadata (including workflow name/event) matches the current workflow run identity
+   - ensures any pre-existing archived `promotion_run_receipt.json` context (including workflow name/event) matches the current workflow run identity before receipt rewrite
+10. promotion report input digest binding enforcement in `soenc verify-promotion-artifacts`
+   - workflow now passes `--promotion-policy-file` and `--promotion-workflow-file` so audit report policy/workflow digests are validated against the exact files under verification.
 
 ### 11.1 Required GitHub Configuration
 
@@ -439,8 +459,15 @@ The workflow enforces the signed approval gate in CI by running:
    - `status=passed` and `old_key_rejected=true` for successful rehearsal,
    - `status=blocked` when previous-key secret is missing,
    - `status=failed` if old key unexpectedly passes.
-8. Confirm `promotion_run_receipt.json` is uploaded and includes artifact digests plus run context (`GITHUB_RUN_ID`, `GITHUB_SHA`, `GITHUB_REF`).
+8. Confirm `promotion_run_receipt.json` is uploaded and includes artifact digests plus run context (`GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_SHA`, `GITHUB_REF`).
 9. Confirm `promotion_artifact_audit_report.json` shows `ci_context_match_required=true` and passes under the expected protected-branch run context.
+10. Confirm `rotation_rehearsal_report.json` includes workflow run metadata fields:
+   - `workflow_run_id`
+   - `workflow_run_attempt`
+   - `workflow_ref`
+   - `workflow_sha`
+   - `workflow_name`
+   - `workflow_event`
 
 ### 11.3 Rollback Procedure
 

@@ -365,8 +365,14 @@ def _run_verify_promotion_artifacts(args) -> int:
         promotion_evidence_file=args.promotion_evidence_file,
         promotion_report_file=args.promotion_report_file,
         rotation_report_file=args.rotation_report_file,
+        release_approval_key_file=args.release_approval_key_file,
+        release_approval_key_b64=args.release_approval_key_b64,
+        release_approval_key_id=args.release_approval_key_id,
+        promotion_policy_file=args.promotion_policy_file,
+        promotion_workflow_file=args.promotion_workflow_file,
         report_file=args.report_file,
         run_receipt_file=args.run_receipt_file,
+        require_release_approval_signature=args.require_release_approval_signature,
         require_rotation_pass=args.require_rotation_pass,
         require_ci_context_match=args.require_ci_context_match,
         repo_root=Path.cwd(),
@@ -665,6 +671,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to rotation_rehearsal_report.json artifact.",
     )
     verify_promotion_artifacts_parser.add_argument(
+        "--release-approval-key-file",
+        help="Optional path to HMAC key bytes used to verify release_approval.json signature digest.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
+        "--release-approval-key-b64",
+        help="Optional base64-encoded HMAC key bytes used to verify release_approval.json signature digest.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
+        "--release-approval-key-id",
+        help="Optional expected key_id for release_approval.json signature metadata.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
+        "--promotion-policy-file",
+        help="Optional policy JSON path used for promotion audit input binding. Defaults to docs/PROMOTION_ROLLOUT_POLICY.json.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
+        "--promotion-workflow-file",
+        help="Optional workflow path used for promotion audit input binding. Defaults to policy.workflow.relative_path.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
         "--report-file",
         help="Optional output path for promotion_artifact_audit_report.json.",
     )
@@ -676,6 +702,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-rotation-pass",
         action="store_true",
         help="Require rotation report status=passed with old key rejection evidence.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
+        "--require-release-approval-signature",
+        action="store_true",
+        help="Require release approval signature verification key and fail closed on missing/invalid signature validation.",
     )
     verify_promotion_artifacts_parser.add_argument(
         "--require-ci-context-match",

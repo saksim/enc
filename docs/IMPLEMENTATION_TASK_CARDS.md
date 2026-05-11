@@ -1058,6 +1058,179 @@ Rationale:
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 24):
+  - Hardened promotion artifact verification to enforce full audit-input digest binding, not only evidence:
+    - `enc2sop/promotion_artifacts.py` now validates `promotion_audit_report.inputs` for all audited inputs under verification:
+      - `policy_file` + `policy_sha256`,
+      - `workflow_file` + `workflow_sha256`,
+      - existing `evidence_file` + `evidence_sha256`.
+    - `soenc verify-promotion-artifacts` now accepts:
+      - `--promotion-policy-file`
+      - `--promotion-workflow-file`
+    - report payload now records resolved `promotion_policy_file` and `promotion_workflow_file`.
+  - Updated CI workflow `.github/workflows/release_promotion.yml`:
+    - added `workflow_dispatch` inputs:
+      - `promotion_policy_file`
+      - `promotion_workflow_file`
+    - dry-run now receives explicit `--policy-file` / `--workflow-file`.
+    - artifact verification now receives explicit `--promotion-policy-file` / `--promotion-workflow-file`.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require new policy/workflow wiring fragments.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` validates fail-closed policy/workflow digest-binding mismatches.
+    - `tests/test_soenc_cli.py` validates CLI wiring for policy/workflow override flags.
+    - `tests/test_release_promotion_workflow.py` validates workflow input/env fragment presence.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 25):
+  - Hardened strict CI-context replay resistance for artifact verification:
+    - `enc2sop/promotion_artifacts.py` now enforces `GITHUB_RUN_ATTEMPT` consistency under `--require-ci-context-match` when both runtime and evidence context values are present.
+    - this tightens archived-evidence/run identity binding for re-run scenarios without breaking offline evidence payloads that omit attempt metadata.
+  - Updated promotion rollout policy workflow fragment contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require `GITHUB_RUN_ATTEMPT` presence in workflow wiring.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document strict CI-context matching now covering run-attempt context when available.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now asserts fail-closed behavior on `GITHUB_RUN_ATTEMPT` mismatch under strict CI context mode.
+    - `tests/test_promotion_evidence.py` now verifies collector captures `GITHUB_RUN_ATTEMPT` when present.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 26):
+  - Hardened `--require-ci-context-match` to bind rotation rehearsal evidence to the current CI run:
+    - `enc2sop/promotion_artifacts.py` now verifies `rotation_rehearsal_report.json` run metadata fields when CI context is required:
+      - `workflow_run_id` vs `GITHUB_RUN_ID`
+      - `workflow_ref` vs `GITHUB_REF`
+      - `workflow_sha` vs `GITHUB_SHA`
+      - `workflow_run_attempt` vs `GITHUB_RUN_ATTEMPT`
+    - verification fails closed on missing/mismatched metadata for available runtime context keys.
+  - Updated policy/docs contracts:
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires rotation report workflow metadata fragments in `release_promotion.yml`.
+    - `README.md` and `USAGE_MANUAL.md` now document that strict CI-context mode validates both promotion evidence context and rotation report run metadata.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass case for matching rotation run metadata under strict CI-context mode.
+    - fail-closed case for mismatched rotation run metadata.
+    - existing strict-context mismatch test now asserts missing rotation metadata failures.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `32 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 27):
+  - Added fail-closed verification for pre-existing `promotion_run_receipt.json` artifacts in `enc2sop/promotion_artifacts.py`:
+    - `soenc verify-promotion-artifacts` now validates an existing run receipt before rewriting it.
+    - validation enforces:
+      - run receipt schema (`enc2sop-promotion-run-receipt/v1`),
+      - required artifact rows (`release_bundle`, `release_approval`, `release_receipt`, `promotion_evidence`, `promotion_audit_report`, `rotation_rehearsal_report`, `promotion_artifact_audit_report`),
+      - artifact path binding to current verification targets,
+      - SHA256 digest binding for each required artifact.
+    - this closes a replay/tamper window where a stale or modified archived run receipt could be silently overwritten without detection.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass case for matching pre-existing run receipt.
+    - fail-closed case for tampered pre-existing run receipt digest mismatch.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `10 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `32 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 28):
+  - Hardened strict CI-context replay resistance for pre-existing run receipts under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now validates `promotion_run_receipt.github_context` against runtime GitHub context when a prior `promotion_run_receipt.json` already exists.
+    - fail-closed checks now enforce:
+      - required identity keys: `GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`,
+      - optional mismatch checks when both sides are present: `GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`.
+    - this closes a replay window where stale pre-existing run receipts could pass artifact digest/path checks but still belong to a different protected-branch run attempt.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass case for strict CI-context verification with matching pre-existing run receipt context.
+    - fail-closed case for strict CI-context mismatch on pre-existing run receipt `GITHUB_RUN_ATTEMPT`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `12 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `32 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 29):
+  - Hardened strict CI-context governance binding in `enc2sop/promotion_artifacts.py`:
+    - added shared strict CI-context validator to enforce:
+      - required identity keys: `GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`,
+      - required workflow/event binding: `GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`,
+      - optional mismatch checks when both sides are present: `GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`.
+    - strict checks now apply to both:
+      - `promotion_evidence.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - rotation report strict binding now additionally enforces:
+      - `workflow_name` vs `GITHUB_WORKFLOW`,
+      - `workflow_event` vs `GITHUB_EVENT_NAME`.
+  - Updated CI workflow/policy/doc contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_name` + `workflow_event` in `rotation_rehearsal_report.json` for init and executed rehearsal report writes.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires workflow fragments for those new metadata fields.
+    - `README.md` and `USAGE_MANUAL.md` now document workflow/event strict-context requirements.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now asserts workflow/event strict-context mismatch and missing-field fail-closed behavior across promotion evidence, rotation report, and pre-existing run receipt validation.
+    - `tests/test_release_promotion_workflow.py` now asserts workflow report fragments include `workflow_name` and `workflow_event`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_release_promotion_workflow.py tests/test_soenc_cli.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 30):
+  - Hardened promotion artifact verification with cryptographic release-approval signature checks:
+    - `enc2sop/promotion_artifacts.py` now supports optional HMAC verification for `release_approval.json` signatures using:
+      - `release_approval_key_file` / `release_approval_key_b64`
+      - optional `release_approval_key_id` pinning.
+    - added `require_release_approval_signature` fail-closed mode:
+      - verification now fails when signature verification is required but no approval verification key is provided.
+    - artifact report now records:
+      - `release_approval_signature_required`
+      - `release_approval_key_id_expected`.
+  - Extended unified CLI and CI workflow wiring:
+    - `soenc verify-promotion-artifacts` now supports:
+      - `--release-approval-key-file`
+      - `--release-approval-key-b64`
+      - `--release-approval-key-id`
+      - `--require-release-approval-signature`
+    - `.github/workflows/release_promotion.yml` now enforces:
+      - `--release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64"`
+      - `--release-approval-key-id "$SOENC_PROMOTION_KEY_ID"`
+      - `--require-release-approval-signature`.
+  - Updated policy and docs contracts:
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` required fragments now include release-approval signature verification flags for the promotion artifact gate.
+    - `README.md` and `USAGE_MANUAL.md` now document release-approval signature verification under `verify-promotion-artifacts`.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - pass case with valid approval signature + key + key-id.
+      - fail-closed case with wrong approval key.
+      - fail-closed case when signature verification is required but key is missing.
+    - `tests/test_soenc_cli.py`:
+      - CLI wiring coverage for new approval-signature flags.
+    - `tests/test_release_promotion_workflow.py`:
+      - workflow fragment checks for release-approval signature verification flags.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 31):
+  - Hardened release receipt provenance binding for promotion artifacts:
+    - `encryption_helper.write_release_receipt(...)` now records:
+      - `release_bundle_sha256`,
+      - `release_approval_sha256`,
+      - `release_approval_signature_digest`.
+    - `enc2sop/promotion_artifacts.py` now validates those receipt fields against the current archived `release_bundle.json` and `release_approval.json`.
+    - verification fails closed when receipt approval key/signature metadata diverges from the approval artifact.
+  - Updated operator docs to describe receipt digest binding inside `soenc verify-promotion-artifacts`.
+  - Added focused coverage:
+    - `tests/test_encryption_helper.py` asserts generated release receipts include bundle/approval/signature digest bindings.
+    - `tests/test_promotion_artifacts.py` asserts stale receipt approval digests are rejected by the promotion artifact gate.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
 
 ### CARD `ENC-P0-013`
 

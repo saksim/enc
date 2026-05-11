@@ -151,6 +151,7 @@ class PromotionEvidenceTests(unittest.TestCase):
                 "GITHUB_REF": "refs/heads/main",
                 "GITHUB_SHA": "abc123",
                 "GITHUB_RUN_ID": "42",
+                "GITHUB_RUN_ATTEMPT": "3",
             },
             clear=False,
         ):
@@ -171,6 +172,7 @@ class PromotionEvidenceTests(unittest.TestCase):
         self.assertEqual(payload["github_context"]["GITHUB_REPOSITORY"], "acme/demo")
         self.assertEqual(payload["github_context"]["GITHUB_REF"], "refs/heads/main")
         self.assertEqual(payload["github_context"]["GITHUB_RUN_ID"], "42")
+        self.assertEqual(payload["github_context"]["GITHUB_RUN_ATTEMPT"], "3")
         branches = {row["name"]: row["required_status_checks"] for row in payload["branches"]}
         self.assertIn("Signed Approval Promotion Gate", branches["main"])
         self.assertIn("Signed Approval Promotion Gate", branches["release/**"])

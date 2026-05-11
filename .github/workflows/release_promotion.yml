@@ -19,6 +19,14 @@ on:
         description: "Promotion audit report output path (default: .tmp_ci/ops/promotion_audit_report.json)"
         required: false
         default: ".tmp_ci/ops/promotion_audit_report.json"
+      promotion_policy_file:
+        description: "Promotion policy path used by dry-run and artifact verification (default: docs/PROMOTION_ROLLOUT_POLICY.json)"
+        required: false
+        default: "docs/PROMOTION_ROLLOUT_POLICY.json"
+      promotion_workflow_file:
+        description: "Promotion workflow path used for policy binding (default: .github/workflows/release_promotion.yml)"
+        required: false
+        default: ".github/workflows/release_promotion.yml"
       promotion_artifact_audit_report_file:
         description: "Promotion artifact audit report output path (default: .tmp_ci/ops/promotion_artifact_audit_report.json)"
         required: false
@@ -65,6 +73,8 @@ jobs:
       RELEASE_DIR: ${{ github.event.inputs.release_dir || '.tmp_ci/release' }}
       PROMOTION_EVIDENCE_FILE: ${{ github.event.inputs.promotion_evidence_file || '.tmp_ci/ops/promotion_evidence.json' }}
       PROMOTION_REPORT_FILE: ${{ github.event.inputs.promotion_report_file || '.tmp_ci/ops/promotion_audit_report.json' }}
+      PROMOTION_POLICY_FILE: ${{ github.event.inputs.promotion_policy_file || 'docs/PROMOTION_ROLLOUT_POLICY.json' }}
+      PROMOTION_WORKFLOW_FILE: ${{ github.event.inputs.promotion_workflow_file || '.github/workflows/release_promotion.yml' }}
       PROMOTION_ARTIFACT_AUDIT_REPORT_FILE: ${{ github.event.inputs.promotion_artifact_audit_report_file || '.tmp_ci/ops/promotion_artifact_audit_report.json' }}
       ROTATION_REPORT_FILE: ${{ github.event.inputs.rotation_report_file || '.tmp_ci/ops/rotation_rehearsal_report.json' }}
       PROMOTION_RUN_RECEIPT_FILE: ${{ github.event.inputs.promotion_run_receipt_file || '.tmp_ci/ops/promotion_run_receipt.json' }}
@@ -122,8 +132,11 @@ jobs:
             "schema": "enc2sop-rotation-rehearsal/v1",
             "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "workflow_run_id": "${GITHUB_RUN_ID}",
+            "workflow_run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "workflow_sha": "${GITHUB_SHA}",
             "workflow_ref": "${GITHUB_REF}",
+            "workflow_name": "${GITHUB_WORKFLOW}",
+            "workflow_event": "${GITHUB_EVENT_NAME}",
             "requested": ${requested},
             "executed": false,
             "old_key_rejected": null,
@@ -196,12 +209,16 @@ jobs:
           dry_run_args=(
             "--github-repo" "$GITHUB_REPOSITORY"
             "--github-token" "$GITHUB_TOKEN"
+            "--policy-file" "$PROMOTION_POLICY_FILE"
+            "--workflow-file" "$PROMOTION_WORKFLOW_FILE"
             "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
             "--report-file" "$PROMOTION_REPORT_FILE"
           )
           if [ "${SKIP_PROMOTION_COLLECT}" = "true" ]; then
             dry_run_args=(
               "--skip-collect"
+              "--policy-file" "$PROMOTION_POLICY_FILE"
+              "--workflow-file" "$PROMOTION_WORKFLOW_FILE"
               "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
               "--report-file" "$PROMOTION_REPORT_FILE"
             )
@@ -222,8 +239,11 @@ jobs:
               "schema": "enc2sop-rotation-rehearsal/v1",
               "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
               "workflow_run_id": "${GITHUB_RUN_ID}",
+              "workflow_run_attempt": "${GITHUB_RUN_ATTEMPT}",
               "workflow_sha": "${GITHUB_SHA}",
               "workflow_ref": "${GITHUB_REF}",
+              "workflow_name": "${GITHUB_WORKFLOW}",
+              "workflow_event": "${GITHUB_EVENT_NAME}",
               "requested": true,
               "executed": true,
               "old_key_rejected": ${old_key_rejected},
@@ -262,8 +282,13 @@ jobs:
             "--promotion-evidence-file" "$PROMOTION_EVIDENCE_FILE"
             "--promotion-report-file" "$PROMOTION_REPORT_FILE"
             "--rotation-report-file" "$ROTATION_REPORT_FILE"
+            "--release-approval-key-b64" "$SOENC_RELEASE_APPROVAL_KEY_B64"
+            "--release-approval-key-id" "$SOENC_PROMOTION_KEY_ID"
+            "--promotion-policy-file" "$PROMOTION_POLICY_FILE"
+            "--promotion-workflow-file" "$PROMOTION_WORKFLOW_FILE"
             "--report-file" "$PROMOTION_ARTIFACT_AUDIT_REPORT_FILE"
             "--run-receipt-file" "$PROMOTION_RUN_RECEIPT_FILE"
+            "--require-release-approval-signature"
           )
           if [ "${ROTATION_REHEARSAL_INPUT}" = "true" ]; then
             artifact_args+=("--require-rotation-pass")
