@@ -21,6 +21,7 @@ from enc2sop import promotion_audit
 PROMOTION_ARTIFACT_AUDIT_SCHEMA = "enc2sop-promotion-artifact-audit/v1"
 PROMOTION_RUN_RECEIPT_SCHEMA = "enc2sop-promotion-run-receipt/v1"
 ROTATION_REHEARSAL_SCHEMA = "enc2sop-rotation-rehearsal/v1"
+PROMOTION_RUN_RECEIPT_SIGNATURE_ALGORITHM = encryption_helper.SIGNATURE_ALGORITHM_HMAC_SHA256
 DEFAULT_REPORT_FILENAME = "promotion_artifact_audit_report.json"
 DEFAULT_RUN_RECEIPT_FILENAME = "promotion_run_receipt.json"
 RUN_RECEIPT_VOLATILE_ARTIFACT = "promotion_artifact_audit_report"
@@ -36,16 +37,37 @@ RUN_RECEIPT_REQUIRED_ARTIFACTS = (
 STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS = (
     "GITHUB_REPOSITORY",
     "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_TYPE",
     "GITHUB_RUN_ID",
 )
 STRICT_CONTEXT_REQUIRED_BINDING_KEYS = (
-    "GITHUB_WORKFLOW",
-    "GITHUB_EVENT_NAME",
-)
-STRICT_CONTEXT_OPTIONAL_BINDING_KEYS = (
+    "GITHUB_ACTIONS",
+    "CI",
+    "RUNNER_ENVIRONMENT",
+    "RUNNER_OS",
+    "RUNNER_ARCH",
     "GITHUB_SHA",
     "GITHUB_RUN_ATTEMPT",
+    "GITHUB_RUN_NUMBER",
+    "GITHUB_WORKFLOW",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_WORKFLOW_SHA",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_SERVER_URL",
+    "GITHUB_API_URL",
+    "GITHUB_GRAPHQL_URL",
+    "GITHUB_JOB",
+    "GITHUB_ACTOR",
+    "GITHUB_ACTOR_ID",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REPOSITORY_OWNER",
+    "GITHUB_REPOSITORY_OWNER_ID",
 )
+STRICT_CONTEXT_OPTIONAL_BINDING_KEYS = (
+    "GITHUB_TRIGGERING_ACTOR",
+)
+STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY = "GITHUB_REF_PROTECTED"
 
 
 class PromotionArtifactAuditError(RuntimeError):
@@ -86,16 +108,33 @@ def _is_hex_64(value: object) -> bool:
     return all(ch in "0123456789abcdef" for ch in text)
 
 
+def _run_receipt_payload_without_signature(payload: Mapping[str, object]) -> Dict[str, object]:
+    output = dict(payload)
+    output.pop("signature", None)
+    return output
+
+
+def _compute_run_receipt_signature(
+    run_receipt_payload: Mapping[str, object],
+    signature_key: bytes,
+) -> str:
+    return hmac.new(
+        signature_key,
+        encryption_helper._canonical_json_bytes(_run_receipt_payload_without_signature(run_receipt_payload)),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def _validate_release_artifacts(
     release_dir: Path,
     failures: List[str],
     *,
+    runtime_context: Optional[Mapping[str, str]],
     approval_key: Optional[bytes],
     expected_approval_key_id: Optional[str],
     require_approval_signature: bool,
     require_ci_context_match: bool,
 ) -> None:
-    runtime_context = _github_context_snapshot() if require_ci_context_match else None
     bundle_path = release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME
     approval_path = release_dir / "release_approval.json"
     receipt_path = release_dir / encryption_helper.RELEASE_RECEIPT_FILENAME
@@ -231,6 +270,12 @@ def _validate_release_artifacts(
         if runtime_context:
             _validate_ci_context_binding(
                 runtime_context=runtime_context,
+                artifact_context=receipt_payload.get("github_context"),
+                context_label="release_receipt.github_context",
+                failures=failures,
+            )
+            _validate_ci_context_binding(
+                runtime_context=runtime_context,
                 artifact_context=receipt_approval_context,
                 context_label="release_receipt.release_approval_github_context",
                 failures=failures,
@@ -357,6 +402,7 @@ def _validate_rotation_report(
     failures: List[str],
     require_rotation_pass: bool,
     require_ci_context_match: bool,
+    runtime_context: Optional[Mapping[str, str]],
 ) -> None:
     payload = _load_json_object(rotation_report_path, "rotation rehearsal report")
     if payload.get("schema") != ROTATION_REHEARSAL_SCHEMA:
@@ -382,21 +428,47 @@ def _validate_rotation_report(
         failures.append("rotation_rehearsal_report.status is required")
 
     if require_ci_context_match:
-        runtime_context = _github_context_snapshot()
         if runtime_context:
             context_bindings = (
                 ("workflow_run_id", "GITHUB_RUN_ID"),
                 ("workflow_ref", "GITHUB_REF"),
                 ("workflow_sha", "GITHUB_SHA"),
+                ("workflow_github_actions", "GITHUB_ACTIONS"),
+                ("workflow_ci", "CI"),
+                ("workflow_runner_environment", "RUNNER_ENVIRONMENT"),
+                ("workflow_runner_os", "RUNNER_OS"),
+                ("workflow_runner_arch", "RUNNER_ARCH"),
                 ("workflow_run_attempt", "GITHUB_RUN_ATTEMPT"),
+                ("workflow_run_number", "GITHUB_RUN_NUMBER"),
                 ("workflow_name", "GITHUB_WORKFLOW"),
+                ("workflow_ref_name", "GITHUB_REF_NAME"),
+                ("workflow_ref_type", "GITHUB_REF_TYPE"),
+                ("workflow_name_ref", "GITHUB_WORKFLOW_REF"),
+                ("workflow_name_sha", "GITHUB_WORKFLOW_SHA"),
                 ("workflow_event", "GITHUB_EVENT_NAME"),
+                ("workflow_server_url", "GITHUB_SERVER_URL"),
+                ("workflow_api_url", "GITHUB_API_URL"),
+                ("workflow_graphql_url", "GITHUB_GRAPHQL_URL"),
+                ("workflow_job", "GITHUB_JOB"),
+                ("workflow_actor", "GITHUB_ACTOR"),
+                ("workflow_triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
+                ("workflow_actor_id", "GITHUB_ACTOR_ID"),
+                ("workflow_repository_id", "GITHUB_REPOSITORY_ID"),
+                ("workflow_repository_owner", "GITHUB_REPOSITORY_OWNER"),
+                ("workflow_repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
+                ("workflow_ref_protected", STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY),
             )
             for report_key, runtime_key in context_bindings:
-                expected = _normalize_text(runtime_context.get(runtime_key))
+                if runtime_key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY:
+                    expected = _normalize_ref_protected(runtime_context.get(runtime_key))
+                else:
+                    expected = _normalize_text(runtime_context.get(runtime_key))
                 if not expected:
                     continue
-                actual = _normalize_text(payload.get(report_key))
+                if runtime_key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY:
+                    actual = _normalize_ref_protected(payload.get(report_key))
+                else:
+                    actual = _normalize_text(payload.get(report_key))
                 if not actual:
                     failures.append(
                         "rotation_rehearsal_report.{0} missing for CI context key {1}".format(
@@ -429,11 +501,32 @@ def _github_context_snapshot() -> Dict[str, str]:
     keys = (
         "GITHUB_REPOSITORY",
         "GITHUB_REF",
+        "GITHUB_REF_PROTECTED",
+        "GITHUB_ACTIONS",
+        "CI",
+        "RUNNER_ENVIRONMENT",
+        "RUNNER_OS",
+        "RUNNER_ARCH",
         "GITHUB_SHA",
         "GITHUB_RUN_ID",
         "GITHUB_RUN_ATTEMPT",
+        "GITHUB_RUN_NUMBER",
         "GITHUB_WORKFLOW",
+        "GITHUB_REF_NAME",
+        "GITHUB_REF_TYPE",
+        "GITHUB_WORKFLOW_REF",
+        "GITHUB_WORKFLOW_SHA",
         "GITHUB_EVENT_NAME",
+        "GITHUB_SERVER_URL",
+        "GITHUB_API_URL",
+        "GITHUB_GRAPHQL_URL",
+        "GITHUB_JOB",
+        "GITHUB_ACTOR",
+        "GITHUB_TRIGGERING_ACTOR",
+        "GITHUB_ACTOR_ID",
+        "GITHUB_REPOSITORY_ID",
+        "GITHUB_REPOSITORY_OWNER",
+        "GITHUB_REPOSITORY_OWNER_ID",
     )
     context = {}
     for key in keys:
@@ -447,6 +540,15 @@ def _normalize_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _normalize_ref_protected(value: object) -> str:
+    text = _normalize_text(value).lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return "true"
+    if text in {"false", "0", "no", "n", "off"}:
+        return "false"
+    return ""
 
 
 def _validate_ci_context_binding(
@@ -464,7 +566,6 @@ def _validate_ci_context_binding(
     for key in STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS:
         expected = _normalize_text(runtime_context.get(key))
         if not expected:
-            failures.append("missing runtime GitHub context key for CI match: {0}".format(key))
             continue
         actual = _normalize_text(artifact_context.get(key))
         if not actual:
@@ -508,23 +609,34 @@ def _validate_ci_context_binding(
                     actual,
                 )
             )
+    expected_ref_protected = _normalize_ref_protected(runtime_context.get(STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY))
+    actual_ref_protected = _normalize_ref_protected(artifact_context.get(STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY))
+    if expected_ref_protected and actual_ref_protected and actual_ref_protected != expected_ref_protected:
+        failures.append(
+            "{0}.{1} mismatch: expected {2}, got {3}".format(
+                context_label,
+                STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,
+                expected_ref_protected,
+                actual_ref_protected,
+            )
+        )
 
 
 def _validate_evidence_github_context(
     evidence_payload: Mapping[str, object],
     failures: List[str],
     require_ci_context_match: bool,
+    runtime_context: Optional[Mapping[str, str]],
 ) -> None:
     if not require_ci_context_match:
         return
-    report_context = _github_context_snapshot()
-    if not report_context:
+    if not runtime_context:
         failures.append(
             "CI context match is required but no GitHub runtime environment context is available"
         )
         return
     _validate_ci_context_binding(
-        runtime_context=report_context,
+        runtime_context=runtime_context,
         artifact_context=evidence_payload.get("github_context"),
         context_label="promotion_evidence.github_context",
         failures=failures,
@@ -573,6 +685,10 @@ def _validate_existing_run_receipt_binding(
     rotation_path: Path,
     require_rotation_pass: bool,
     require_ci_context_match: bool,
+    runtime_context: Optional[Mapping[str, str]],
+    approval_key: Optional[bytes],
+    require_signature: bool,
+    expected_signature_key_id: Optional[str],
     failures: List[str],
 ) -> None:
     if not run_receipt_path.exists():
@@ -610,7 +726,6 @@ def _validate_existing_run_receipt_binding(
         )
 
     if require_ci_context_match:
-        runtime_context = _github_context_snapshot()
         if runtime_context:
             _validate_ci_context_binding(
                 runtime_context=runtime_context,
@@ -689,6 +804,68 @@ def _validate_existing_run_receipt_binding(
                 )
             )
 
+    signature = payload.get("signature")
+    if not isinstance(signature, dict):
+        if require_signature:
+            failures.append("promotion_run_receipt.signature is required")
+        return
+    algorithm = _normalize_text(signature.get("algorithm")).lower()
+    if algorithm != PROMOTION_RUN_RECEIPT_SIGNATURE_ALGORITHM:
+        failures.append(
+            "promotion_run_receipt.signature.algorithm must be {0}".format(
+                PROMOTION_RUN_RECEIPT_SIGNATURE_ALGORITHM
+            )
+        )
+    digest_hex = _normalize_text(signature.get("digest_hex")).lower()
+    if not _is_hex_64(digest_hex):
+        failures.append("promotion_run_receipt.signature.digest_hex must be a 64-char lowercase hex digest")
+    key_id = _normalize_text(signature.get("key_id"))
+    if not key_id:
+        failures.append("promotion_run_receipt.signature.key_id is required")
+    expected_key_id = _normalize_text(payload.get("release_approval_key_id"))
+    if not expected_key_id:
+        failures.append("promotion_run_receipt.release_approval_key_id is required")
+    declared_expected_key_id = _normalize_text(expected_signature_key_id)
+    if declared_expected_key_id and expected_key_id and expected_key_id != declared_expected_key_id:
+        failures.append(
+            "promotion_run_receipt.release_approval_key_id mismatch: expected {0}, got {1}".format(
+                declared_expected_key_id,
+                expected_key_id,
+            )
+        )
+    elif key_id and key_id != expected_key_id:
+        failures.append(
+            "promotion_run_receipt.signature.key_id mismatch: expected {0}, got {1}".format(
+                expected_key_id,
+                key_id,
+            )
+        )
+
+    if approval_key is None:
+        if require_signature:
+            failures.append("release approval verification key is required for promotion_run_receipt signature verification")
+        return
+    if _is_hex_64(digest_hex):
+        expected_digest = _compute_run_receipt_signature(payload, approval_key)
+        if not hmac.compare_digest(expected_digest, digest_hex):
+            failures.append(
+                "promotion_run_receipt.signature.digest_hex does not match provided approval verification key"
+            )
+
+
+def _validate_runtime_context_completeness(
+    runtime_context: Mapping[str, str],
+    failures: List[str],
+) -> None:
+    required_keys = (
+        STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS
+        + STRICT_CONTEXT_REQUIRED_BINDING_KEYS
+        + (STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,)
+    )
+    for key in required_keys:
+        if not _normalize_text(runtime_context.get(key)):
+            failures.append("missing runtime GitHub context key for CI match: {0}".format(key))
+
 
 def _write_promotion_run_receipt(
     *,
@@ -699,6 +876,8 @@ def _write_promotion_run_receipt(
     evidence_path: Path,
     promotion_report_path: Path,
     rotation_path: Path,
+    signature_key: Optional[bytes],
+    signature_key_id: Optional[str],
 ) -> Path:
     artifact_rows = _artifact_digest_rows(
         _expected_run_receipt_artifact_paths(
@@ -715,9 +894,17 @@ def _write_promotion_run_receipt(
         "passed": bool(report.get("passed")),
         "rotation_pass_required": bool(report.get("rotation_pass_required")),
         "promotion_artifact_audit_report_file": str(report_path),
+        "release_approval_key_id": _normalize_text(signature_key_id) or None,
         "github_context": _github_context_snapshot(),
         "artifacts": artifact_rows,
     }
+    if signature_key is not None and _normalize_text(signature_key_id):
+        digest_hex = _compute_run_receipt_signature(receipt, signature_key)
+        receipt["signature"] = {
+            "algorithm": PROMOTION_RUN_RECEIPT_SIGNATURE_ALGORITHM,
+            "key_id": _normalize_text(signature_key_id),
+            "digest_hex": digest_hex,
+        }
     run_receipt_path.parent.mkdir(parents=True, exist_ok=True)
     run_receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
     return run_receipt_path
@@ -773,11 +960,15 @@ def run_promotion_artifact_audit(
         key_file=release_approval_key_path,
         key_b64=release_approval_key_b64,
     )
+    runtime_context = _github_context_snapshot() if require_ci_context_match else None
 
     failures = []  # type: List[str]
+    if require_ci_context_match and runtime_context:
+        _validate_runtime_context_completeness(runtime_context, failures)
     _validate_release_artifacts(
         release_dir,
         failures,
+        runtime_context=runtime_context,
         approval_key=release_approval_key,
         expected_approval_key_id=release_approval_key_id,
         require_approval_signature=require_release_approval_signature,
@@ -789,6 +980,7 @@ def run_promotion_artifact_audit(
         evidence_payload,
         failures,
         require_ci_context_match=require_ci_context_match,
+        runtime_context=runtime_context,
     )
     _validate_promotion_report(promotion_report_path, failures)
     _validate_promotion_report_input_binding(
@@ -803,6 +995,7 @@ def run_promotion_artifact_audit(
         failures,
         require_rotation_pass=require_rotation_pass,
         require_ci_context_match=require_ci_context_match,
+        runtime_context=runtime_context,
     )
     _validate_existing_run_receipt_binding(
         run_receipt_path=run_receipt_path,
@@ -813,6 +1006,10 @@ def run_promotion_artifact_audit(
         rotation_path=rotation_path,
         require_rotation_pass=require_rotation_pass,
         require_ci_context_match=require_ci_context_match,
+        runtime_context=runtime_context,
+        approval_key=release_approval_key,
+        require_signature=require_release_approval_signature,
+        expected_signature_key_id=release_approval_key_id,
         failures=failures,
     )
 
@@ -847,5 +1044,7 @@ def run_promotion_artifact_audit(
         evidence_path=evidence_path,
         promotion_report_path=promotion_report_path,
         rotation_path=rotation_path,
+        signature_key=release_approval_key,
+        signature_key_id=release_approval_key_id,
     )
     return report_path, report

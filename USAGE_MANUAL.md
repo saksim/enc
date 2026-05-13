@@ -270,16 +270,19 @@ Behavior:
 6. Validates rotation report schema and status fields.
 7. Optional `--require-rotation-pass` enforces `status=passed` and `old_key_rejected=true`.
 8. Optional `--require-ci-context-match` enforces CI-context binding across:
+   - `release_receipt.github_context` for the release gate execution context produced by the governed workflow run.
    - signed `release_approval.github_context` plus mirrored `release_receipt.release_approval_github_context` for the approval artifact produced by the governed workflow run.
-   - `promotion_evidence.github_context` identity (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) plus required workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) and optional `GITHUB_SHA`/`GITHUB_RUN_ATTEMPT` checks when both sides are present.
-   - `rotation_rehearsal_report.json` run metadata (`workflow_run_id`, `workflow_ref`, `workflow_sha`, `workflow_run_attempt`, `workflow_name`, `workflow_event`) against the current workflow run context when runtime values are present.
-   - pre-existing `promotion_run_receipt.json` `github_context` identity (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`) plus required workflow/event binding (`GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`) and optional `GITHUB_SHA`/`GITHUB_RUN_ATTEMPT` checks when both sides are present.
+   - `promotion_evidence.github_context` required identity/hash/attempt/number/ref/ref-name/ref-type/workflow-definition/event/host/job/actor binding (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_RUN_ID`, `GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`, `GITHUB_RUN_NUMBER`, `GITHUB_WORKFLOW`, `GITHUB_WORKFLOW_REF`, `GITHUB_WORKFLOW_SHA`, `GITHUB_EVENT_NAME`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`, `GITHUB_JOB`, `GITHUB_ACTOR`), required runner execution provenance (`RUNNER_ENVIRONMENT`, `RUNNER_OS`, `RUNNER_ARCH`), required numeric actor/repository identity binding (`GITHUB_ACTOR_ID`, `GITHUB_REPOSITORY_ID`), required repository-owner identity binding (`GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_OWNER_ID`), protected-ref governance binding (`GITHUB_REF_PROTECTED`), and optional `GITHUB_TRIGGERING_ACTOR` parity when both sides are present.
+   - `rotation_rehearsal_report.json` run metadata (`workflow_run_id`, `workflow_ref`, `workflow_ref_name`, `workflow_ref_type`, `workflow_sha`, `workflow_run_attempt`, `workflow_run_number`, `workflow_name`, `workflow_name_ref`, `workflow_name_sha`, `workflow_event`, `workflow_server_url`, `workflow_api_url`, `workflow_graphql_url`, `workflow_job`, `workflow_actor`, `workflow_triggering_actor`, `workflow_actor_id`, `workflow_repository_id`, `workflow_repository_owner`, `workflow_repository_owner_id`, `workflow_ref_protected`, `workflow_runner_environment`, `workflow_runner_os`, `workflow_runner_arch`) against the current workflow run context when runtime values are present.
+   - pre-existing `promotion_run_receipt.json` `github_context` required identity/hash/attempt/number/ref/ref-name/ref-type/workflow-definition/event/host/job/actor binding (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_RUN_ID`, `GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`, `GITHUB_RUN_NUMBER`, `GITHUB_WORKFLOW`, `GITHUB_WORKFLOW_REF`, `GITHUB_WORKFLOW_SHA`, `GITHUB_EVENT_NAME`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`, `GITHUB_JOB`, `GITHUB_ACTOR`), required runner execution provenance (`RUNNER_ENVIRONMENT`, `RUNNER_OS`, `RUNNER_ARCH`), required numeric actor/repository identity binding (`GITHUB_ACTOR_ID`, `GITHUB_REPOSITORY_ID`), required repository-owner identity binding (`GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_OWNER_ID`), protected-ref governance binding (`GITHUB_REF_PROTECTED`), and optional `GITHUB_TRIGGERING_ACTOR` parity when both sides are present.
 9. Writes `promotion_artifact_audit_report.json` and `promotion_run_receipt.json` and exits non-zero on any mismatch.
 10. Enforces promotion audit/evidence input binding:
    - `promotion_audit_report.inputs.evidence_file` must match the evidence artifact path under verification.
    - `promotion_audit_report.inputs.evidence_sha256` must match the evidence artifact digest.
    - `promotion_audit_report.inputs.policy_file` / `policy_sha256` must match the policy file used by verification.
    - `promotion_audit_report.inputs.workflow_file` / `workflow_sha256` must match the workflow file used by verification.
+11. When approval verification key inputs are provided (`--release-approval-key-file` or `--release-approval-key-b64` with `--release-approval-key-id`), emitted `promotion_run_receipt.json` includes a signed `signature` block (`hmac-sha256`) bound to canonical receipt payload bytes.
+12. Under `--require-release-approval-signature`, pre-existing `promotion_run_receipt.json` must carry a valid signature bound to the provided approval verification key and expected key id before rewrite.
 
 Optional:
 
@@ -436,6 +439,9 @@ The workflow enforces the signed approval gate in CI by running:
 9. CI-context binding enforcement via `soenc verify-promotion-artifacts --require-ci-context-match`
    - ensures archived `promotion_evidence.json` context matches the current protected-branch run identity
    - ensures archived `rotation_rehearsal_report.json` run metadata (including workflow name/event) matches the current workflow run identity
+   - ensures workflow-definition identity plus host/API URL/job/actor identity also matches (`GITHUB_WORKFLOW_REF`, `GITHUB_WORKFLOW_SHA`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`, `GITHUB_JOB`, `GITHUB_ACTOR`), run number also matches (`GITHUB_RUN_NUMBER`), ref-name/ref-type also match (`GITHUB_REF_NAME`, `GITHUB_REF_TYPE`), runner execution provenance also matches (`RUNNER_ENVIRONMENT`, `RUNNER_OS`, `RUNNER_ARCH`), numeric actor/repository identifiers also match (`GITHUB_ACTOR_ID`, `GITHUB_REPOSITORY_ID`), and repository-owner identity also matches (`GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_OWNER_ID`) across evidence, rotation report, and pre-existing run receipt checks
+   - ensures optional rerun/dispatch triggering-actor context also matches when present (`GITHUB_TRIGGERING_ACTOR`) across evidence, rotation report, signed approval provenance, and pre-existing run receipt checks
+   - ensures protected-ref governance context (`GITHUB_REF_PROTECTED`) remains consistent across evidence, rotation report, release approval provenance, and pre-existing run receipt checks
    - ensures any pre-existing archived `promotion_run_receipt.json` context (including workflow name/event) matches the current workflow run identity before receipt rewrite
 10. promotion report input digest binding enforcement in `soenc verify-promotion-artifacts`
    - workflow now passes `--promotion-policy-file` and `--promotion-workflow-file` so audit report policy/workflow digests are validated against the exact files under verification.
@@ -460,15 +466,26 @@ The workflow enforces the signed approval gate in CI by running:
    - `status=passed` and `old_key_rejected=true` for successful rehearsal,
    - `status=blocked` when previous-key secret is missing,
    - `status=failed` if old key unexpectedly passes.
-8. Confirm `promotion_run_receipt.json` is uploaded and includes artifact digests plus run context (`GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_SHA`, `GITHUB_REF`).
+8. Confirm `promotion_run_receipt.json` is uploaded and includes artifact digests plus run context (`GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_RUN_NUMBER`, `GITHUB_SHA`, `GITHUB_REF`).
 9. Confirm `promotion_artifact_audit_report.json` shows `ci_context_match_required=true` and passes under the expected protected-branch run context.
 10. Confirm `rotation_rehearsal_report.json` includes workflow run metadata fields:
    - `workflow_run_id`
    - `workflow_run_attempt`
+   - `workflow_run_number`
    - `workflow_ref`
+   - `workflow_ref_name`
+   - `workflow_ref_type`
    - `workflow_sha`
    - `workflow_name`
+   - `workflow_name_ref`
+   - `workflow_name_sha`
    - `workflow_event`
+   - `workflow_actor`
+   - `workflow_triggering_actor`
+   - `workflow_runner_environment`
+   - `workflow_runner_os`
+   - `workflow_runner_arch`
+   - `workflow_ref_protected`
 
 ### 11.3 Rollback Procedure
 

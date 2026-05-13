@@ -149,9 +149,30 @@ class PromotionEvidenceTests(unittest.TestCase):
             {
                 "GITHUB_REPOSITORY": "acme/demo",
                 "GITHUB_REF": "refs/heads/main",
+                "GITHUB_REF_NAME": "main",
+                "GITHUB_REF_TYPE": "branch",
+                "GITHUB_REF_PROTECTED": "true",
+                "GITHUB_ACTIONS": "true",
+                "CI": "true",
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "RUNNER_OS": "Linux",
+                "RUNNER_ARCH": "X64",
                 "GITHUB_SHA": "abc123",
                 "GITHUB_RUN_ID": "42",
                 "GITHUB_RUN_ATTEMPT": "3",
+                "GITHUB_RUN_NUMBER": "17",
+                "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+                "GITHUB_WORKFLOW_SHA": "feedface",
+                "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_API_URL": "https://api.github.com",
+                "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+                "GITHUB_JOB": "promotion-gate",
+                "GITHUB_ACTOR": "octocat",
+                "GITHUB_TRIGGERING_ACTOR": "ops-oncall",
+                "GITHUB_ACTOR_ID": "42",
+                "GITHUB_REPOSITORY_ID": "4242",
+                "GITHUB_REPOSITORY_OWNER": "acme",
+                "GITHUB_REPOSITORY_OWNER_ID": "424242",
             },
             clear=False,
         ):
@@ -171,8 +192,32 @@ class PromotionEvidenceTests(unittest.TestCase):
         self.assertEqual(payload["secrets"], ["SOENC_RELEASE_APPROVAL_KEY_B64"])
         self.assertEqual(payload["github_context"]["GITHUB_REPOSITORY"], "acme/demo")
         self.assertEqual(payload["github_context"]["GITHUB_REF"], "refs/heads/main")
+        self.assertEqual(payload["github_context"]["GITHUB_REF_NAME"], "main")
+        self.assertEqual(payload["github_context"]["GITHUB_REF_TYPE"], "branch")
+        self.assertEqual(payload["github_context"]["GITHUB_REF_PROTECTED"], "true")
+        self.assertEqual(payload["github_context"]["GITHUB_ACTIONS"], "true")
+        self.assertEqual(payload["github_context"]["CI"], "true")
+        self.assertEqual(payload["github_context"]["RUNNER_ENVIRONMENT"], "github-hosted")
+        self.assertEqual(payload["github_context"]["RUNNER_OS"], "Linux")
+        self.assertEqual(payload["github_context"]["RUNNER_ARCH"], "X64")
         self.assertEqual(payload["github_context"]["GITHUB_RUN_ID"], "42")
         self.assertEqual(payload["github_context"]["GITHUB_RUN_ATTEMPT"], "3")
+        self.assertEqual(payload["github_context"]["GITHUB_RUN_NUMBER"], "17")
+        self.assertEqual(payload["github_context"]["GITHUB_JOB"], "promotion-gate")
+        self.assertEqual(payload["github_context"]["GITHUB_ACTOR"], "octocat")
+        self.assertEqual(payload["github_context"]["GITHUB_TRIGGERING_ACTOR"], "ops-oncall")
+        self.assertEqual(payload["github_context"]["GITHUB_ACTOR_ID"], "42")
+        self.assertEqual(payload["github_context"]["GITHUB_REPOSITORY_ID"], "4242")
+        self.assertEqual(payload["github_context"]["GITHUB_REPOSITORY_OWNER"], "acme")
+        self.assertEqual(payload["github_context"]["GITHUB_REPOSITORY_OWNER_ID"], "424242")
+        self.assertEqual(payload["github_context"]["GITHUB_SERVER_URL"], "https://github.com")
+        self.assertEqual(payload["github_context"]["GITHUB_API_URL"], "https://api.github.com")
+        self.assertEqual(payload["github_context"]["GITHUB_GRAPHQL_URL"], "https://api.github.com/graphql")
+        self.assertEqual(
+            payload["github_context"]["GITHUB_WORKFLOW_REF"],
+            "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+        )
+        self.assertEqual(payload["github_context"]["GITHUB_WORKFLOW_SHA"], "feedface")
         branches = {row["name"]: row["required_status_checks"] for row in payload["branches"]}
         self.assertIn("Signed Approval Promotion Gate", branches["main"])
         self.assertIn("Signed Approval Promotion Gate", branches["release/**"])
@@ -243,3 +288,4 @@ class PromotionEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

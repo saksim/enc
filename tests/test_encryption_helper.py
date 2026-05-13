@@ -783,11 +783,32 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         github_context = {
             "GITHUB_REPOSITORY": "acme/demo",
             "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
             "GITHUB_SHA": "deadbeef",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "17",
             "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeed",
             "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_TRIGGERING_ACTOR": "ops-oncall",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
         }
         with mock.patch.dict(os.environ, github_context, clear=False):
             approval_path, approval_payload = encryption_helper.write_release_approval(
@@ -798,13 +819,15 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             )
         self.assertEqual(approval_payload["github_context"], github_context)
 
-        _, receipt = encryption_helper.write_release_receipt(
-            dist_dir=release_dir,
-            require_approval=True,
-            approval_file=approval_path,
-            approval_key=RELEASE_APPROVAL_KEY,
-        )
+        with mock.patch.dict(os.environ, github_context, clear=False):
+            _, receipt = encryption_helper.write_release_receipt(
+                dist_dir=release_dir,
+                require_approval=True,
+                approval_file=approval_path,
+                approval_key=RELEASE_APPROVAL_KEY,
+            )
 
+        self.assertEqual(receipt["github_context"], github_context)
         self.assertEqual(receipt["release_approval_github_context"], github_context)
 
     def test_write_release_receipt_rejects_approval_digest_mismatch(self):
@@ -932,11 +955,32 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         github_context = {
             "GITHUB_REPOSITORY": "acme/demo",
             "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
             "GITHUB_SHA": "deadbeef",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "17",
             "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeed",
             "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_TRIGGERING_ACTOR": "ops-oncall",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
         }
 
         with mock.patch.dict(os.environ, github_context, clear=False):
@@ -2227,3 +2271,4 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

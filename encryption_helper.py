@@ -77,11 +77,32 @@ DEFAULT_RELEASE_APPROVAL_KEY_ID = "release-approval-hmac-v1"
 GITHUB_CONTEXT_KEYS = (
     "GITHUB_REPOSITORY",
     "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_TYPE",
+    "GITHUB_REF_PROTECTED",
+    "GITHUB_ACTIONS",
+    "CI",
+    "RUNNER_ENVIRONMENT",
+    "RUNNER_OS",
+    "RUNNER_ARCH",
     "GITHUB_SHA",
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
+    "GITHUB_RUN_NUMBER",
     "GITHUB_WORKFLOW",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_WORKFLOW_SHA",
     "GITHUB_EVENT_NAME",
+    "GITHUB_SERVER_URL",
+    "GITHUB_API_URL",
+    "GITHUB_GRAPHQL_URL",
+    "GITHUB_JOB",
+    "GITHUB_ACTOR",
+    "GITHUB_TRIGGERING_ACTOR",
+    "GITHUB_ACTOR_ID",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REPOSITORY_OWNER",
+    "GITHUB_REPOSITORY_OWNER_ID",
 )
 
 
@@ -1573,6 +1594,7 @@ def write_release_receipt(
     release_approval_sha256 = None
     approval_signature_digest = None
     approval_github_context = None
+    release_github_context = _github_context_snapshot()
 
     if require_approval:
         approval_path = normalize_path(approval_file) if approval_file is not None else (release_dir / "release_approval.json")
@@ -1639,6 +1661,7 @@ def write_release_receipt(
     receipt = {
         "schema": RELEASE_RECEIPT_SCHEMA,
         "generated_at_utc": _utc_now_iso8601_seconds(),
+        "github_context": release_github_context if isinstance(release_github_context, dict) else None,
         "release_root": str(release_dir),
         "build_manifest_relative_path": "build_manifest.json",
         "release_bundle_relative_path": RELEASE_BUNDLE_FILENAME,

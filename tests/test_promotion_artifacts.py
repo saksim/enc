@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import hashlib
 import hmac
 import json
@@ -30,7 +30,14 @@ class PromotionArtifactsTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(str(root), ignore_errors=True))
         return root
 
-    def _write_release_artifacts(self, release_dir, *, approval_key_id="ops-approval-main", approval_github_context=None):
+    def _write_release_artifacts(
+        self,
+        release_dir,
+        *,
+        approval_key_id="ops-approval-main",
+        approval_github_context=None,
+        release_github_context=None,
+    ):
         (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
         runtime_path = release_dir / "pkg" / "enc_rt_demo.pyd"
         module_path = release_dir / "pkg" / "mod.pyd"
@@ -106,6 +113,7 @@ class PromotionArtifactsTests(unittest.TestCase):
         approval_path = release_dir / "release_approval.json"
         receipt_payload = {
             "schema": encryption_helper.RELEASE_RECEIPT_SCHEMA,
+            "github_context": dict(release_github_context) if release_github_context is not None else None,
             "release_bundle_relative_path": encryption_helper.RELEASE_BUNDLE_FILENAME,
             "release_bundle_sha256": encryption_helper._sha256_file(release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME),
             "release_approval_verified": True,
@@ -751,6 +759,11 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "github_context": {
                         "GITHUB_REPOSITORY": "acme/demo",
                         "GITHUB_REF": "refs/heads/release/x",
+                        "GITHUB_ACTIONS": "false",
+                        "CI": "false",
+            "RUNNER_ENVIRONMENT": "self-hosted",
+                        "RUNNER_OS": "Windows",
+                        "RUNNER_ARCH": "ARM64",
                         "GITHUB_RUN_ID": "99999",
                         "GITHUB_RUN_ATTEMPT": "2",
                         "GITHUB_SHA": "cafebabe",
@@ -809,6 +822,11 @@ class PromotionArtifactsTests(unittest.TestCase):
             {
                 "GITHUB_REPOSITORY": "acme/demo",
                 "GITHUB_REF": "refs/heads/main",
+                "GITHUB_ACTIONS": "true",
+                "CI": "true",
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "RUNNER_OS": "Linux",
+                "RUNNER_ARCH": "X64",
                 "GITHUB_RUN_ID": "12345",
                 "GITHUB_RUN_ATTEMPT": "1",
                 "GITHUB_SHA": "deadbeef",
@@ -829,6 +847,11 @@ class PromotionArtifactsTests(unittest.TestCase):
             )
         self.assertFalse(report["passed"])
         self.assertTrue(any("GITHUB_REF mismatch" in item for item in report["failures"]))
+        self.assertTrue(any("GITHUB_ACTIONS mismatch" in item for item in report["failures"]))
+        self.assertTrue(any(".CI mismatch" in item for item in report["failures"]))
+        self.assertTrue(any(".RUNNER_ENVIRONMENT mismatch" in item for item in report["failures"]))
+        self.assertTrue(any(".RUNNER_OS mismatch" in item for item in report["failures"]))
+        self.assertTrue(any(".RUNNER_ARCH mismatch" in item for item in report["failures"]))
         self.assertTrue(any("GITHUB_RUN_ID mismatch" in item for item in report["failures"]))
         self.assertTrue(any("GITHUB_RUN_ATTEMPT mismatch" in item for item in report["failures"]))
         self.assertTrue(
@@ -836,6 +859,15 @@ class PromotionArtifactsTests(unittest.TestCase):
         )
         self.assertTrue(
             any("rotation_rehearsal_report.workflow_run_attempt missing" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_runner_environment missing" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_runner_os missing" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_runner_arch missing" in item for item in report["failures"])
         )
         self.assertTrue(
             any("promotion_evidence.github_context.GITHUB_WORKFLOW mismatch" in item for item in report["failures"])
@@ -857,13 +889,37 @@ class PromotionArtifactsTests(unittest.TestCase):
         github_context = {
             "GITHUB_REPOSITORY": "acme/demo",
             "GITHUB_REF": "refs/heads/main",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "12",
             "GITHUB_SHA": "deadbeef",
             "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeed",
             "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
         }
-        self._write_release_artifacts(release_dir, approval_github_context=github_context)
+        self._write_release_artifacts(
+            release_dir,
+            approval_github_context=github_context,
+            release_github_context=github_context,
+        )
         policy_path, workflow_path = self._write_policy_and_workflow(root)
 
         evidence_path = root / "promotion_evidence.json"
@@ -910,10 +966,30 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "schema": "enc2sop-rotation-rehearsal/v1",
                     "workflow_run_id": "12345",
                     "workflow_run_attempt": "3",
+                    "workflow_run_number": "12",
                     "workflow_ref": "refs/heads/main",
+                    "workflow_ref_name": "main",
+                    "workflow_ref_type": "branch",
                     "workflow_sha": "deadbeef",
+                    "workflow_github_actions": "true",
+                    "workflow_ci": "true",
+                    "workflow_runner_environment": "github-hosted",
+                    "workflow_runner_os": "Linux",
+                    "workflow_runner_arch": "X64",
                     "workflow_name": "release-promotion-gate",
+                    "workflow_name_ref": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+                    "workflow_name_sha": "facefeed",
                     "workflow_event": "push",
+                    "workflow_server_url": "https://github.com",
+                    "workflow_api_url": "https://api.github.com",
+                    "workflow_graphql_url": "https://api.github.com/graphql",
+                    "workflow_job": "promotion-gate",
+                    "workflow_actor": "octocat",
+                    "workflow_actor_id": "42",
+                    "workflow_repository_id": "4242",
+                    "workflow_repository_owner": "acme",
+                    "workflow_repository_owner_id": "424242",
+                    "workflow_ref_protected": "true",
                     "requested": True,
                     "executed": True,
                     "old_key_rejected": True,
@@ -950,13 +1026,22 @@ class PromotionArtifactsTests(unittest.TestCase):
         github_context = {
             "GITHUB_REPOSITORY": "acme/demo",
             "GITHUB_REF": "refs/heads/main",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_SHA": "deadbeef",
             "GITHUB_WORKFLOW": "release-promotion-gate",
             "GITHUB_EVENT_NAME": "push",
         }
-        self._write_release_artifacts(release_dir, approval_github_context=github_context)
+        self._write_release_artifacts(
+            release_dir,
+            approval_github_context=github_context,
+            release_github_context=github_context,
+        )
         policy_path, workflow_path = self._write_policy_and_workflow(root)
 
         evidence_path = root / "promotion_evidence.json"
@@ -1005,6 +1090,11 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "workflow_run_attempt": "999",
                     "workflow_ref": "refs/heads/release/legacy",
                     "workflow_sha": "cafebabe",
+                    "workflow_github_actions": "false",
+                    "workflow_ci": "false",
+                    "workflow_runner_environment": "self-hosted",
+                    "workflow_runner_os": "Windows",
+                    "workflow_runner_arch": "ARM64",
                     "workflow_name": "release-promotion-gate",
                     "workflow_event": "workflow_dispatch",
                     "requested": True,
@@ -1038,6 +1128,21 @@ class PromotionArtifactsTests(unittest.TestCase):
         self.assertTrue(any("rotation_rehearsal_report.workflow_ref mismatch" in item for item in report["failures"]))
         self.assertTrue(any("rotation_rehearsal_report.workflow_sha mismatch" in item for item in report["failures"]))
         self.assertTrue(
+            any("rotation_rehearsal_report.workflow_github_actions mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_ci mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_runner_environment mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_runner_os mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("rotation_rehearsal_report.workflow_runner_arch mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
             any("rotation_rehearsal_report.workflow_run_attempt mismatch" in item for item in report["failures"])
         )
         self.assertTrue(any("rotation_rehearsal_report.workflow_event mismatch" in item for item in report["failures"]))
@@ -1051,6 +1156,11 @@ class PromotionArtifactsTests(unittest.TestCase):
             approval_github_context={
                 "GITHUB_REPOSITORY": "acme/demo",
                 "GITHUB_REF": "refs/heads/main",
+                "GITHUB_ACTIONS": "false",
+                "CI": "false",
+                "RUNNER_ENVIRONMENT": "self-hosted",
+                "RUNNER_OS": "Windows",
+                "RUNNER_ARCH": "ARM64",
                 "GITHUB_RUN_ID": "12345",
                 "GITHUB_RUN_ATTEMPT": "2",
                 "GITHUB_SHA": "deadbeef",
@@ -1068,6 +1178,11 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "github_context": {
                         "GITHUB_REPOSITORY": "acme/demo",
                         "GITHUB_REF": "refs/heads/main",
+                        "GITHUB_ACTIONS": "true",
+                        "CI": "true",
+                        "RUNNER_ENVIRONMENT": "github-hosted",
+                        "RUNNER_OS": "Linux",
+                        "RUNNER_ARCH": "X64",
                         "GITHUB_RUN_ID": "12345",
                         "GITHUB_RUN_ATTEMPT": "3",
                         "GITHUB_SHA": "deadbeef",
@@ -1132,6 +1247,11 @@ class PromotionArtifactsTests(unittest.TestCase):
             {
                 "GITHUB_REPOSITORY": "acme/demo",
                 "GITHUB_REF": "refs/heads/main",
+                "GITHUB_ACTIONS": "true",
+                "CI": "true",
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "RUNNER_OS": "Linux",
+                "RUNNER_ARCH": "X64",
                 "GITHUB_RUN_ID": "12345",
                 "GITHUB_RUN_ATTEMPT": "3",
                 "GITHUB_SHA": "deadbeef",
@@ -1156,13 +1276,222 @@ class PromotionArtifactsTests(unittest.TestCase):
             any("release_approval.github_context.GITHUB_RUN_ATTEMPT mismatch" in item for item in report["failures"])
         )
         self.assertTrue(
+            any("release_approval.github_context.GITHUB_ACTIONS mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_approval.github_context.CI mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_approval.github_context.RUNNER_ENVIRONMENT mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_approval.github_context.RUNNER_OS mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_approval.github_context.RUNNER_ARCH mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
             any("release_approval.github_context.GITHUB_WORKFLOW mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any(
+                "release_receipt.release_approval_github_context.GITHUB_ACTIONS mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "release_receipt.release_approval_github_context.CI mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "release_receipt.release_approval_github_context.RUNNER_ENVIRONMENT mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "release_receipt.release_approval_github_context.RUNNER_OS mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "release_receipt.release_approval_github_context.RUNNER_ARCH mismatch" in item
+                for item in report["failures"]
+            )
         )
         self.assertTrue(
             any(
                 "release_receipt.release_approval_github_context.GITHUB_WORKFLOW mismatch" in item
                 for item in report["failures"]
             )
+        )
+
+    def test_run_promotion_artifact_audit_fails_when_release_receipt_context_mismatches(self):
+        root = self.make_case_root("promotion_artifacts_release_receipt_context_mismatch")
+        release_dir = root / "release"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        approval_context = {
+            "GITHUB_REPOSITORY": "acme/demo",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
+            "GITHUB_RUN_ID": "12345",
+            "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "11",
+            "GITHUB_SHA": "deadbeef",
+            "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeed",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
+        }
+        receipt_context = dict(approval_context)
+        receipt_context.update(
+            {
+                "GITHUB_ACTIONS": "false",
+                "CI": "false",
+                "RUNNER_ENVIRONMENT": "self-hosted",
+                "RUNNER_OS": "Windows",
+                "RUNNER_ARCH": "ARM64",
+                "GITHUB_WORKFLOW": "release-promotion-gate-other",
+                "GITHUB_RUN_ATTEMPT": "2",
+            }
+        )
+        self._write_release_artifacts(
+            release_dir,
+            approval_github_context=approval_context,
+            release_github_context=receipt_context,
+        )
+        policy_path, workflow_path = self._write_policy_and_workflow(root)
+
+        evidence_path = root / "promotion_evidence.json"
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-promotion-evidence/v1",
+                    "github_context": approval_context,
+                    "branches": [{"name": "main", "required_status_checks": ["Signed Approval Promotion Gate"]}],
+                    "environments": [{"name": "production-promotion", "required_reviewers_count": 1}],
+                    "secrets": ["SOENC_RELEASE_APPROVAL_KEY_B64"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        promotion_report = root / "promotion_audit_report.json"
+        promotion_report.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-promotion-audit-report/v1",
+                    "passed": True,
+                    "summary": {"total_failures": 0},
+                    "failures": [],
+                    "inputs": {
+                        "policy_file": str(policy_path.resolve()),
+                        "policy_sha256": encryption_helper._sha256_file(policy_path),
+                        "evidence_file": str(evidence_path.resolve()),
+                        "evidence_sha256": encryption_helper._sha256_file(evidence_path),
+                        "workflow_file": str(workflow_path.resolve()),
+                        "workflow_sha256": encryption_helper._sha256_file(workflow_path),
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        rotation_report = root / "rotation_rehearsal_report.json"
+        rotation_report.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-rotation-rehearsal/v1",
+                    "workflow_run_id": "12345",
+                    "workflow_run_attempt": "3",
+                    "workflow_run_number": "11",
+                    "workflow_ref": "refs/heads/main",
+                    "workflow_ref_name": "main",
+                    "workflow_ref_type": "branch",
+                    "workflow_sha": "deadbeef",
+                    "workflow_github_actions": "true",
+                    "workflow_ci": "true",
+                    "workflow_runner_environment": "github-hosted",
+                    "workflow_runner_os": "Linux",
+                    "workflow_runner_arch": "X64",
+                    "workflow_name": "release-promotion-gate",
+                    "workflow_name_ref": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+                    "workflow_name_sha": "facefeed",
+                    "workflow_event": "push",
+                    "workflow_server_url": "https://github.com",
+                    "workflow_api_url": "https://api.github.com",
+                    "workflow_graphql_url": "https://api.github.com/graphql",
+                    "workflow_job": "promotion-gate",
+                    "workflow_actor": "octocat",
+                    "workflow_actor_id": "42",
+                    "workflow_repository_id": "4242",
+                    "workflow_repository_owner": "acme",
+                    "workflow_repository_owner_id": "424242",
+                    "workflow_ref_protected": "true",
+                    "requested": False,
+                    "executed": False,
+                    "old_key_rejected": None,
+                    "status": "not-requested",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, approval_context, clear=False):
+            _, report = promotion_artifacts.run_promotion_artifact_audit(
+                dist_dir=str(release_dir),
+                promotion_evidence_file=str(evidence_path),
+                promotion_report_file=str(promotion_report),
+                rotation_report_file=str(rotation_report),
+                promotion_policy_file=str(policy_path),
+                promotion_workflow_file=str(workflow_path),
+                require_ci_context_match=True,
+                repo_root=root,
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("release_receipt.github_context.GITHUB_RUN_ATTEMPT mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_receipt.github_context.GITHUB_ACTIONS mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(any("release_receipt.github_context.CI mismatch" in item for item in report["failures"]))
+        self.assertTrue(
+            any("release_receipt.github_context.RUNNER_ENVIRONMENT mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_receipt.github_context.RUNNER_OS mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_receipt.github_context.RUNNER_ARCH mismatch" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("release_receipt.github_context.GITHUB_WORKFLOW mismatch" in item for item in report["failures"])
         )
 
     def test_run_promotion_artifact_audit_fails_when_promotion_report_digest_binding_mismatch(self):
@@ -1665,13 +1994,37 @@ class PromotionArtifactsTests(unittest.TestCase):
         github_context = {
             "GITHUB_REPOSITORY": "acme/demo",
             "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "15",
             "GITHUB_SHA": "deadbeef",
             "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeed",
             "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
         }
-        self._write_release_artifacts(release_dir, approval_github_context=github_context)
+        self._write_release_artifacts(
+            release_dir,
+            approval_github_context=github_context,
+            release_github_context=github_context,
+        )
         policy_path, workflow_path = self._write_policy_and_workflow(root)
 
         evidence_path = root / "promotion_evidence.json"
@@ -1718,10 +2071,30 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "schema": "enc2sop-rotation-rehearsal/v1",
                     "workflow_run_id": "12345",
                     "workflow_run_attempt": "3",
+                    "workflow_run_number": "15",
                     "workflow_sha": "deadbeef",
+                    "workflow_github_actions": "true",
+                    "workflow_ci": "true",
+                    "workflow_runner_environment": "github-hosted",
+                    "workflow_runner_os": "Linux",
+                    "workflow_runner_arch": "X64",
                     "workflow_ref": "refs/heads/main",
+                    "workflow_ref_name": "main",
+                    "workflow_ref_type": "branch",
                     "workflow_name": "release-promotion-gate",
+                    "workflow_name_ref": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+                    "workflow_name_sha": "facefeed",
                     "workflow_event": "push",
+                    "workflow_server_url": "https://github.com",
+                    "workflow_api_url": "https://api.github.com",
+                    "workflow_graphql_url": "https://api.github.com/graphql",
+                    "workflow_job": "promotion-gate",
+                    "workflow_actor": "octocat",
+                    "workflow_actor_id": "42",
+                    "workflow_repository_id": "4242",
+                    "workflow_repository_owner": "acme",
+                    "workflow_repository_owner_id": "424242",
+                    "workflow_ref_protected": "true",
                     "requested": False,
                     "executed": False,
                     "old_key_rejected": None,
@@ -1790,11 +2163,31 @@ class PromotionArtifactsTests(unittest.TestCase):
         github_context = {
             "GITHUB_REPOSITORY": "acme/demo",
             "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "16",
             "GITHUB_SHA": "deadbeef",
             "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeed",
             "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
         }
         self._write_release_artifacts(release_dir, approval_github_context=github_context)
         policy_path, workflow_path = self._write_policy_and_workflow(root)
@@ -1843,10 +2236,30 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "schema": "enc2sop-rotation-rehearsal/v1",
                     "workflow_run_id": "12345",
                     "workflow_run_attempt": "3",
+                    "workflow_run_number": "16",
                     "workflow_sha": "deadbeef",
+                    "workflow_github_actions": "true",
+                    "workflow_ci": "true",
+                    "workflow_runner_environment": "github-hosted",
+                    "workflow_runner_os": "Linux",
+                    "workflow_runner_arch": "X64",
                     "workflow_ref": "refs/heads/main",
+                    "workflow_ref_name": "main",
+                    "workflow_ref_type": "branch",
                     "workflow_name": "release-promotion-gate",
+                    "workflow_name_ref": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+                    "workflow_name_sha": "facefeed",
                     "workflow_event": "push",
+                    "workflow_server_url": "https://github.com",
+                    "workflow_api_url": "https://api.github.com",
+                    "workflow_graphql_url": "https://api.github.com/graphql",
+                    "workflow_job": "promotion-gate",
+                    "workflow_actor": "octocat",
+                    "workflow_actor_id": "42",
+                    "workflow_repository_id": "4242",
+                    "workflow_repository_owner": "acme",
+                    "workflow_repository_owner_id": "424242",
+                    "workflow_ref_protected": "true",
                     "requested": False,
                     "executed": False,
                     "old_key_rejected": None,
@@ -1884,11 +2297,31 @@ class PromotionArtifactsTests(unittest.TestCase):
                     github_context={
                         "GITHUB_REPOSITORY": "acme/demo",
                         "GITHUB_REF": "refs/heads/main",
+                        "GITHUB_REF_NAME": "release/x",
+                        "GITHUB_REF_TYPE": "branch",
+                        "GITHUB_REF_PROTECTED": "false",
+                        "GITHUB_ACTIONS": "false",
+                        "CI": "false",
+                        "RUNNER_ENVIRONMENT": "self-hosted",
+                        "RUNNER_OS": "Windows",
+                        "RUNNER_ARCH": "ARM64",
                         "GITHUB_RUN_ID": "12345",
                         "GITHUB_RUN_ATTEMPT": "2",
+                        "GITHUB_RUN_NUMBER": "2",
                         "GITHUB_SHA": "deadbeef",
                         "GITHUB_WORKFLOW": "release-promotion-gate-other",
+                        "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/release/x",
+                        "GITHUB_WORKFLOW_SHA": "badc0de0",
                         "GITHUB_EVENT_NAME": "push",
+                        "GITHUB_SERVER_URL": "https://github.com",
+                        "GITHUB_API_URL": "https://api.github.com",
+                        "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+                        "GITHUB_JOB": "promotion-gate-other",
+                        "GITHUB_ACTOR": "other-actor",
+                        "GITHUB_ACTOR_ID": "999",
+                        "GITHUB_REPOSITORY_ID": "9999",
+                        "GITHUB_REPOSITORY_OWNER": "other-org",
+                        "GITHUB_REPOSITORY_OWNER_ID": "99999",
                     },
                 ),
                 ensure_ascii=False,
@@ -1923,6 +2356,36 @@ class PromotionArtifactsTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
+                "promotion_run_receipt.github_context.GITHUB_ACTIONS mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "promotion_run_receipt.github_context.CI mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "promotion_run_receipt.github_context.RUNNER_ENVIRONMENT mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "promotion_run_receipt.github_context.RUNNER_OS mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "promotion_run_receipt.github_context.RUNNER_ARCH mismatch" in item
+                for item in report["failures"]
+            )
+        )
+        self.assertTrue(
+            any(
                 "promotion_run_receipt.github_context.GITHUB_WORKFLOW mismatch" in item
                 for item in report["failures"]
             )
@@ -1931,3 +2394,5 @@ class PromotionArtifactsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
