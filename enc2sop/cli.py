@@ -375,6 +375,7 @@ def _run_verify_promotion_artifacts(args) -> int:
         require_release_approval_signature=args.require_release_approval_signature,
         require_rotation_pass=args.require_rotation_pass,
         require_ci_context_match=args.require_ci_context_match,
+        require_artifact_context_consistency=args.require_artifact_context_consistency,
         repo_root=Path.cwd(),
     )
     failures = report.get("failures") or []
@@ -712,6 +713,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-ci-context-match",
         action="store_true",
         help="Require promotion_evidence.github_context to match current GitHub runtime context.",
+    )
+    verify_promotion_artifacts_parser.add_argument(
+        "--require-artifact-context-consistency",
+        action="store_true",
+        help=(
+            "Require release approval/receipt, rotation report, and pre-existing run receipt "
+            "GitHub context to match promotion_evidence.github_context."
+        ),
     )
     verify_promotion_artifacts_parser.set_defaults(handler=_run_verify_promotion_artifacts)
     return parser

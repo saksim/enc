@@ -1,4 +1,4 @@
-﻿import pathlib
+import pathlib
 import unittest
 
 
@@ -16,6 +16,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("python ./soenc.py promotion-dry-run", payload)
         self.assertIn("python ./soenc.py verify-promotion-artifacts", payload)
         self.assertIn("--require-ci-context-match", payload)
+        self.assertIn("--require-artifact-context-consistency", payload)
         self.assertIn("--release-approval-key-b64", payload)
         self.assertIn("--release-approval-key-id", payload)
         self.assertIn("--require-release-approval-signature", payload)
@@ -49,12 +50,15 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("rotation_rehearsal_report.json", payload)
         self.assertIn("promotion_run_receipt.json", payload)
         self.assertIn("\"workflow_name\": \"${GITHUB_WORKFLOW}\"", payload)
+        self.assertIn("\"workflow_repository\": \"${GITHUB_REPOSITORY}\"", payload)
         self.assertIn("\"workflow_run_number\": \"${GITHUB_RUN_NUMBER}\"", payload)
+        self.assertIn("\"workflow_retention_days\": \"${GITHUB_RETENTION_DAYS}\"", payload)
         self.assertIn("\"workflow_github_actions\": \"${GITHUB_ACTIONS}\"", payload)
         self.assertIn("\"workflow_ci\": \"${CI}\"", payload)
         self.assertIn("\"workflow_runner_environment\": \"${RUNNER_ENVIRONMENT}\"", payload)
         self.assertIn("\"workflow_runner_os\": \"${RUNNER_OS}\"", payload)
         self.assertIn("\"workflow_runner_arch\": \"${RUNNER_ARCH}\"", payload)
+        self.assertIn("\"workflow_runner_name\": \"${RUNNER_NAME}\"", payload)
         self.assertIn("\"workflow_ref_name\": \"${GITHUB_REF_NAME}\"", payload)
         self.assertIn("\"workflow_ref_type\": \"${GITHUB_REF_TYPE}\"", payload)
         self.assertIn("\"workflow_name_ref\": \"${GITHUB_WORKFLOW_REF}\"", payload)

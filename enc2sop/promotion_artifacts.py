@@ -14,6 +14,7 @@ from typing import List
 from typing import Mapping
 from typing import Optional
 from typing import Tuple
+from urllib.parse import urlparse
 
 import encryption_helper
 from enc2sop import promotion_audit
@@ -47,9 +48,11 @@ STRICT_CONTEXT_REQUIRED_BINDING_KEYS = (
     "RUNNER_ENVIRONMENT",
     "RUNNER_OS",
     "RUNNER_ARCH",
+    "RUNNER_NAME",
     "GITHUB_SHA",
     "GITHUB_RUN_ATTEMPT",
     "GITHUB_RUN_NUMBER",
+    "GITHUB_RETENTION_DAYS",
     "GITHUB_WORKFLOW",
     "GITHUB_WORKFLOW_REF",
     "GITHUB_WORKFLOW_SHA",
@@ -67,7 +70,82 @@ STRICT_CONTEXT_REQUIRED_BINDING_KEYS = (
 STRICT_CONTEXT_OPTIONAL_BINDING_KEYS = (
     "GITHUB_TRIGGERING_ACTOR",
 )
+STRICT_CONTEXT_BOOLEAN_BINDING_KEYS = (
+    "GITHUB_ACTIONS",
+    "CI",
+)
+STRICT_CONTEXT_CI_TRUE_BOOLEAN_KEYS = (
+    "GITHUB_ACTIONS",
+    "CI",
+)
+STRICT_CONTEXT_POSITIVE_INTEGER_KEYS = (
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_RUN_NUMBER",
+    "GITHUB_RETENTION_DAYS",
+    "GITHUB_ACTOR_ID",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REPOSITORY_OWNER_ID",
+)
+STRICT_CONTEXT_SHA_KEYS = (
+    "GITHUB_SHA",
+    "GITHUB_WORKFLOW_SHA",
+)
+STRICT_CONTEXT_URL_KEYS = (
+    "GITHUB_SERVER_URL",
+    "GITHUB_API_URL",
+    "GITHUB_GRAPHQL_URL",
+)
+STRICT_CONTEXT_ENUM_VALUES = {
+    "GITHUB_REF_TYPE": ("branch", "tag"),
+    "RUNNER_ENVIRONMENT": ("github-hosted", "self-hosted"),
+    "RUNNER_OS": ("linux", "windows", "macos"),
+    "RUNNER_ARCH": ("x86", "x64", "arm", "arm64"),
+}
 STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY = "GITHUB_REF_PROTECTED"
+GITHUB_REF_BRANCH_PREFIX = "refs/heads/"
+GITHUB_REF_TAG_PREFIX = "refs/tags/"
+GITHUB_WORKFLOW_PATH_MARKER = "/.github/workflows/"
+GITHUB_WORKFLOW_FILE_SUFFIXES = (".yml", ".yaml")
+GITHUB_PUBLIC_SERVER_HOST = "github.com"
+GITHUB_PUBLIC_API_HOST = "api.github.com"
+GITHUB_PUBLIC_API_PATH = "/"
+GITHUB_PUBLIC_GRAPHQL_PATH = "/graphql"
+GITHUB_ENTERPRISE_API_PATH = "/api/v3"
+GITHUB_ENTERPRISE_GRAPHQL_PATH = "/api/graphql"
+REPOSITORY_SLUG_SEGMENT_ALLOWED_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.")
+ROTATION_REPORT_TO_GITHUB_CONTEXT_KEYS = (
+    ("workflow_repository", "GITHUB_REPOSITORY"),
+    ("workflow_run_id", "GITHUB_RUN_ID"),
+    ("workflow_ref", "GITHUB_REF"),
+    ("workflow_ref_name", "GITHUB_REF_NAME"),
+    ("workflow_ref_type", "GITHUB_REF_TYPE"),
+    ("workflow_sha", "GITHUB_SHA"),
+    ("workflow_github_actions", "GITHUB_ACTIONS"),
+    ("workflow_ci", "CI"),
+    ("workflow_runner_environment", "RUNNER_ENVIRONMENT"),
+    ("workflow_runner_os", "RUNNER_OS"),
+    ("workflow_runner_arch", "RUNNER_ARCH"),
+    ("workflow_runner_name", "RUNNER_NAME"),
+    ("workflow_run_attempt", "GITHUB_RUN_ATTEMPT"),
+    ("workflow_run_number", "GITHUB_RUN_NUMBER"),
+    ("workflow_retention_days", "GITHUB_RETENTION_DAYS"),
+    ("workflow_name", "GITHUB_WORKFLOW"),
+    ("workflow_name_ref", "GITHUB_WORKFLOW_REF"),
+    ("workflow_name_sha", "GITHUB_WORKFLOW_SHA"),
+    ("workflow_event", "GITHUB_EVENT_NAME"),
+    ("workflow_server_url", "GITHUB_SERVER_URL"),
+    ("workflow_api_url", "GITHUB_API_URL"),
+    ("workflow_graphql_url", "GITHUB_GRAPHQL_URL"),
+    ("workflow_job", "GITHUB_JOB"),
+    ("workflow_actor", "GITHUB_ACTOR"),
+    ("workflow_triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
+    ("workflow_actor_id", "GITHUB_ACTOR_ID"),
+    ("workflow_repository_id", "GITHUB_REPOSITORY_ID"),
+    ("workflow_repository_owner", "GITHUB_REPOSITORY_OWNER"),
+    ("workflow_repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
+    ("workflow_ref_protected", STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY),
+)
 
 
 class PromotionArtifactAuditError(RuntimeError):
@@ -429,46 +507,21 @@ def _validate_rotation_report(
 
     if require_ci_context_match:
         if runtime_context:
-            context_bindings = (
-                ("workflow_run_id", "GITHUB_RUN_ID"),
-                ("workflow_ref", "GITHUB_REF"),
-                ("workflow_sha", "GITHUB_SHA"),
-                ("workflow_github_actions", "GITHUB_ACTIONS"),
-                ("workflow_ci", "CI"),
-                ("workflow_runner_environment", "RUNNER_ENVIRONMENT"),
-                ("workflow_runner_os", "RUNNER_OS"),
-                ("workflow_runner_arch", "RUNNER_ARCH"),
-                ("workflow_run_attempt", "GITHUB_RUN_ATTEMPT"),
-                ("workflow_run_number", "GITHUB_RUN_NUMBER"),
-                ("workflow_name", "GITHUB_WORKFLOW"),
-                ("workflow_ref_name", "GITHUB_REF_NAME"),
-                ("workflow_ref_type", "GITHUB_REF_TYPE"),
-                ("workflow_name_ref", "GITHUB_WORKFLOW_REF"),
-                ("workflow_name_sha", "GITHUB_WORKFLOW_SHA"),
-                ("workflow_event", "GITHUB_EVENT_NAME"),
-                ("workflow_server_url", "GITHUB_SERVER_URL"),
-                ("workflow_api_url", "GITHUB_API_URL"),
-                ("workflow_graphql_url", "GITHUB_GRAPHQL_URL"),
-                ("workflow_job", "GITHUB_JOB"),
-                ("workflow_actor", "GITHUB_ACTOR"),
-                ("workflow_triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
-                ("workflow_actor_id", "GITHUB_ACTOR_ID"),
-                ("workflow_repository_id", "GITHUB_REPOSITORY_ID"),
-                ("workflow_repository_owner", "GITHUB_REPOSITORY_OWNER"),
-                ("workflow_repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
-                ("workflow_ref_protected", STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY),
-            )
-            for report_key, runtime_key in context_bindings:
-                if runtime_key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY:
-                    expected = _normalize_ref_protected(runtime_context.get(runtime_key))
-                else:
-                    expected = _normalize_text(runtime_context.get(runtime_key))
+            for report_key, runtime_key in ROTATION_REPORT_TO_GITHUB_CONTEXT_KEYS:
+                expected = _normalize_ci_context_key_value(runtime_key, runtime_context.get(runtime_key))
                 if not expected:
                     continue
-                if runtime_key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY:
-                    actual = _normalize_ref_protected(payload.get(report_key))
-                else:
-                    actual = _normalize_text(payload.get(report_key))
+                raw_actual = _normalize_text(payload.get(report_key))
+                actual = _normalize_ci_context_key_value(runtime_key, payload.get(report_key))
+                if raw_actual and not actual:
+                    failures.append(
+                        "rotation_rehearsal_report.{0} invalid value for CI context key {1} (expected {2})".format(
+                            report_key,
+                            runtime_key,
+                            _context_key_value_requirement(runtime_key),
+                        )
+                    )
+                    continue
                 if not actual:
                     failures.append(
                         "rotation_rehearsal_report.{0} missing for CI context key {1}".format(
@@ -507,10 +560,12 @@ def _github_context_snapshot() -> Dict[str, str]:
         "RUNNER_ENVIRONMENT",
         "RUNNER_OS",
         "RUNNER_ARCH",
+        "RUNNER_NAME",
         "GITHUB_SHA",
         "GITHUB_RUN_ID",
         "GITHUB_RUN_ATTEMPT",
         "GITHUB_RUN_NUMBER",
+        "GITHUB_RETENTION_DAYS",
         "GITHUB_WORKFLOW",
         "GITHUB_REF_NAME",
         "GITHUB_REF_TYPE",
@@ -551,75 +606,639 @@ def _normalize_ref_protected(value: object) -> str:
     return ""
 
 
+def _normalize_boolean_like(value: object) -> str:
+    text = _normalize_text(value).lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return "true"
+    if text in {"false", "0", "no", "n", "off"}:
+        return "false"
+    return ""
+
+
+def _normalize_positive_integer_like(value: object) -> str:
+    text = _normalize_text(value)
+    if not text or not text.isdigit():
+        return ""
+    try:
+        parsed = int(text, 10)
+    except ValueError:
+        return ""
+    if parsed <= 0:
+        return ""
+    return str(parsed)
+
+
+def _normalize_sha_like(value: object) -> str:
+    text = _normalize_text(value).lower()
+    if len(text) != 40:
+        return ""
+    if not all(ch in "0123456789abcdef" for ch in text):
+        return ""
+    return text
+
+
+def _normalize_enum_like(value: object, allowed_values: Tuple[str, ...]) -> str:
+    text = _normalize_text(value).lower()
+    if text in allowed_values:
+        return text
+    return ""
+
+
+def _normalize_http_url_like(value: object) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return ""
+    if not parsed.netloc:
+        return ""
+    if parsed.params or parsed.query or parsed.fragment:
+        return ""
+    return parsed.geturl()
+
+
+def _normalize_https_url_like(value: object) -> str:
+    normalized = _normalize_http_url_like(value)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    if parsed.scheme.lower() != "https":
+        return ""
+    return normalized
+
+
+def _normalize_url_semantic_components(value: str) -> Tuple[str, str, str]:
+    parsed = urlparse(value)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    return scheme, netloc, path
+
+
+def _format_url_origin(scheme: str, netloc: str) -> str:
+    return "{0}://{1}".format(scheme, netloc)
+
+
+def _normalize_workflow_ref_like(value: object) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+    if "@" not in text:
+        return ""
+    workflow_path, workflow_ref = text.split("@", 1)
+    workflow_path = workflow_path.strip()
+    workflow_ref = workflow_ref.strip()
+    if not workflow_path or not workflow_ref:
+        return ""
+    marker_index = workflow_path.find(GITHUB_WORKFLOW_PATH_MARKER)
+    if marker_index <= 0:
+        return ""
+    repository_slug = workflow_path[:marker_index]
+    if not _normalize_repository_slug(repository_slug):
+        return ""
+    if not workflow_path.endswith(GITHUB_WORKFLOW_FILE_SUFFIXES):
+        return ""
+    if not workflow_ref.startswith("refs/heads/") and not workflow_ref.startswith("refs/tags/"):
+        return ""
+    return "{0}@{1}".format(workflow_path, workflow_ref)
+
+
+def _normalize_ci_context_key_value(key: str, value: object) -> str:
+    if key == "GITHUB_REPOSITORY":
+        return _normalize_repository_slug(value)
+    if key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY:
+        return _normalize_ref_protected(value)
+    if key == "GITHUB_WORKFLOW_REF":
+        return _normalize_workflow_ref_like(value)
+    if key in STRICT_CONTEXT_URL_KEYS:
+        return _normalize_https_url_like(value)
+    if key in STRICT_CONTEXT_BOOLEAN_BINDING_KEYS:
+        return _normalize_boolean_like(value)
+    if key in STRICT_CONTEXT_POSITIVE_INTEGER_KEYS:
+        return _normalize_positive_integer_like(value)
+    if key in STRICT_CONTEXT_SHA_KEYS:
+        return _normalize_sha_like(value)
+    allowed_values = STRICT_CONTEXT_ENUM_VALUES.get(key)
+    if allowed_values is not None:
+        return _normalize_enum_like(value, allowed_values)
+    return _normalize_text(value)
+
+
+def _context_key_value_requirement(key: str) -> str:
+    if key == "GITHUB_REPOSITORY":
+        return "owner/repo slug value with exactly one slash and [a-z0-9._-] segments"
+    if key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY or key in STRICT_CONTEXT_BOOLEAN_BINDING_KEYS:
+        return "true/false-like value"
+    if key == "GITHUB_WORKFLOW_REF":
+        return (
+            "workflow ref value formatted as '<owner>/<repo>/.github/workflows/<file>.yml@refs/heads/*' "
+            "or '<owner>/<repo>/.github/workflows/<file>.yml@refs/tags/*'"
+        )
+    if key in STRICT_CONTEXT_URL_KEYS:
+        return "HTTP(S) URL with scheme and host"
+    if key in STRICT_CONTEXT_POSITIVE_INTEGER_KEYS:
+        return "positive integer value"
+    if key in STRICT_CONTEXT_SHA_KEYS:
+        return "40-character hexadecimal commit SHA value"
+    if key in STRICT_CONTEXT_ENUM_VALUES:
+        return "one of: {0}".format(", ".join(STRICT_CONTEXT_ENUM_VALUES[key]))
+    return "non-empty value"
+
+
+def _validate_runtime_context_key_value(runtime_context: Mapping[str, str], key: str, failures: List[str]) -> str:
+    raw_value = _normalize_text(runtime_context.get(key))
+    normalized = _normalize_ci_context_key_value(key, runtime_context.get(key))
+    if raw_value and not normalized:
+        failures.append(
+            "invalid runtime GitHub context key for CI match: {0} (expected {1})".format(
+                key,
+                _context_key_value_requirement(key),
+            )
+        )
+        return ""
+    return normalized
+
+
+def _validate_artifact_context_key_value(
+    artifact_context: Mapping[str, object],
+    *,
+    context_label: str,
+    key: str,
+    failures: List[str],
+) -> str:
+    raw_value = _normalize_text(artifact_context.get(key))
+    normalized = _normalize_ci_context_key_value(key, artifact_context.get(key))
+    if raw_value and not normalized:
+        failures.append(
+            "{0} invalid key value: {1} (expected {2})".format(
+                context_label,
+                key,
+                _context_key_value_requirement(key),
+            )
+        )
+        return ""
+    return normalized
+
+
+def _normalize_repository_slug(value: object) -> str:
+    text = _normalize_text(value).lower()
+    if text.count("/") != 1:
+        return ""
+    owner, repo_name = text.split("/", 1)
+    owner = owner.strip()
+    repo_name = repo_name.strip()
+    if not owner or not repo_name:
+        return ""
+    if any(ch not in REPOSITORY_SLUG_SEGMENT_ALLOWED_CHARS for ch in owner):
+        return ""
+    if any(ch not in REPOSITORY_SLUG_SEGMENT_ALLOWED_CHARS for ch in repo_name):
+        return ""
+    return "{0}/{1}".format(owner, repo_name)
+
+
+def _normalize_repository_owner(value: object) -> str:
+    text = _normalize_text(value).lower()
+    if not text or "/" in text:
+        return ""
+    return text
+
+
+def _workflow_ref_repository_slug(value: object) -> str:
+    normalized_workflow_ref = _normalize_workflow_ref_like(value)
+    if not normalized_workflow_ref:
+        return ""
+    workflow_path, _ = normalized_workflow_ref.split("@", 1)
+    marker_index = workflow_path.find(GITHUB_WORKFLOW_PATH_MARKER)
+    if marker_index <= 0:
+        return ""
+    return _normalize_repository_slug(workflow_path[:marker_index])
+
+
+def _workflow_ref_ref_value(value: object) -> str:
+    normalized_workflow_ref = _normalize_workflow_ref_like(value)
+    if not normalized_workflow_ref:
+        return ""
+    _, workflow_ref = normalized_workflow_ref.split("@", 1)
+    return workflow_ref
+
+
+def _validate_repository_owner_alignment(
+    context: Mapping[str, object],
+    *,
+    context_label: str,
+    failures: List[str],
+) -> None:
+    repository = _normalize_repository_slug(context.get("GITHUB_REPOSITORY"))
+    owner = _normalize_repository_owner(context.get("GITHUB_REPOSITORY_OWNER"))
+    if not repository or not owner:
+        return
+    expected_owner, _ = repository.split("/", 1)
+    if owner != expected_owner:
+        failures.append(
+            "{0}.GITHUB_REPOSITORY_OWNER mismatch with GITHUB_REPOSITORY owner: expected {1}, got {2}".format(
+                context_label,
+                expected_owner,
+                owner,
+            )
+        )
+
+
+def _validate_workflow_ref_repository_alignment(
+    context: Mapping[str, object],
+    *,
+    context_label: str,
+    failures: List[str],
+) -> None:
+    repository = _normalize_repository_slug(context.get("GITHUB_REPOSITORY"))
+    workflow_ref_repository = _workflow_ref_repository_slug(context.get("GITHUB_WORKFLOW_REF"))
+    if not repository or not workflow_ref_repository:
+        return
+    if workflow_ref_repository != repository:
+        failures.append(
+            "{0}.GITHUB_WORKFLOW_REF repository mismatch with GITHUB_REPOSITORY: expected {1}, got {2}".format(
+                context_label,
+                repository,
+                workflow_ref_repository,
+            )
+        )
+
+
+def _validate_workflow_ref_ref_alignment(
+    context: Mapping[str, object],
+    *,
+    context_label: str,
+    failures: List[str],
+) -> None:
+    normalized_ref = _normalize_ci_context_key_value("GITHUB_REF", context.get("GITHUB_REF"))
+    workflow_ref_value = _workflow_ref_ref_value(context.get("GITHUB_WORKFLOW_REF"))
+    if not normalized_ref or not workflow_ref_value:
+        return
+    if workflow_ref_value != normalized_ref:
+        failures.append(
+            "{0}.GITHUB_WORKFLOW_REF ref mismatch with GITHUB_REF: expected {1}, got {2}".format(
+                context_label,
+                normalized_ref,
+                workflow_ref_value,
+            )
+        )
+
+
+def _validate_ref_type_ref_alignment(
+    *,
+    context_label: str,
+    ref_value: str,
+    ref_name_value: str,
+    ref_type_value: str,
+    failures: List[str],
+) -> None:
+    if not ref_value or not ref_type_value:
+        return
+    expected_ref_name = ""
+    if ref_type_value == "branch":
+        if not ref_value.startswith(GITHUB_REF_BRANCH_PREFIX):
+            failures.append(
+                "{0}.GITHUB_REF invalid value for GITHUB_REF_TYPE=branch (expected prefix {1})".format(
+                    context_label,
+                    GITHUB_REF_BRANCH_PREFIX,
+                )
+            )
+        else:
+            expected_ref_name = ref_value[len(GITHUB_REF_BRANCH_PREFIX):]
+    elif ref_type_value == "tag":
+        if not ref_value.startswith(GITHUB_REF_TAG_PREFIX):
+            failures.append(
+                "{0}.GITHUB_REF invalid value for GITHUB_REF_TYPE=tag (expected prefix {1})".format(
+                    context_label,
+                    GITHUB_REF_TAG_PREFIX,
+                )
+            )
+        else:
+            expected_ref_name = ref_value[len(GITHUB_REF_TAG_PREFIX):]
+    if expected_ref_name and ref_name_value and ref_name_value != expected_ref_name:
+        failures.append(
+            "{0}.GITHUB_REF_NAME mismatch with GITHUB_REF: expected {1}, got {2}".format(
+                context_label,
+                expected_ref_name,
+                ref_name_value,
+            )
+        )
+
+
+def _validate_ci_activation_key_semantics(
+    context: Mapping[str, object],
+    *,
+    context_label: str,
+    failures: List[str],
+) -> None:
+    for key in STRICT_CONTEXT_CI_TRUE_BOOLEAN_KEYS:
+        normalized = _normalize_ci_context_key_value(key, context.get(key))
+        if not normalized:
+            continue
+        if normalized != "true":
+            failures.append(
+                "{0}.{1} must be true in GitHub Actions CI context".format(
+                    context_label,
+                    key,
+                )
+            )
+
+
+def _validate_ci_url_semantics(
+    context: Mapping[str, object],
+    *,
+    context_label: str,
+    failures: List[str],
+) -> None:
+    server_url = _normalize_https_url_like(context.get("GITHUB_SERVER_URL"))
+    api_url = _normalize_https_url_like(context.get("GITHUB_API_URL"))
+    graphql_url = _normalize_https_url_like(context.get("GITHUB_GRAPHQL_URL"))
+    if not server_url or not api_url or not graphql_url:
+        return
+
+    server_scheme, server_netloc, server_path = _normalize_url_semantic_components(server_url)
+    api_scheme, api_netloc, api_path = _normalize_url_semantic_components(api_url)
+    graphql_scheme, graphql_netloc, graphql_path = _normalize_url_semantic_components(graphql_url)
+
+    if server_path != "/":
+        failures.append(
+            "{0}.GITHUB_SERVER_URL invalid path: expected /, got {1}".format(
+                context_label,
+                server_path,
+            )
+        )
+
+    api_origin = _format_url_origin(api_scheme, api_netloc)
+    graphql_origin = _format_url_origin(graphql_scheme, graphql_netloc)
+    if api_origin != graphql_origin:
+        failures.append(
+            "{0}.GITHUB_GRAPHQL_URL origin mismatch with GITHUB_API_URL: expected {1}, got {2}".format(
+                context_label,
+                api_origin,
+                graphql_origin,
+            )
+        )
+
+    server_origin = _format_url_origin(server_scheme, server_netloc)
+    if server_netloc == GITHUB_PUBLIC_SERVER_HOST:
+        if api_netloc != GITHUB_PUBLIC_API_HOST:
+            failures.append(
+                "{0}.GITHUB_API_URL host mismatch for github.com server: expected {1}, got {2}".format(
+                    context_label,
+                    GITHUB_PUBLIC_API_HOST,
+                    api_netloc,
+                )
+            )
+        if api_path != GITHUB_PUBLIC_API_PATH:
+            failures.append(
+                "{0}.GITHUB_API_URL path mismatch for github.com server: expected {1}, got {2}".format(
+                    context_label,
+                    GITHUB_PUBLIC_API_PATH,
+                    api_path,
+                )
+            )
+        if graphql_path != GITHUB_PUBLIC_GRAPHQL_PATH:
+            failures.append(
+                "{0}.GITHUB_GRAPHQL_URL path mismatch for github.com server: expected {1}, got {2}".format(
+                    context_label,
+                    GITHUB_PUBLIC_GRAPHQL_PATH,
+                    graphql_path,
+                )
+            )
+        return
+
+    if api_origin != server_origin:
+        failures.append(
+            "{0}.GITHUB_API_URL origin mismatch with GITHUB_SERVER_URL: expected {1}, got {2}".format(
+                context_label,
+                server_origin,
+                api_origin,
+            )
+        )
+    if graphql_origin != server_origin:
+        failures.append(
+            "{0}.GITHUB_GRAPHQL_URL origin mismatch with GITHUB_SERVER_URL: expected {1}, got {2}".format(
+                context_label,
+                server_origin,
+                graphql_origin,
+            )
+        )
+    if api_path != GITHUB_ENTERPRISE_API_PATH:
+        failures.append(
+            "{0}.GITHUB_API_URL path mismatch for enterprise server: expected {1}, got {2}".format(
+                context_label,
+                GITHUB_ENTERPRISE_API_PATH,
+                api_path,
+            )
+        )
+    if graphql_path != GITHUB_ENTERPRISE_GRAPHQL_PATH:
+        failures.append(
+            "{0}.GITHUB_GRAPHQL_URL path mismatch for enterprise server: expected {1}, got {2}".format(
+                context_label,
+                GITHUB_ENTERPRISE_GRAPHQL_PATH,
+                graphql_path,
+            )
+        )
+
+
+def _validate_runtime_ref_semantics(
+    runtime_context: Mapping[str, str],
+    failures: List[str],
+) -> None:
+    _validate_repository_owner_alignment(
+        runtime_context,
+        context_label="runtime GitHub context",
+        failures=failures,
+    )
+    _validate_workflow_ref_repository_alignment(
+        runtime_context,
+        context_label="runtime GitHub context",
+        failures=failures,
+    )
+    _validate_workflow_ref_ref_alignment(
+        runtime_context,
+        context_label="runtime GitHub context",
+        failures=failures,
+    )
+    normalized_ref = _normalize_ci_context_key_value("GITHUB_REF", runtime_context.get("GITHUB_REF"))
+    normalized_ref_name = _normalize_ci_context_key_value("GITHUB_REF_NAME", runtime_context.get("GITHUB_REF_NAME"))
+    normalized_ref_type = _normalize_ci_context_key_value("GITHUB_REF_TYPE", runtime_context.get("GITHUB_REF_TYPE"))
+    _validate_ref_type_ref_alignment(
+        context_label="runtime GitHub context",
+        ref_value=normalized_ref,
+        ref_name_value=normalized_ref_name,
+        ref_type_value=normalized_ref_type,
+        failures=failures,
+    )
+    _validate_ci_activation_key_semantics(
+        runtime_context,
+        context_label="runtime GitHub context",
+        failures=failures,
+    )
+    _validate_ci_url_semantics(
+        runtime_context,
+        context_label="runtime GitHub context",
+        failures=failures,
+    )
+
+
+def _validate_artifact_ref_semantics(
+    artifact_context: Mapping[str, object],
+    *,
+    context_label: str,
+    failures: List[str],
+) -> None:
+    _validate_repository_owner_alignment(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+    _validate_workflow_ref_repository_alignment(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+    _validate_workflow_ref_ref_alignment(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+    normalized_ref = _normalize_ci_context_key_value("GITHUB_REF", artifact_context.get("GITHUB_REF"))
+    normalized_ref_name = _normalize_ci_context_key_value("GITHUB_REF_NAME", artifact_context.get("GITHUB_REF_NAME"))
+    normalized_ref_type = _normalize_ci_context_key_value("GITHUB_REF_TYPE", artifact_context.get("GITHUB_REF_TYPE"))
+    _validate_ref_type_ref_alignment(
+        context_label=context_label,
+        ref_value=normalized_ref,
+        ref_name_value=normalized_ref_name,
+        ref_type_value=normalized_ref_type,
+        failures=failures,
+    )
+    _validate_ci_activation_key_semantics(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+    _validate_ci_url_semantics(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+
+
 def _validate_ci_context_binding(
     *,
     runtime_context: Mapping[str, str],
     artifact_context: object,
     context_label: str,
     failures: List[str],
+    required_identity_keys: Tuple[str, ...] = STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS,
+    required_binding_keys: Tuple[str, ...] = STRICT_CONTEXT_REQUIRED_BINDING_KEYS,
+    optional_binding_keys: Tuple[str, ...] = STRICT_CONTEXT_OPTIONAL_BINDING_KEYS,
+    include_protected_ref: bool = True,
 ) -> None:
     if not isinstance(artifact_context, dict):
         failures.append(
             "{0} must be present when --require-ci-context-match is enabled".format(context_label)
         )
         return
-    for key in STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS:
-        expected = _normalize_text(runtime_context.get(key))
+    _validate_runtime_ref_semantics(runtime_context, failures)
+    _validate_artifact_ref_semantics(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+    for key in required_identity_keys:
+        expected = _validate_runtime_context_key_value(runtime_context, key, failures)
         if not expected:
             continue
-        actual = _normalize_text(artifact_context.get(key))
-        if not actual:
-            failures.append("{0} missing required key: {1}".format(context_label, key))
-            continue
-        if actual != expected:
-            failures.append(
-                "{0}.{1} mismatch: expected {2}, got {3}".format(
-                    context_label,
-                    key,
-                    expected,
-                    actual,
-                )
-            )
-    for key in STRICT_CONTEXT_REQUIRED_BINDING_KEYS:
-        expected = _normalize_text(runtime_context.get(key))
-        if not expected:
-            continue
-        actual = _normalize_text(artifact_context.get(key))
-        if not actual:
-            failures.append("{0} missing required key: {1}".format(context_label, key))
-            continue
-        if actual != expected:
-            failures.append(
-                "{0}.{1} mismatch: expected {2}, got {3}".format(
-                    context_label,
-                    key,
-                    expected,
-                    actual,
-                )
-            )
-    for key in STRICT_CONTEXT_OPTIONAL_BINDING_KEYS:
-        expected = _normalize_text(runtime_context.get(key))
-        actual = _normalize_text(artifact_context.get(key))
-        if expected and actual and actual != expected:
-            failures.append(
-                "{0}.{1} mismatch: expected {2}, got {3}".format(
-                    context_label,
-                    key,
-                    expected,
-                    actual,
-                )
-            )
-    expected_ref_protected = _normalize_ref_protected(runtime_context.get(STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY))
-    actual_ref_protected = _normalize_ref_protected(artifact_context.get(STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY))
-    if expected_ref_protected and actual_ref_protected and actual_ref_protected != expected_ref_protected:
-        failures.append(
-            "{0}.{1} mismatch: expected {2}, got {3}".format(
-                context_label,
-                STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,
-                expected_ref_protected,
-                actual_ref_protected,
-            )
+        actual = _validate_artifact_context_key_value(
+            artifact_context,
+            context_label=context_label,
+            key=key,
+            failures=failures,
         )
+        if not actual:
+            failures.append("{0} missing required key: {1}".format(context_label, key))
+            continue
+        if actual != expected:
+            failures.append(
+                "{0}.{1} mismatch: expected {2}, got {3}".format(
+                    context_label,
+                    key,
+                    expected,
+                    actual,
+                )
+            )
+    for key in required_binding_keys:
+        expected = _validate_runtime_context_key_value(runtime_context, key, failures)
+        if not expected:
+            continue
+        actual = _validate_artifact_context_key_value(
+            artifact_context,
+            context_label=context_label,
+            key=key,
+            failures=failures,
+        )
+        if not actual:
+            failures.append("{0} missing required key: {1}".format(context_label, key))
+            continue
+        if actual != expected:
+            failures.append(
+                "{0}.{1} mismatch: expected {2}, got {3}".format(
+                    context_label,
+                    key,
+                    expected,
+                    actual,
+                )
+            )
+    for key in optional_binding_keys:
+        expected = _validate_runtime_context_key_value(runtime_context, key, failures)
+        if not expected:
+            continue
+        actual = _validate_artifact_context_key_value(
+            artifact_context,
+            context_label=context_label,
+            key=key,
+            failures=failures,
+        )
+        if not actual:
+            failures.append("{0} missing required key: {1}".format(context_label, key))
+            continue
+        if actual != expected:
+            failures.append(
+                "{0}.{1} mismatch: expected {2}, got {3}".format(
+                    context_label,
+                    key,
+                    expected,
+                    actual,
+                )
+            )
+    if include_protected_ref:
+        expected_ref_protected = _validate_runtime_context_key_value(
+            runtime_context,
+            STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,
+            failures,
+        )
+        actual_ref_protected = _validate_artifact_context_key_value(
+            artifact_context,
+            context_label=context_label,
+            key=STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,
+            failures=failures,
+        )
+        if expected_ref_protected and not actual_ref_protected:
+            failures.append("{0} missing required key: {1}".format(context_label, STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY))
+        elif expected_ref_protected and actual_ref_protected != expected_ref_protected:
+            failures.append(
+                "{0}.{1} mismatch: expected {2}, got {3}".format(
+                    context_label,
+                    STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,
+                    expected_ref_protected,
+                    actual_ref_protected,
+                )
+            )
 
 
 def _validate_evidence_github_context(
@@ -641,6 +1260,49 @@ def _validate_evidence_github_context(
         context_label="promotion_evidence.github_context",
         failures=failures,
     )
+
+
+def _validate_evidence_repository_binding(
+    evidence_payload: Mapping[str, object],
+    failures: List[str],
+    *,
+    require_ci_context_match: bool,
+    runtime_context: Optional[Mapping[str, str]],
+) -> None:
+    raw_repository = evidence_payload.get("repository")
+    repository_text = _normalize_text(raw_repository)
+    if not repository_text:
+        return
+    evidence_repository = _normalize_repository_slug(repository_text)
+    if not evidence_repository:
+        failures.append("promotion_evidence.repository must be a valid owner/repo slug")
+        return
+
+    evidence_context = evidence_payload.get("github_context")
+    if not isinstance(evidence_context, dict):
+        failures.append("promotion_evidence.github_context must be present when promotion_evidence.repository is set")
+        return
+
+    evidence_context_repository = _normalize_repository_slug(evidence_context.get("GITHUB_REPOSITORY"))
+    if not evidence_context_repository:
+        failures.append("promotion_evidence.github_context missing required key: GITHUB_REPOSITORY")
+    elif evidence_context_repository != evidence_repository:
+        failures.append(
+            "promotion_evidence.repository mismatch with promotion_evidence.github_context.GITHUB_REPOSITORY: expected {0}, got {1}".format(
+                evidence_repository,
+                evidence_context_repository,
+            )
+        )
+
+    if require_ci_context_match and runtime_context:
+        runtime_repository = _normalize_repository_slug(runtime_context.get("GITHUB_REPOSITORY"))
+        if runtime_repository and runtime_repository != evidence_repository:
+            failures.append(
+                "promotion_evidence.repository mismatch with runtime GITHUB_REPOSITORY: expected {0}, got {1}".format(
+                    evidence_repository,
+                    runtime_repository,
+                )
+            )
 
 
 def _artifact_digest_rows(paths: List[Tuple[str, Path]]) -> List[Dict[str, str]]:
@@ -857,14 +1519,129 @@ def _validate_runtime_context_completeness(
     runtime_context: Mapping[str, str],
     failures: List[str],
 ) -> None:
+    _validate_runtime_ref_semantics(runtime_context, failures)
     required_keys = (
         STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS
         + STRICT_CONTEXT_REQUIRED_BINDING_KEYS
         + (STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,)
     )
     for key in required_keys:
-        if not _normalize_text(runtime_context.get(key)):
+        normalized_value = _validate_runtime_context_key_value(runtime_context, key, failures)
+        if not normalized_value:
             failures.append("missing runtime GitHub context key for CI match: {0}".format(key))
+
+
+def _validate_artifact_context_completeness(
+    artifact_context: Mapping[str, object],
+    failures: List[str],
+    *,
+    context_label: str,
+) -> None:
+    _validate_artifact_ref_semantics(
+        artifact_context,
+        context_label=context_label,
+        failures=failures,
+    )
+    required_keys = (
+        STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS
+        + STRICT_CONTEXT_REQUIRED_BINDING_KEYS
+        + (STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY,)
+    )
+    for key in required_keys:
+        normalized_value = _validate_artifact_context_key_value(
+            artifact_context,
+            context_label=context_label,
+            key=key,
+            failures=failures,
+        )
+        if not normalized_value:
+            failures.append("{0} missing required key: {1}".format(context_label, key))
+
+
+def _rotation_report_to_github_context(rotation_report_payload: Mapping[str, object]) -> Dict[str, object]:
+    context = {}
+    for report_key, github_key in ROTATION_REPORT_TO_GITHUB_CONTEXT_KEYS:
+        if report_key in rotation_report_payload:
+            context[github_key] = rotation_report_payload.get(report_key)
+    return context
+
+
+def _validate_artifact_context_consistency(
+    *,
+    release_dir: Path,
+    evidence_path: Path,
+    rotation_path: Path,
+    run_receipt_path: Path,
+    failures: List[str],
+) -> None:
+    evidence_payload = _load_json_object(evidence_path, "promotion evidence")
+    evidence_context = evidence_payload.get("github_context")
+    if not isinstance(evidence_context, dict):
+        failures.append(
+            "promotion_evidence.github_context must be present when --require-artifact-context-consistency is enabled"
+        )
+        return
+    _validate_artifact_context_completeness(
+        evidence_context,
+        failures,
+        context_label="promotion_evidence.github_context",
+    )
+
+    approval_payload = _load_json_object(release_dir / "release_approval.json", "release approval")
+    receipt_payload = _load_json_object(release_dir / encryption_helper.RELEASE_RECEIPT_FILENAME, "release receipt")
+    rotation_payload = _load_json_object(rotation_path, "rotation rehearsal report")
+
+    comparison_contexts = (
+        ("release_approval.github_context", approval_payload.get("github_context")),
+        ("release_receipt.github_context", receipt_payload.get("github_context")),
+        (
+            "release_receipt.release_approval_github_context",
+            receipt_payload.get("release_approval_github_context"),
+        ),
+        (
+            "rotation_rehearsal_report.github_context_projection",
+            _rotation_report_to_github_context(rotation_payload),
+        ),
+    )
+
+    for label, context in comparison_contexts:
+        if not isinstance(context, dict):
+            failures.append("{0} must be present when --require-artifact-context-consistency is enabled".format(label))
+            continue
+        if label == "rotation_rehearsal_report.github_context_projection":
+            _validate_ci_context_binding(
+                runtime_context=evidence_context,
+                artifact_context=context,
+                context_label=label,
+                failures=failures,
+                required_identity_keys=STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS,
+                required_binding_keys=STRICT_CONTEXT_REQUIRED_BINDING_KEYS,
+                optional_binding_keys=STRICT_CONTEXT_OPTIONAL_BINDING_KEYS,
+                include_protected_ref=True,
+            )
+        else:
+            _validate_ci_context_binding(
+                runtime_context=evidence_context,
+                artifact_context=context,
+                context_label=label,
+                failures=failures,
+            )
+
+    if not run_receipt_path.exists():
+        return
+    run_receipt_payload = _load_json_object(run_receipt_path, "promotion run receipt")
+    run_receipt_context = run_receipt_payload.get("github_context")
+    if not isinstance(run_receipt_context, dict):
+        failures.append(
+            "promotion_run_receipt.github_context must be present when --require-artifact-context-consistency is enabled"
+        )
+        return
+    _validate_ci_context_binding(
+        runtime_context=evidence_context,
+        artifact_context=run_receipt_context,
+        context_label="promotion_run_receipt.github_context",
+        failures=failures,
+    )
 
 
 def _write_promotion_run_receipt(
@@ -926,6 +1703,7 @@ def run_promotion_artifact_audit(
     require_release_approval_signature: bool = False,
     require_rotation_pass: bool = False,
     require_ci_context_match: bool = False,
+    require_artifact_context_consistency: bool = False,
     repo_root: Optional[Path] = None,
 ) -> Tuple[Path, Dict[str, object]]:
     root = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
@@ -976,6 +1754,12 @@ def run_promotion_artifact_audit(
     )
     _validate_promotion_evidence(evidence_path, failures)
     evidence_payload = _load_json_object(evidence_path, "promotion evidence")
+    _validate_evidence_repository_binding(
+        evidence_payload,
+        failures,
+        require_ci_context_match=require_ci_context_match,
+        runtime_context=runtime_context,
+    )
     _validate_evidence_github_context(
         evidence_payload,
         failures,
@@ -1012,6 +1796,14 @@ def run_promotion_artifact_audit(
         expected_signature_key_id=release_approval_key_id,
         failures=failures,
     )
+    if require_artifact_context_consistency:
+        _validate_artifact_context_consistency(
+            release_dir=release_dir,
+            evidence_path=evidence_path,
+            rotation_path=rotation_path,
+            run_receipt_path=run_receipt_path,
+            failures=failures,
+        )
 
     report = {
         "schema": PROMOTION_ARTIFACT_AUDIT_SCHEMA,
@@ -1026,6 +1818,7 @@ def run_promotion_artifact_audit(
         "release_approval_signature_required": bool(require_release_approval_signature),
         "release_approval_key_id_expected": str(release_approval_key_id or "").strip() or None,
         "ci_context_match_required": bool(require_ci_context_match),
+        "artifact_context_consistency_required": bool(require_artifact_context_consistency),
         "passed": not failures,
         "summary": {
             "total_failures": len(failures),

@@ -791,13 +791,15 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "RUNNER_ENVIRONMENT": "github-hosted",
             "RUNNER_OS": "Linux",
             "RUNNER_ARCH": "X64",
-            "GITHUB_SHA": "deadbeef",
+            "RUNNER_NAME": "runner-x64",
+            "GITHUB_SHA": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
             "GITHUB_RUN_NUMBER": "17",
+            "GITHUB_RETENTION_DAYS": "90",
             "GITHUB_WORKFLOW": "release-promotion-gate",
             "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
-            "GITHUB_WORKFLOW_SHA": "facefeed",
+            "GITHUB_WORKFLOW_SHA": "facefeedfacefeedfacefeedfacefeedfacefeed",
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_API_URL": "https://api.github.com",
@@ -818,6 +820,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 approval_key_id="ops-approval-main",
             )
         self.assertEqual(approval_payload["github_context"], github_context)
+        self.assertEqual(approval_payload["github_context"]["RUNNER_NAME"], "runner-x64")
 
         with mock.patch.dict(os.environ, github_context, clear=False):
             _, receipt = encryption_helper.write_release_receipt(
@@ -963,13 +966,15 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "RUNNER_ENVIRONMENT": "github-hosted",
             "RUNNER_OS": "Linux",
             "RUNNER_ARCH": "X64",
-            "GITHUB_SHA": "deadbeef",
+            "RUNNER_NAME": "runner-x64",
+            "GITHUB_SHA": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             "GITHUB_RUN_ID": "12345",
             "GITHUB_RUN_ATTEMPT": "3",
             "GITHUB_RUN_NUMBER": "17",
+            "GITHUB_RETENTION_DAYS": "90",
             "GITHUB_WORKFLOW": "release-promotion-gate",
             "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
-            "GITHUB_WORKFLOW_SHA": "facefeed",
+            "GITHUB_WORKFLOW_SHA": "facefeedfacefeedfacefeedfacefeedfacefeed",
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_API_URL": "https://api.github.com",
@@ -992,6 +997,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             )
 
         self.assertEqual(payload["github_context"], github_context)
+        self.assertEqual(payload["github_context"]["RUNNER_NAME"], "runner-x64")
         signed_payload = dict(payload)
         digest_hex = signed_payload.pop("signature")["digest_hex"]
         expected_digest = hmac.new(key, encryption_helper._canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
@@ -2271,4 +2277,5 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

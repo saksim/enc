@@ -157,12 +157,14 @@ class PromotionEvidenceTests(unittest.TestCase):
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
                 "RUNNER_ARCH": "X64",
-                "GITHUB_SHA": "abc123",
+            "RUNNER_NAME": "runner-x64",
+                "GITHUB_SHA": "abc123abc123abc123abc123abc123abc123abcd",
                 "GITHUB_RUN_ID": "42",
                 "GITHUB_RUN_ATTEMPT": "3",
                 "GITHUB_RUN_NUMBER": "17",
+                "GITHUB_RETENTION_DAYS": "90",
                 "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
-                "GITHUB_WORKFLOW_SHA": "feedface",
+                "GITHUB_WORKFLOW_SHA": "feedfacefeedfacefeedfacefeedfacefeedface",
                 "GITHUB_SERVER_URL": "https://github.com",
                 "GITHUB_API_URL": "https://api.github.com",
                 "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
@@ -200,9 +202,11 @@ class PromotionEvidenceTests(unittest.TestCase):
         self.assertEqual(payload["github_context"]["RUNNER_ENVIRONMENT"], "github-hosted")
         self.assertEqual(payload["github_context"]["RUNNER_OS"], "Linux")
         self.assertEqual(payload["github_context"]["RUNNER_ARCH"], "X64")
+        self.assertEqual(payload["github_context"]["RUNNER_NAME"], "runner-x64")
         self.assertEqual(payload["github_context"]["GITHUB_RUN_ID"], "42")
         self.assertEqual(payload["github_context"]["GITHUB_RUN_ATTEMPT"], "3")
         self.assertEqual(payload["github_context"]["GITHUB_RUN_NUMBER"], "17")
+        self.assertEqual(payload["github_context"]["GITHUB_RETENTION_DAYS"], "90")
         self.assertEqual(payload["github_context"]["GITHUB_JOB"], "promotion-gate")
         self.assertEqual(payload["github_context"]["GITHUB_ACTOR"], "octocat")
         self.assertEqual(payload["github_context"]["GITHUB_TRIGGERING_ACTOR"], "ops-oncall")
@@ -217,7 +221,7 @@ class PromotionEvidenceTests(unittest.TestCase):
             payload["github_context"]["GITHUB_WORKFLOW_REF"],
             "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
         )
-        self.assertEqual(payload["github_context"]["GITHUB_WORKFLOW_SHA"], "feedface")
+        self.assertEqual(payload["github_context"]["GITHUB_WORKFLOW_SHA"], "feedfacefeedfacefeedfacefeedfacefeedface")
         branches = {row["name"]: row["required_status_checks"] for row in payload["branches"]}
         self.assertIn("Signed Approval Promotion Gate", branches["main"])
         self.assertIn("Signed Approval Promotion Gate", branches["release/**"])

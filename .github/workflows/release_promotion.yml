@@ -131,15 +131,18 @@ jobs:
           {
             "schema": "enc2sop-rotation-rehearsal/v1",
             "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "workflow_repository": "${GITHUB_REPOSITORY}",
             "workflow_run_id": "${GITHUB_RUN_ID}",
             "workflow_run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "workflow_run_number": "${GITHUB_RUN_NUMBER}",
+            "workflow_retention_days": "${GITHUB_RETENTION_DAYS}",
             "workflow_sha": "${GITHUB_SHA}",
             "workflow_github_actions": "${GITHUB_ACTIONS}",
             "workflow_ci": "${CI}",
             "workflow_runner_environment": "${RUNNER_ENVIRONMENT}",
             "workflow_runner_os": "${RUNNER_OS}",
             "workflow_runner_arch": "${RUNNER_ARCH}",
+            "workflow_runner_name": "${RUNNER_NAME}",
             "workflow_ref": "${GITHUB_REF}",
             "workflow_ref_name": "${GITHUB_REF_NAME}",
             "workflow_ref_type": "${GITHUB_REF_TYPE}",
@@ -259,15 +262,18 @@ jobs:
             {
               "schema": "enc2sop-rotation-rehearsal/v1",
               "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "workflow_repository": "${GITHUB_REPOSITORY}",
               "workflow_run_id": "${GITHUB_RUN_ID}",
               "workflow_run_attempt": "${GITHUB_RUN_ATTEMPT}",
               "workflow_run_number": "${GITHUB_RUN_NUMBER}",
+              "workflow_retention_days": "${GITHUB_RETENTION_DAYS}",
               "workflow_sha": "${GITHUB_SHA}",
               "workflow_github_actions": "${GITHUB_ACTIONS}",
               "workflow_ci": "${CI}",
               "workflow_runner_environment": "${RUNNER_ENVIRONMENT}",
               "workflow_runner_os": "${RUNNER_OS}",
               "workflow_runner_arch": "${RUNNER_ARCH}",
+              "workflow_runner_name": "${RUNNER_NAME}",
               "workflow_ref": "${GITHUB_REF}",
               "workflow_ref_name": "${GITHUB_REF_NAME}",
               "workflow_ref_type": "${GITHUB_REF_TYPE}",
@@ -336,6 +342,7 @@ jobs:
             artifact_args+=("--require-rotation-pass")
           fi
           artifact_args+=("--require-ci-context-match")
+          artifact_args+=("--require-artifact-context-consistency")
           python ./soenc.py verify-promotion-artifacts "${artifact_args[@]}"
 
       - name: Upload Promotion Artifacts

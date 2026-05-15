@@ -1,4 +1,4 @@
-﻿# enc2sop Implementation Task Cards
+# enc2sop Implementation Task Cards
 
 This file is the executable backlog for future Codex or GPT-5.5 coding iterations.
 
@@ -911,10 +911,11 @@ Rationale:
 
 ### CARD `ENC-P0-016`
 
-- Status: `in_progress`
+- Status: `blocked`
 - Goal: execute a real protected-branch promotion dry run with key-rotation rehearsal and archived evidence artifacts
 - Type: launch governance + operational execution
 - Depends on: `ENC-P0-015`
+- Blocker: requires real protected-branch GitHub Actions execution plus archived CI artifacts, which cannot be produced safely from this local workspace
 - Main files:
   - `.github/workflows/release_promotion.yml`
   - `docs/PROMOTION_ROLLOUT_POLICY.json`
@@ -1379,6 +1380,64 @@ Rationale:
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 50):
+  - Added offline-capable cross-artifact CI-context consistency enforcement to promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now supports `require_artifact_context_consistency`:
+      - validates required GitHub context completeness on archived `promotion_evidence.github_context`,
+      - validates strict parity from that evidence context to:
+        - `release_approval.github_context`,
+        - `release_receipt.github_context`,
+        - `release_receipt.release_approval_github_context`,
+        - `rotation_rehearsal_report` projected `workflow_*` context,
+        - pre-existing `promotion_run_receipt.github_context` (when present).
+      - this provides fail-closed mixed-artifact replay/substitution detection even without relying on current runtime CI env context.
+  - Extended CLI surface in `enc2sop/cli.py`:
+    - new `soenc verify-promotion-artifacts` flag:
+      - `--require-artifact-context-consistency`.
+  - Wired promotion workflow and policy contracts:
+    - `.github/workflows/release_promotion.yml` now passes `--require-artifact-context-consistency` into `verify-promotion-artifacts`.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires the same workflow fragment.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - pass case for artifact-context consistency with fully aligned archived artifacts.
+      - fail-closed mismatch case when archived release-approval context diverges from promotion evidence context.
+    - `tests/test_soenc_cli.py`:
+      - verifies flag wiring into `run_promotion_artifact_audit(...)`.
+    - `tests/test_release_promotion_workflow.py`:
+      - verifies workflow fragment includes `--require-artifact-context-consistency`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) for new verification mode and workflow expectation.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "artifact_context_consistency"` => `2 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts_command"` => `4 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "artifact_context_consistency or verify_promotion_artifacts or promotion"` => `39 passed, 19 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 51):
+  - Hardened promotion-evidence repository identity binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now validates `promotion_evidence.repository` when present and fail-closes on invalid slug format (must be `owner/repo`).
+    - when present, verification now enforces `promotion_evidence.repository` parity with `promotion_evidence.github_context.GITHUB_REPOSITORY`.
+    - under `--require-ci-context-match`, when present, verification now also enforces `promotion_evidence.repository` parity with runtime `GITHUB_REPOSITORY`.
+    - strict rotation-report checks now additionally validate:
+      - `rotation_rehearsal_report.workflow_repository` vs `GITHUB_REPOSITORY`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_repository` in both initialized and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires the `workflow_repository` fragment.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document promotion evidence repository binding and rotation-report repository metadata requirements.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - strict rotation context mismatch test now asserts `workflow_repository` mismatch fail-closed behavior.
+      - new fail-closed case for `promotion_evidence.repository` mismatch vs `promotion_evidence.github_context.GITHUB_REPOSITORY`.
+      - new fail-closed case for `promotion_evidence.repository` mismatch vs runtime `GITHUB_REPOSITORY` under `--require-ci-context-match`.
+    - `tests/test_release_promotion_workflow.py` verifies workflow contract includes `workflow_repository` emission.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository or rotation_context"` => passed
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => passed
+    - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts_command"` => passed
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
 - Notes (2026-05-12, iteration 39):
   - Hardened strict numeric-identity provenance binding for promotion artifact verification:
     - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_ACTOR_ID` and `GITHUB_REPOSITORY_ID` under `--require-ci-context-match`.
@@ -1687,6 +1746,445 @@ Rationale:
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 52):
+  - Closed a strict protected-ref completeness gap under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now fail-closes when runtime `GITHUB_REF_PROTECTED` is present but artifact contexts omit that key.
+    - this now applies to strict CI-context bindings for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - rotation-report strict checks already failed on missing `workflow_ref_protected`; this iteration aligns non-rotation artifact contexts with the same completeness posture.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now includes strict fail-closed regression coverage for missing `GITHUB_REF_PROTECTED` across all strict CI-context artifact surfaces listed above.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ref_protected_missing or rotation_context or release_approval_context_mismatches or release_receipt_context_mismatches or ci_context_match_accepts_existing_matching_run_receipt"` => `5 passed, 18 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `23 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 53):
+  - Hardened strict protected-ref value validation for both runtime and artifact context surfaces:
+    - `enc2sop/promotion_artifacts.py` now fail-closes when runtime `GITHUB_REF_PROTECTED` is present but not parseable as a boolean-like value (`true/false`, `1/0`, `yes/no`, `on/off`).
+    - under `--require-artifact-context-consistency`, `promotion_evidence.github_context.GITHUB_REF_PROTECTED` now fail-closes when present but not parseable as a boolean-like value.
+    - this removes a permissive path where malformed protected-ref values could be treated as missing/empty and skip strict protected-ref semantics.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document invalid protected-ref value fail-closed behavior in strict verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now includes:
+      - strict runtime CI-context fail-closed coverage for invalid `GITHUB_REF_PROTECTED` value.
+      - offline artifact-context consistency fail-closed coverage for invalid `promotion_evidence.github_context.GITHUB_REF_PROTECTED` value.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ref_protected or context_consistency"` => `5 passed, 20 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `25 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 54):
+  - Hardened strict runner-instance provenance binding under `ENC-P0-016` by adding `RUNNER_NAME` to required strict CI-context checks.
+  - `enc2sop/promotion_artifacts.py` now enforces `RUNNER_NAME` parity/completeness across:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - `release_receipt.github_context` and mirrored `release_receipt.release_approval_github_context`,
+    - pre-existing `promotion_run_receipt.github_context`,
+    - rotation report metadata via `rotation_rehearsal_report.workflow_runner_name`.
+  - `enc2sop/promotion_evidence.py` and `encryption_helper.py` now capture `RUNNER_NAME` in emitted/signed GitHub context snapshots.
+  - Workflow/policy contracts now require rotation-report runner-name metadata:
+    - `.github/workflows/release_promotion.yml` emits `workflow_runner_name` in both initialized and executed rotation reports.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_runner_name`/`RUNNER_NAME` fragments.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include `RUNNER_NAME` strict provenance coverage.
+  - Added focused coverage:
+    - `tests/test_promotion_evidence.py` validates captured `RUNNER_NAME`.
+    - `tests/test_encryption_helper.py` validates signed approval/release-context capture includes `RUNNER_NAME`.
+    - `tests/test_promotion_artifacts.py` validates strict mismatch/missing fail-closed behavior for `RUNNER_NAME` across evidence/rotation/run-receipt paths.
+    - `tests/test_release_promotion_workflow.py` validates workflow emits `workflow_runner_name`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or rotation_context or existing_run_receipt or artifact_context_consistency"`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 55):
+  - Closed a strict triggering-actor completeness gap under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now fail-closes when runtime `GITHUB_TRIGGERING_ACTOR` is present but artifact contexts omit that key.
+    - triggering-actor completeness/parity now applies to strict CI-context bindings for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`,
+      - `rotation_rehearsal_report.workflow_triggering_actor`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed triggering-actor behavior when runtime exports `GITHUB_TRIGGERING_ACTOR`.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now includes strict fail-closed regression coverage for missing `GITHUB_TRIGGERING_ACTOR` across all strict CI-context artifact surfaces listed above.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "triggering_actor_missing or ref_protected_missing or ci_context_match_accepts_matching_rotation_metadata or ci_context_match_accepts_existing_matching_run_receipt"`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "release_approval_context_mismatches or release_receipt_context_mismatches"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 56):
+  - Closed strict CI-activation boolean value-validation gaps under both strict runtime and offline consistency checks:
+    - `enc2sop/promotion_artifacts.py` now normalizes `GITHUB_ACTIONS` and `CI` as explicit boolean-like values (`true/false`, `1/0`, `yes/no`, `on/off`) for strict context bindings.
+    - under `--require-ci-context-match`, verification now fail-closes when runtime `GITHUB_ACTIONS` or `CI` is present but invalid.
+    - under `--require-ci-context-match`, governed artifact contexts now fail-close when `GITHUB_ACTIONS` or `CI` is present but invalid across:
+      - `promotion_evidence.github_context`,
+      - `release_approval.github_context`,
+      - `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - under `--require-artifact-context-consistency`, invalid `promotion_evidence.github_context` encodings for `GITHUB_ACTIONS`/`CI` now fail-close before cross-artifact parity checks.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to explicitly document fail-closed invalid-value behavior for strict CI-activation boolean keys.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_ACTIONS` and `CI`.
+    - offline artifact-context consistency fail-closed coverage for invalid `promotion_evidence.github_context` `GITHUB_ACTIONS` and `CI`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ci_boolean_keys_invalid or context_consistency_fails_on_invalid_ci_booleans or runtime_ref_protected_value_is_invalid or context_consistency_fails_on_invalid_ref_protected"` => `4 passed, 24 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "release_approval_context_mismatches or release_receipt_context_mismatches or triggering_actor_missing or ref_protected_missing"` => `4 passed, 24 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `28 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 57):
+  - Added strict retention-window provenance binding under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_RETENTION_DAYS` as a required strict binding key and validates parity across:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now also bind:
+      - `rotation_rehearsal_report.workflow_retention_days` vs `GITHUB_RETENTION_DAYS`.
+  - Updated context-capture surfaces to emit `GITHUB_RETENTION_DAYS`:
+    - `enc2sop/promotion_evidence.py`
+    - `encryption_helper.py` (signed approval + release receipt context snapshots)
+  - Updated CI/policy contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_retention_days` in both initialized and executed rotation reports.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_retention_days` and `GITHUB_RETENTION_DAYS` workflow fragments.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include retention-window provenance in strict context checks.
+  - Added focused coverage:
+    - `tests/test_promotion_evidence.py` validates evidence capture of `GITHUB_RETENTION_DAYS`.
+    - `tests/test_encryption_helper.py` validates signed approval/release-context capture includes `GITHUB_RETENTION_DAYS`.
+    - `tests/test_promotion_artifacts.py` validates strict missing/mismatch fail-closed behavior for `GITHUB_RETENTION_DAYS` across evidence/approval/receipt/rotation/run-receipt paths.
+    - `tests/test_release_promotion_workflow.py` validates workflow emits `workflow_retention_days`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "triggering_actor_missing or runtime_ci_boolean_keys_invalid or release_receipt_context_mismatches or ci_context_match_fails_with_existing_run_receipt_attempt_mismatch or ci_context_match_accepts_matching_rotation_metadata or ci_context_match_accepts_existing_matching_run_receipt"`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 58):
+  - Hardened strict CI-context value semantics for numeric/ref-type provenance bindings:
+    - `enc2sop/promotion_artifacts.py` now fail-closes invalid value encodings (not only missing/mismatch) for:
+      - `GITHUB_RUN_ID`,
+      - `GITHUB_RUN_ATTEMPT`,
+      - `GITHUB_RUN_NUMBER`,
+      - `GITHUB_RETENTION_DAYS`,
+      - `GITHUB_ACTOR_ID`,
+      - `GITHUB_REPOSITORY_ID`,
+      - `GITHUB_REPOSITORY_OWNER_ID`,
+      - `GITHUB_REF_TYPE` (must be one of `branch`/`tag`).
+    - strict numeric keys are now normalized as positive integers and must not use malformed/non-numeric forms.
+    - this validation is enforced across both:
+      - `--require-ci-context-match` runtime/artifact binding checks,
+      - `--require-artifact-context-consistency` evidence-rooted cross-artifact parity checks.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed invalid-value behavior for numeric/ref-type strict context keys.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid numeric/ref-type runtime keys.
+    - offline artifact-context consistency fail-closed coverage for invalid numeric/ref-type evidence keys.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_numeric_or_ref_type_values_are_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type or runtime_ci_boolean_keys_invalid or context_consistency_fails_on_invalid_ci_booleans or runtime_ref_protected_value_is_invalid or context_consistency_fails_on_invalid_ref_protected"` => `6 passed, 25 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or release_receipt_context or existing_run_receipt or artifact_context_consistency"` => `14 passed, 17 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 59):
+  - Hardened strict CI-context value semantics for rotation-report bindings:
+    - `enc2sop/promotion_artifacts.py` now applies the same key-aware semantic normalization to `rotation_rehearsal_report.workflow_*` strict checks that is already enforced for runtime and other artifact contexts.
+    - strict checks now normalize and compare:
+      - boolean-like values (`workflow_github_actions`, `workflow_ci`, `workflow_ref_protected`),
+      - positive-integer identity values (`workflow_run_id`, `workflow_run_attempt`, `workflow_run_number`, `workflow_retention_days`, `workflow_actor_id`, `workflow_repository_id`, `workflow_repository_owner_id`),
+      - enum values (`workflow_ref_type`),
+      - and string identity/binding values across repository/ref/workflow/job/actor/host fragments.
+    - strict mode now fail-closes invalid rotation-report value encodings (not only missing/mismatch), removing a residual inconsistency where malformed rotation metadata could previously be compared as raw strings.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to state rotation-report strict checks now use the same semantic normalization/fail-closed rules as other CI-context bindings.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass coverage for normalized-equivalent rotation metadata values (`03` vs `3`, `TRUE` vs `true`, uppercase `BRANCH`, etc.) under strict CI-context mode.
+    - fail-closed coverage for invalid rotation metadata encodings across boolean/integer/enum/protected-ref keys.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "rotation_context_metadata_mismatches or ci_context_match_accepts_normalized_rotation_values or fails_when_rotation_context_values_invalid"`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 60):
+  - Refined strict CI-context numeric normalization semantics to align with normalized-equivalence intent:
+    - `enc2sop/promotion_artifacts.py` now accepts zero-padded positive integer encodings (for example `03`, `011`, `090`) for strict CI-context numeric keys and normalizes them canonically before parity checks.
+    - this applies consistently across runtime/artifact binding checks and rotation-report `workflow_*` projection checks under `--require-ci-context-match`.
+  - Updated focused tests in `tests/test_promotion_artifacts.py`:
+    - normalized-rotation pass coverage now explicitly includes zero-padded numeric metadata values (`workflow_run_attempt`, `workflow_run_number`, `workflow_retention_days`, `workflow_actor_id`, `workflow_repository_id`, `workflow_repository_owner_id`).
+    - invalid-runtime numeric coverage now uses clearly malformed non-numeric input (`3rd`) instead of zero-padded numeric forms.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match_accepts_normalized_rotation_values or runtime_numeric_or_ref_type_values_are_invalid or fails_when_rotation_context_values_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type"` => `4 passed, 29 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 61):
+  - Hardened strict CI-context ref-identity semantics across promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now fails closed when `GITHUB_REF` and `GITHUB_REF_TYPE` are semantically inconsistent:
+      - `GITHUB_REF_TYPE=branch` requires `GITHUB_REF` prefix `refs/heads/`.
+      - `GITHUB_REF_TYPE=tag` requires `GITHUB_REF` prefix `refs/tags/`.
+    - the ref-semantics check is now applied consistently to:
+      - runtime strict CI-context completeness validation,
+      - strict governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context under both strict runtime binding and offline `--require-artifact-context-consistency`.
+    - this closes a residual gap where malformed ref identity could pass strict provenance checks through raw parity without branch/tag prefix semantics.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document strict branch/tag ref-prefix enforcement in addition to existing numeric/ref-type value checks.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for ref semantic mismatch (`GITHUB_REF=refs/pull/...` with `GITHUB_REF_TYPE=branch`).
+    - offline artifact-context consistency fail-closed coverage for invalid evidence ref semantics with valid `GITHUB_REF_TYPE`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ref_semantics_are_invalid or runtime_numeric_or_ref_type_values_are_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type or artifact_context_consistency_fails_on_invalid_ref_semantics or fails_when_rotation_context_values_invalid or ci_context_match_accepts_normalized_rotation_values"` => `6 passed, 29 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 62):
+  - Hardened strict CI-context commit-SHA provenance semantics in `enc2sop/promotion_artifacts.py`:
+    - strict validation now fail-closes invalid commit-SHA encodings for:
+      - `GITHUB_SHA`,
+      - `GITHUB_WORKFLOW_SHA`.
+    - both keys now require 40-character hexadecimal values and are normalized before strict parity checks.
+    - this validation applies consistently across:
+      - runtime strict CI-context completeness and binding checks under `--require-ci-context-match`,
+      - governed artifact context checks (`promotion_evidence`, release approval/receipt provenance, pre-existing run receipt),
+      - offline `--require-artifact-context-consistency` checks rooted at `promotion_evidence.github_context`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed SHA-format enforcement in strict CI-context mode.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - strict runtime fail-closed coverage for invalid `GITHUB_SHA` and `GITHUB_WORKFLOW_SHA` values.
+      - offline artifact-context consistency fail-closed coverage for invalid evidence SHA values.
+    - refreshed context fixtures in `tests/test_promotion_evidence.py` and `tests/test_encryption_helper.py` to use canonical 40-character SHA forms.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_sha_values_are_invalid or artifact_context_consistency_fails_on_invalid_sha_values or runtime_numeric_or_ref_type_values_are_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type or runtime_ref_semantics_are_invalid"` => `5 passed, 32 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 63):
+  - Hardened strict CI-context workflow-definition reference semantics in `enc2sop/promotion_artifacts.py`:
+    - strict validation now fail-closes invalid `GITHUB_WORKFLOW_REF` encodings.
+    - accepted strict format:
+      - `<owner>/<repo>/.github/workflows/<file>.yml@refs/heads/*`, or
+      - `<owner>/<repo>/.github/workflows/<file>.yml@refs/tags/*`.
+    - this validation applies consistently across:
+      - runtime strict CI-context completeness and binding checks under `--require-ci-context-match`,
+      - governed artifact context checks (`promotion_evidence`, release approval/receipt provenance, pre-existing run receipt),
+      - offline `--require-artifact-context-consistency` checks rooted at `promotion_evidence.github_context`,
+      - rotation-report projected context checks via `workflow_name_ref`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed workflow-ref-format enforcement in strict CI-context mode.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid `GITHUB_WORKFLOW_REF` value.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_WORKFLOW_REF`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref or runtime_sha_values_are_invalid or artifact_context_consistency_fails_on_invalid_sha_values or runtime_ref_semantics_are_invalid"`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 64):
+  - Hardened strict CI-context ref-name semantic validation parity in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when `GITHUB_REF_NAME` does not match the suffix implied by `GITHUB_REF` + `GITHUB_REF_TYPE`.
+    - enforced mappings:
+      - `GITHUB_REF_TYPE=branch` requires `GITHUB_REF_NAME == GITHUB_REF[len(\"refs/heads/\"):]`.
+      - `GITHUB_REF_TYPE=tag` requires `GITHUB_REF_NAME == GITHUB_REF[len(\"refs/tags/\"):]`.
+    - this validation now applies consistently across:
+      - runtime strict CI-context completeness/binding checks under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt provenance, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed `GITHUB_REF_NAME` semantic enforcement in strict CI-context mode.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_REF_NAME` semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_REF_NAME` semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ref_name_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_ref_name_semantics or runtime_ref_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_ref_semantics"` => `4 passed, 37 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 65):
+  - Hardened strict repository-owner semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when `GITHUB_REPOSITORY_OWNER` does not match the owner segment of `GITHUB_REPOSITORY`.
+    - this semantic validation now applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_REPOSITORY_OWNER` semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_REPOSITORY_OWNER` semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_owner_semantics_are_invalid or context_consistency_invalid_repository_owner_semantics or runtime_ref_name_semantics_are_invalid or context_consistency_fails_on_invalid_ref_name_semantics"` => `3 passed, 42 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 66):
+  - Hardened strict workflow-definition repository semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when `GITHUB_WORKFLOW_REF` points to a different repository slug than `GITHUB_REPOSITORY`.
+    - this semantic validation now applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_WORKFLOW_REF` repository semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_WORKFLOW_REF` repository semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_repository_semantics"` => `2 passed, 45 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_owner_semantics_are_invalid or context_consistency_invalid_repository_owner_semantics or runtime_ref_name_semantics_are_invalid or context_consistency_fails_on_invalid_ref_name_semantics"` => `3 passed, 44 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 67):
+  - Hardened strict workflow-definition ref semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when the `@ref` segment of `GITHUB_WORKFLOW_REF` does not exactly match `GITHUB_REF`.
+    - this semantic validation now applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_WORKFLOW_REF` ref semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_WORKFLOW_REF` ref semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_ref_semantics"` => `2 passed, 47 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_repository_semantics or workflow_ref_ref_semantics or repository_owner_semantics or ref_name_semantics"` => `8 passed, 41 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 68):
+  - Hardened strict CI host/API URL value semantics in `enc2sop/promotion_artifacts.py`:
+    - strict context normalization now fail-closes malformed/non-HTTP(S) values for:
+      - `GITHUB_SERVER_URL`,
+      - `GITHUB_API_URL`,
+      - `GITHUB_GRAPHQL_URL`.
+    - this validation applies consistently to:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks (via `workflow_server_url`, `workflow_api_url`, `workflow_graphql_url`) because they map to the same strict key normalization layer.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime host/API URL values.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence host/API URL values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 49 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 69):
+  - Hardened strict repository-slug semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict CI-context normalization now validates `GITHUB_REPOSITORY` as an explicit `owner/repo` slug (instead of only non-empty string parity).
+    - strict checks now fail-close when runtime `GITHUB_REPOSITORY` is malformed (for example missing slash/owner-repo segments) under `--require-ci-context-match`.
+    - offline artifact-context consistency now fail-closes when `promotion_evidence.github_context.GITHUB_REPOSITORY` is malformed under `--require-artifact-context-consistency`.
+    - this validation applies consistently across runtime/artifact/rotation-projection parity because all strict context bindings use the same key-normalization layer.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime repository slug value.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence repository slug value.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `4 passed, 49 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_owner_semantics or workflow_ref_repository_semantics or runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value"` => `6 passed, 47 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 70):
+  - Hardened strict CI-context activation and URL endpoint semantics in `enc2sop/promotion_artifacts.py`:
+    - strict semantic checks now require `GITHUB_ACTIONS=true` and `CI=true` when those keys are present in runtime/artifact strict-context payloads (not only boolean-like parseability).
+    - strict semantic checks now validate host/path relationships for `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL`:
+      - on `github.com`, enforce `GITHUB_API_URL=https://api.github.com/` and `GITHUB_GRAPHQL_URL=https://api.github.com/graphql`;
+      - on enterprise hosts, enforce same-origin with `GITHUB_SERVER_URL` plus expected API paths (`/api/v3`, `/api/graphql`);
+      - enforce API/GraphQL origin parity and fail-close on mismatched origins/paths.
+    - this semantic validation applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks because they map through the same key-normalization and semantic validation layer.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for semantically invalid boolean activation values (`false`/`0`) that are parseable but unacceptable for CI provenance.
+    - strict runtime fail-closed coverage for semantically invalid GitHub-host URL endpoint mappings (wrong API/GraphQL host/path against `GITHUB_SERVER_URL`).
+    - offline artifact-context consistency fail-closed coverage for semantically invalid evidence activation values and URL endpoint mappings.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ci_boolean_keys_invalid or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or artifact_context_consistency_fails_on_invalid_url_values"` => `4 passed, 49 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans"` => `6 passed, 47 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 71):
+  - Hardened strict CI URL value normalization against query/fragment ambiguity in `enc2sop/promotion_artifacts.py`:
+    - strict context URL normalization now fail-closes when `GITHUB_SERVER_URL`, `GITHUB_API_URL`, or `GITHUB_GRAPHQL_URL` include query strings, URL params, or fragments.
+    - this removes a permissive path where canonical endpoints could be decorated with extra URL components and still pass strict key normalization.
+    - semantics continue to apply consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict context normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for query/fragment-decorated runtime URL values.
+    - offline artifact-context consistency fail-closed coverage for query/fragment-decorated evidence URL values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 51 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ci_boolean_keys_invalid or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or artifact_context_consistency_fails_on_invalid_url_values"` => `4 passed, 49 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 72):
+  - Hardened strict CI URL provenance semantics to enforce HTTPS-only endpoint origins in `enc2sop/promotion_artifacts.py`:
+    - strict URL semantic validation now fail-closes when `GITHUB_SERVER_URL`, `GITHUB_API_URL`, or `GITHUB_GRAPHQL_URL` use non-HTTPS schemes.
+    - this closes a permissive path where `http://` endpoint values could still satisfy host/path relationship checks under strict CI context verification.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL semantic validation.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for `http://` runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for `http://` evidence URL provenance values.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document HTTPS-only strict URL provenance expectations.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 73):
+  - Hardened strict CI repository-slug semantics in `enc2sop/promotion_artifacts.py`:
+    - strict `GITHUB_REPOSITORY` normalization now fail-closes values that are not exact two-segment slugs.
+    - fail-closed rules now require exactly one slash plus constrained slug segment characters (`[a-z0-9._-]`) for both owner and repo segments.
+    - this closes a permissive path where malformed multi-segment values (for example `owner/repo/extra`) could previously pass strict parity checks as valid repository identity.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed multi-segment runtime `GITHUB_REPOSITORY` values.
+    - offline artifact-context consistency fail-closed coverage for malformed multi-segment evidence `GITHUB_REPOSITORY` values.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document stricter `GITHUB_REPOSITORY` slug semantics under strict CI mode.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value"` => `2 passed, 51 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans"` => `6 passed, 47 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 74):
+  - Hardened strict `GITHUB_WORKFLOW_REF` repository-prefix semantics in `enc2sop/promotion_artifacts.py`:
+    - strict workflow-ref normalization now fail-closes values unless the repository prefix before `/.github/workflows/` is a valid `owner/repo` slug.
+    - this closes a permissive path where malformed multi-segment workflow repository prefixes (for example `owner/repo/extra/.github/workflows/...`) could pass strict CI-context key validation.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed multi-segment runtime `GITHUB_WORKFLOW_REF` repository-prefix values.
+    - offline artifact-context consistency fail-closed coverage for malformed multi-segment evidence `GITHUB_WORKFLOW_REF` repository-prefix values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_repository_slug_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_repository_slug or runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `6 passed, 49 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or workflow_ref_repository_semantics or workflow_ref_ref_semantics"` => `10 passed, 45 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
 
 ### CARD `ENC-P0-013`
 
@@ -1925,4 +2423,3 @@ Rationale:
 - Verification:
   - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_soenc_cli.py -k "promotion or approve_release or release"`
   - `python -m pytest -q`
-

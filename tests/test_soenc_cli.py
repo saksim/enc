@@ -955,6 +955,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertFalse(mocked_verify.call_args.kwargs["require_release_approval_signature"])
         self.assertFalse(mocked_verify.call_args.kwargs["require_rotation_pass"])
         self.assertFalse(mocked_verify.call_args.kwargs["require_ci_context_match"])
+        self.assertFalse(mocked_verify.call_args.kwargs["require_artifact_context_consistency"])
 
     def test_verify_promotion_artifacts_command_fail_closed(self):
         root = self.make_case_root("soenc_verify_promotion_artifacts_fail")
@@ -989,6 +990,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                     "--require-release-approval-signature",
                     "--require-rotation-pass",
                     "--require-ci-context-match",
+                    "--require-artifact-context-consistency",
                 ]
             )
 
@@ -998,6 +1000,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue(mocked_verify.call_args.kwargs["require_release_approval_signature"])
         self.assertTrue(mocked_verify.call_args.kwargs["require_rotation_pass"])
         self.assertTrue(mocked_verify.call_args.kwargs["require_ci_context_match"])
+        self.assertTrue(mocked_verify.call_args.kwargs["require_artifact_context_consistency"])
 
     def test_verify_promotion_artifacts_command_wires_policy_and_workflow_overrides(self):
         root = self.make_case_root("soenc_verify_promotion_artifacts_policy_workflow")

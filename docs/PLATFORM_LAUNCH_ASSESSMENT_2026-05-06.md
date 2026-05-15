@@ -1,4 +1,4 @@
-﻿# enc2sop Platform Launch Assessment
+# enc2sop Platform Launch Assessment
 
 Date: `2026-05-06`
 Project root: `D:\Download\gaming\new_program\data_helper\6_so_enc`
@@ -641,8 +641,8 @@ Current go-live gate note (2026-05-07):
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
 - As of 2026-05-12 (iteration 40), `ENC-P0-016` adds strict CI-context triggering-actor provenance binding:
-  - `soenc verify-promotion-artifacts --require-ci-context-match` now captures and validates `GITHUB_TRIGGERING_ACTOR` when present.
-  - strict optional triggering-actor checks now apply across:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now captures and validates `GITHUB_TRIGGERING_ACTOR`.
+  - strict triggering-actor checks now apply across:
     - `promotion_evidence.github_context`,
     - signed `release_approval.github_context`,
     - mirrored `release_receipt.release_approval_github_context`,
@@ -650,7 +650,7 @@ Current go-live gate note (2026-05-07):
   - rotation rehearsal strict checks now bind:
     - `rotation_rehearsal_report.workflow_triggering_actor` vs `GITHUB_TRIGGERING_ACTOR`.
   - CI workflow/policy contracts now require triggering-actor fragments in emitted rotation evidence and rollout policy checks.
-  - this reduces acceptance risk for replay/substitution across rerun/manual-dispatch actor context while preserving fail-closed behavior for required governance keys.
+  - this reduces acceptance risk for replay/substitution across rerun/manual-dispatch actor context while preserving fail-closed behavior for governed runtime context keys.
   - remaining launch risk remains external execution:
     - run protected-branch/environment workflow against live rollout controls,
     - archive real promotion + rotation + receipt artifacts from CI,
@@ -794,11 +794,351 @@ Current go-live gate note (2026-05-07):
     - run protected-branch/environment workflow against live rollout controls,
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
+- As of 2026-05-13 (iteration 50), `ENC-P0-016` adds offline-capable cross-artifact context consistency enforcement:
+  - `soenc verify-promotion-artifacts` now supports `--require-artifact-context-consistency` to fail-close mixed-artifact replay/substitution even when runtime CI context binding is not available.
+  - consistency root is archived `promotion_evidence.github_context`; strict parity + required-key completeness is enforced against:
+    - `release_approval.github_context`,
+    - `release_receipt.github_context`,
+    - `release_receipt.release_approval_github_context`,
+    - `rotation_rehearsal_report` projected `workflow_*` context,
+    - pre-existing `promotion_run_receipt.github_context`.
+  - release promotion workflow now enables this flag by default and rollout policy fragment contract requires it.
+  - this strengthens provenance integrity for offline evidence-package validation and archive re-verification use cases.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-13 (iteration 51), `ENC-P0-016` adds promotion-evidence repository identity binding:
+  - `soenc verify-promotion-artifacts` now validates `promotion_evidence.repository` (when present) as an `owner/repo` slug and requires it to match `promotion_evidence.github_context.GITHUB_REPOSITORY`.
+  - under `--require-ci-context-match`, verification now also requires `promotion_evidence.repository` (when present) to match runtime `GITHUB_REPOSITORY`.
+  - strict rotation-report metadata binding now additionally includes `workflow_repository` vs runtime `GITHUB_REPOSITORY`.
+  - CI workflow/policy contracts now require `workflow_repository` emission in `rotation_rehearsal_report.json`.
+  - this closes a remaining substitution window where inconsistent repository identity fields across evidence/context artifacts could pass previous checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-13 (iteration 52), `ENC-P0-016` closes strict protected-ref completeness for non-rotation artifact contexts:
+  - under `--require-ci-context-match`, `soenc verify-promotion-artifacts` now fail-closes when runtime `GITHUB_REF_PROTECTED` is present but artifact contexts omit it.
+  - protected-ref key completeness now applies consistently across:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - mirrored `release_receipt.release_approval_github_context`,
+    - `release_receipt.github_context`,
+    - pre-existing `promotion_run_receipt.github_context`,
+    - existing rotation-report check for `workflow_ref_protected`.
+  - this closes a permissive path where strict mode could previously pass missing `GITHUB_REF_PROTECTED` in artifact contexts (except rotation report), reducing replay/substitution risk across protected/non-protected ref provenance boundaries.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+- As of 2026-05-13 (iteration 53), `ENC-P0-016` closes strict protected-ref value-validation gaps:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now fail-closes when runtime `GITHUB_REF_PROTECTED` is present but not parseable as an explicit boolean-like value (`true/false`, `1/0`, `yes/no`, `on/off`).
+  - `soenc verify-promotion-artifacts --require-artifact-context-consistency` now fail-closes when `promotion_evidence.github_context.GITHUB_REF_PROTECTED` is present but not parseable as an explicit boolean-like value.
+  - this reduces provenance ambiguity and replay/substitution tolerance caused by malformed protected-ref encodings being treated as empty/missing values during strict verification.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-13 (iteration 54), `ENC-P0-016` adds strict runner-instance provenance binding:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now enforces runtime completeness and strict parity checks for:
+    - `RUNNER_NAME` (in addition to existing runner environment/os/arch keys).
+  - strict runner-instance checks now apply across:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - mirrored `release_receipt.release_approval_github_context`,
+    - `release_receipt.github_context`,
+    - pre-existing `promotion_run_receipt.github_context`.
+  - rotation rehearsal strict checks now bind:
+    - `rotation_rehearsal_report.workflow_runner_name` vs `RUNNER_NAME`.
+  - CI workflow/policy contracts now require `workflow_runner_name` emission and `RUNNER_NAME` workflow fragment presence.
+  - this reduces acceptance risk for replay/substitution across runner-instance identity drift within the same runner class (for example same OS/arch/environment but different runner host instance).
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 55), `ENC-P0-016` closes strict triggering-actor completeness under CI-context matching:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now fail-closes when runtime `GITHUB_TRIGGERING_ACTOR` is present but governed artifact contexts omit it.
+  - triggering-actor key completeness/parity now applies consistently across:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - mirrored `release_receipt.release_approval_github_context`,
+    - `release_receipt.github_context`,
+    - `rotation_rehearsal_report.workflow_triggering_actor`,
+    - pre-existing `promotion_run_receipt.github_context`.
+  - this closes a permissive path where strict mode could previously accept missing triggering-actor provenance in artifact payloads even when runtime supplied rerun/dispatch actor identity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 56), `ENC-P0-016` closes strict CI-activation boolean value-validation gaps:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now fail-closes when runtime `GITHUB_ACTIONS` or `CI` is present but not parseable as explicit boolean-like values (`true/false`, `1/0`, `yes/no`, `on/off`).
+  - strict governed artifact contexts now also fail-close on invalid `GITHUB_ACTIONS`/`CI` values for:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - mirrored `release_receipt.release_approval_github_context`,
+    - `release_receipt.github_context`,
+    - pre-existing `promotion_run_receipt.github_context`.
+  - `soenc verify-promotion-artifacts --require-artifact-context-consistency` now fail-closes when `promotion_evidence.github_context` carries invalid `GITHUB_ACTIONS` or `CI` value encodings.
+  - this removes a permissive path where malformed CI-activation values could previously satisfy strict context checks by string equality instead of explicit boolean semantics.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 57), `ENC-P0-016` adds strict CI retention-window provenance binding:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now treats `GITHUB_RETENTION_DAYS` as a required runtime binding key.
+  - strict CI-context artifact checks now require and validate `GITHUB_RETENTION_DAYS` parity for:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - mirrored `release_receipt.release_approval_github_context`,
+    - `release_receipt.github_context`,
+    - pre-existing `promotion_run_receipt.github_context`.
+  - rotation rehearsal strict checks now bind:
+    - `rotation_rehearsal_report.workflow_retention_days` vs `GITHUB_RETENTION_DAYS`.
+  - CI workflow/policy contracts now require retention-window provenance emission and fragment presence in rollout checks.
+  - this reduces acceptance risk for replay/substitution across runs with different artifact-retention policy windows, strengthening archived-evidence provenance parity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 58), `ENC-P0-016` adds strict CI numeric/ref-type value-validation binding:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now fail-closes invalid value encodings for:
+    - `GITHUB_RUN_ID`,
+    - `GITHUB_RUN_ATTEMPT`,
+    - `GITHUB_RUN_NUMBER`,
+    - `GITHUB_RETENTION_DAYS`,
+    - `GITHUB_ACTOR_ID`,
+    - `GITHUB_REPOSITORY_ID`,
+    - `GITHUB_REPOSITORY_OWNER_ID`,
+    - `GITHUB_REF_TYPE` (must be `branch` or `tag`).
+  - strict governed artifact contexts now also fail-close on invalid encodings for the same keys across:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - mirrored `release_receipt.release_approval_github_context`,
+    - `release_receipt.github_context`,
+    - pre-existing `promotion_run_receipt.github_context`,
+    - rotation-report projected context checks.
+  - `soenc verify-promotion-artifacts --require-artifact-context-consistency` now fail-closes when `promotion_evidence.github_context` carries invalid numeric/ref-type value encodings before parity checks.
+  - this removes a permissive path where malformed numeric/ref-type identity values could pass strict provenance checks by string parity alone without semantic validity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 59), `ENC-P0-016` closes strict rotation-report semantic-validation parity:
+  - `soenc verify-promotion-artifacts --require-ci-context-match` now applies the same key-aware semantic normalization/fail-closed behavior to `rotation_rehearsal_report.workflow_*` bindings that is used for runtime and other artifact contexts.
+  - strict rotation metadata checks now normalize/validate:
+    - boolean-like keys (`workflow_github_actions`, `workflow_ci`, `workflow_ref_protected`),
+    - positive-integer identity keys (`workflow_run_id`, `workflow_run_attempt`, `workflow_run_number`, `workflow_retention_days`, `workflow_actor_id`, `workflow_repository_id`, `workflow_repository_owner_id`),
+    - enum keys (`workflow_ref_type`),
+    - and existing identity/binding string keys.
+  - invalid rotation-report encodings now fail closed with explicit per-key errors instead of relying on raw-string mismatch behavior.
+  - this removes a residual inconsistency where malformed rotation metadata could bypass semantic validation while other strict CI-context artifacts were already fail-closed by type-aware normalization.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 60), `ENC-P0-016` refines strict numeric normalization parity for CI-context provenance:
+  - `soenc verify-promotion-artifacts` strict numeric/ref-type context checks now accept and canonically normalize zero-padded positive integer encodings (for example `03`, `011`, `090`) instead of treating them as invalid.
+  - this normalization applies consistently to:
+    - runtime strict CI-context keys,
+    - governed artifact context keys,
+    - and `rotation_rehearsal_report.workflow_*` numeric projections under `--require-ci-context-match`.
+  - this aligns implementation behavior with existing normalized-equivalence strict-context policy and removes an unnecessary false-negative path for semantically equivalent numeric metadata encodings.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 61), `ENC-P0-016` adds strict GitHub ref semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close when `GITHUB_REF` does not semantically match `GITHUB_REF_TYPE`.
+  - enforced mapping:
+    - `GITHUB_REF_TYPE=branch` requires `GITHUB_REF` prefix `refs/heads/`.
+    - `GITHUB_REF_TYPE=tag` requires `GITHUB_REF` prefix `refs/tags/`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context under both strict runtime matching and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where malformed ref identity (for example pull-request-style refs paired with `branch`) could pass strict provenance checks as plain string parity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 62), `ENC-P0-016` adds strict commit-SHA semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close when `GITHUB_SHA` or `GITHUB_WORKFLOW_SHA` is not a valid 40-character hexadecimal value.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where malformed SHA identity values could pass strict provenance checks as plain string parity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 63), `ENC-P0-016` adds strict workflow-ref semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close when `GITHUB_WORKFLOW_REF` is not a valid workflow-ref value.
+  - accepted strict format is:
+    - `<owner>/<repo>/.github/workflows/<file>.yml@refs/heads/*`, or
+    - `<owner>/<repo>/.github/workflows/<file>.yml@refs/tags/*`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where malformed workflow-definition ref identity values could pass strict provenance checks as plain string parity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-14 (iteration 64), `ENC-P0-016` adds strict ref-name semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close when `GITHUB_REF_NAME` does not semantically match `GITHUB_REF` + `GITHUB_REF_TYPE`.
+  - enforced mapping:
+    - `GITHUB_REF_TYPE=branch` requires `GITHUB_REF_NAME` to equal the `refs/heads/` suffix of `GITHUB_REF`.
+    - `GITHUB_REF_TYPE=tag` requires `GITHUB_REF_NAME` to equal the `refs/tags/` suffix of `GITHUB_REF`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where malformed/misbound ref-name identity values could pass strict provenance checks through raw key parity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 66), `ENC-P0-016` adds strict workflow-definition repository semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close when `GITHUB_WORKFLOW_REF` references a repository slug that does not match `GITHUB_REPOSITORY`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where workflow-definition repository identity could diverge from repository provenance while still passing raw key parity checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 67), `ENC-P0-016` adds strict workflow-definition ref semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close when the `@ref` segment of `GITHUB_WORKFLOW_REF` does not equal `GITHUB_REF`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where workflow-definition ref identity could diverge from run ref provenance while still passing raw key parity checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 68), `ENC-P0-016` adds strict CI host/API URL semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close malformed/non-HTTP(S) values for:
+    - `GITHUB_SERVER_URL`,
+    - `GITHUB_API_URL`,
+    - `GITHUB_GRAPHQL_URL`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where host/API provenance fields could be non-empty but malformed while still passing strict parity checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 69), `ENC-P0-016` adds strict repository-slug semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close malformed `GITHUB_REPOSITORY` values that are not valid `owner/repo` slugs.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where repository identity could be non-empty but malformed while still passing strict parity checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 70), `ENC-P0-016` adds strict CI activation and endpoint URL semantic validation parity:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close semantically invalid CI-activation values when parseable but non-activating:
+    - `GITHUB_ACTIONS` must normalize to `true`,
+    - `CI` must normalize to `true`.
+  - strict CI-context checks now enforce endpoint URL relationships between:
+    - `GITHUB_SERVER_URL`,
+    - `GITHUB_API_URL`,
+    - `GITHUB_GRAPHQL_URL`.
+  - enforced URL semantics:
+    - for `github.com`, API and GraphQL endpoints must map to `api.github.com` with canonical paths (`/` and `/graphql`);
+    - for enterprise hosts, API and GraphQL endpoints must stay same-origin with `GITHUB_SERVER_URL` and use expected paths (`/api/v3` and `/api/graphql`);
+    - API and GraphQL origins must match each other.
+  - this validation now applies consistently across:
+    - runtime strict CI-context checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where CI activation fields and host/API provenance fields could be parseable/non-empty but semantically inconsistent with real GitHub Actions runtime endpoints.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 71), `ENC-P0-016` adds strict CI URL query/fragment fail-closed normalization:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` when URL values include query strings, params, or fragments.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where decorated URL values could pass strict parity checks despite non-canonical provenance encoding.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 72), `ENC-P0-016` adds strict HTTPS-only CI URL provenance semantics:
+  - `soenc verify-promotion-artifacts` strict CI-context URL semantic checks now fail-close `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` when values use non-HTTPS schemes.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where `http://` endpoint values could still satisfy host/path mapping parity checks despite weaker transport provenance.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 73), `ENC-P0-016` tightens strict repository-slug semantics for CI provenance:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close malformed `GITHUB_REPOSITORY` values unless they are exact two-segment slugs.
+  - enforced slug shape now requires:
+    - exactly one `/` separator (`owner/repo`),
+    - owner and repo segments constrained to `[a-z0-9._-]`.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where malformed multi-segment repository identity (for example `owner/repo/extra`) could previously pass strict provenance checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-15 (iteration 74), `ENC-P0-016` tightens strict `GITHUB_WORKFLOW_REF` repository-prefix semantics:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close malformed `GITHUB_WORKFLOW_REF` repository prefixes unless the segment before `/.github/workflows/` is a valid `owner/repo` slug.
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where malformed multi-segment workflow-definition repository prefixes (for example `owner/repo/extra/.github/workflows/...`) could previously pass strict provenance key-value validation.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
 
 ## 9. Assessment Status
 
 Status: `[APPROVED BASELINE]`
 
 This file is the current architectural truth for future iterations until a later iteration updates it explicitly.
-
-
