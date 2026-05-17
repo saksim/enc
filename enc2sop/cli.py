@@ -13,6 +13,7 @@ import encryption_helper
 from enc2sop import plugin_registry
 from enc2sop import promotion_artifacts
 from enc2sop import promotion_audit
+from enc2sop import promotion_bundle
 from enc2sop import promotion_evidence
 from soenc_config import SoencProjectConfig
 from soenc_config import load_project_config
@@ -388,6 +389,25 @@ def _run_verify_promotion_artifacts(args) -> int:
     return 0 if report.get("passed") else 1
 
 
+def _run_bundle_promotion_artifacts(args) -> int:
+    bundle_path, manifest = promotion_bundle.create_promotion_artifact_bundle(
+        dist_dir=args.dist_dir,
+        promotion_evidence_file=args.promotion_evidence_file,
+        promotion_report_file=args.promotion_report_file,
+        rotation_report_file=args.rotation_report_file,
+        promotion_artifact_audit_report_file=args.promotion_artifact_audit_report_file,
+        promotion_run_receipt_file=args.promotion_run_receipt_file,
+        promotion_policy_file=args.promotion_policy_file,
+        promotion_workflow_file=args.promotion_workflow_file,
+        bundle_file=args.bundle_file,
+        repo_root=Path.cwd(),
+    )
+    print("promotion_artifact_bundle={0}".format(bundle_path))
+    print("promotion_artifact_bundle_sha256={0}".format(manifest.get("bundle_sha256")))
+    print("promotion_artifact_bundle_files={0}".format(manifest.get("file_count")))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="soenc",
@@ -723,6 +743,61 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     verify_promotion_artifacts_parser.set_defaults(handler=_run_verify_promotion_artifacts)
+
+    bundle_promotion_artifacts_parser = subparsers.add_parser(
+        "bundle-promotion-artifacts",
+        help="Create deterministic handoff archive zip from verified promotion artifacts.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--dist-dir",
+        required=True,
+        help="Release directory containing release_bundle.json/release_approval.json/release_receipt.json.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--promotion-evidence-file",
+        required=True,
+        help="Path to promotion_evidence.json artifact.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--promotion-report-file",
+        required=True,
+        help="Path to promotion_audit_report.json artifact.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--rotation-report-file",
+        required=True,
+        help="Path to rotation_rehearsal_report.json artifact.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--promotion-artifact-audit-report-file",
+        help=(
+            "Path to promotion_artifact_audit_report.json artifact. "
+            "Defaults to promotion_report_file directory with standard filename."
+        ),
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--promotion-run-receipt-file",
+        help=(
+            "Path to promotion_run_receipt.json artifact. "
+            "Defaults to promotion_report_file directory with standard filename."
+        ),
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--promotion-policy-file",
+        help="Optional policy file included in archive for replayable audit context.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--promotion-workflow-file",
+        help="Optional workflow file included in archive for replayable audit context.",
+    )
+    bundle_promotion_artifacts_parser.add_argument(
+        "--bundle-file",
+        help=(
+            "Output zip path. Defaults to promotion_report_file directory with "
+            "promotion_artifact_bundle.zip."
+        ),
+    )
+    bundle_promotion_artifacts_parser.set_defaults(handler=_run_bundle_promotion_artifacts)
     return parser
 
 

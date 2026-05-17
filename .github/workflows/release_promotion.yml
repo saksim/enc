@@ -39,6 +39,10 @@ on:
         description: "Promotion run receipt output path (default: .tmp_ci/ops/promotion_run_receipt.json)"
         required: false
         default: ".tmp_ci/ops/promotion_run_receipt.json"
+      promotion_artifact_bundle_file:
+        description: "Promotion artifact bundle output path (default: .tmp_ci/ops/promotion_artifact_bundle.zip)"
+        required: false
+        default: ".tmp_ci/ops/promotion_artifact_bundle.zip"
       skip_promotion_collect:
         description: "Use existing promotion evidence file instead of GitHub API collection."
         required: false
@@ -78,6 +82,7 @@ jobs:
       PROMOTION_ARTIFACT_AUDIT_REPORT_FILE: ${{ github.event.inputs.promotion_artifact_audit_report_file || '.tmp_ci/ops/promotion_artifact_audit_report.json' }}
       ROTATION_REPORT_FILE: ${{ github.event.inputs.rotation_report_file || '.tmp_ci/ops/rotation_rehearsal_report.json' }}
       PROMOTION_RUN_RECEIPT_FILE: ${{ github.event.inputs.promotion_run_receipt_file || '.tmp_ci/ops/promotion_run_receipt.json' }}
+      PROMOTION_ARTIFACT_BUNDLE_FILE: ${{ github.event.inputs.promotion_artifact_bundle_file || '.tmp_ci/ops/promotion_artifact_bundle.zip' }}
       SKIP_PROMOTION_COLLECT: ${{ github.event.inputs.skip_promotion_collect || 'false' }}
       ROTATION_REHEARSAL_INPUT: ${{ github.event.inputs.rotation_rehearsal || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -345,6 +350,21 @@ jobs:
           artifact_args+=("--require-artifact-context-consistency")
           python ./soenc.py verify-promotion-artifacts "${artifact_args[@]}"
 
+      - name: Bundle Promotion Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ./soenc.py bundle-promotion-artifacts \
+            --dist-dir "$RELEASE_DIR" \
+            --promotion-evidence-file "$PROMOTION_EVIDENCE_FILE" \
+            --promotion-report-file "$PROMOTION_REPORT_FILE" \
+            --rotation-report-file "$ROTATION_REPORT_FILE" \
+            --promotion-artifact-audit-report-file "$PROMOTION_ARTIFACT_AUDIT_REPORT_FILE" \
+            --promotion-run-receipt-file "$PROMOTION_RUN_RECEIPT_FILE" \
+            --promotion-policy-file "$PROMOTION_POLICY_FILE" \
+            --promotion-workflow-file "$PROMOTION_WORKFLOW_FILE" \
+            --bundle-file "$PROMOTION_ARTIFACT_BUNDLE_FILE"
+
       - name: Upload Promotion Artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -359,4 +379,5 @@ jobs:
             ${{ env.PROMOTION_ARTIFACT_AUDIT_REPORT_FILE }}
             ${{ env.ROTATION_REPORT_FILE }}
             ${{ env.PROMOTION_RUN_RECEIPT_FILE }}
+            ${{ env.PROMOTION_ARTIFACT_BUNDLE_FILE }}
           if-no-files-found: error

@@ -14,7 +14,7 @@ from typing import List
 from typing import Mapping
 from typing import Optional
 from typing import Tuple
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import encryption_helper
 from enc2sop import promotion_audit
@@ -114,6 +114,7 @@ GITHUB_PUBLIC_GRAPHQL_PATH = "/graphql"
 GITHUB_ENTERPRISE_API_PATH = "/api/v3"
 GITHUB_ENTERPRISE_GRAPHQL_PATH = "/api/graphql"
 REPOSITORY_SLUG_SEGMENT_ALLOWED_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.")
+GIT_REF_DISALLOWED_CHARS = frozenset(" ~^:?*[\\")
 ROTATION_REPORT_TO_GITHUB_CONTEXT_KEYS = (
     ("workflow_repository", "GITHUB_REPOSITORY"),
     ("workflow_run_id", "GITHUB_RUN_ID"),
@@ -597,6 +598,20 @@ def _normalize_text(value: object) -> str:
     return value.strip()
 
 
+def _normalize_strict_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    if not value:
+        return ""
+    if value != value.strip():
+        return ""
+    for char in value:
+        codepoint = ord(char)
+        if codepoint < 32 or codepoint == 127:
+            return ""
+    return value
+
+
 def _normalize_ref_protected(value: object) -> str:
     text = _normalize_text(value).lower()
     if text in {"true", "1", "yes", "y", "on"}:
@@ -629,7 +644,12 @@ def _normalize_positive_integer_like(value: object) -> str:
 
 
 def _normalize_sha_like(value: object) -> str:
-    text = _normalize_text(value).lower()
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if value != text:
+        return ""
+    text = text.lower()
     if len(text) != 40:
         return ""
     if not all(ch in "0123456789abcdef" for ch in text):
@@ -645,7 +665,11 @@ def _normalize_enum_like(value: object, allowed_values: Tuple[str, ...]) -> str:
 
 
 def _normalize_http_url_like(value: object) -> str:
-    text = _normalize_text(value)
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if value != text:
+        return ""
     if not text:
         return ""
     parsed = urlparse(text)
@@ -654,8 +678,32 @@ def _normalize_http_url_like(value: object) -> str:
         return ""
     if not parsed.netloc:
         return ""
+    if parsed.username is not None or parsed.password is not None:
+        return ""
     if parsed.params or parsed.query or parsed.fragment:
         return ""
+    if parsed.path and not parsed.path.startswith("/"):
+        return ""
+    if parsed.path.endswith("/") and parsed.path != "/":
+        return ""
+    if "//" in parsed.path:
+        return ""
+    hostname = parsed.hostname
+    if not hostname:
+        return ""
+    if hostname.endswith("."):
+        return ""
+    if parsed.netloc != parsed.netloc.lower():
+        return ""
+    if parsed.netloc.endswith(":"):
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if port is not None:
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            return ""
     return parsed.geturl()
 
 
@@ -683,8 +731,52 @@ def _format_url_origin(scheme: str, netloc: str) -> str:
     return "{0}://{1}".format(scheme, netloc)
 
 
+def _is_valid_git_ref_name(ref_name: str) -> bool:
+    if not ref_name:
+        return False
+    if ref_name == "@":
+        return False
+    if ref_name.startswith("/") or ref_name.endswith("/"):
+        return False
+    if ref_name.endswith("."):
+        return False
+    if "//" in ref_name or ".." in ref_name or "@{" in ref_name:
+        return False
+    for char in ref_name:
+        codepoint = ord(char)
+        if codepoint < 32 or codepoint == 127:
+            return False
+        if char in GIT_REF_DISALLOWED_CHARS:
+            return False
+    for segment in ref_name.split("/"):
+        if not segment:
+            return False
+        if segment.startswith("."):
+            return False
+        if segment.endswith(".lock"):
+            return False
+    return True
+
+
+def _normalize_git_ref_like(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if value != text:
+        return ""
+    if not text:
+        return ""
+    if not _is_valid_git_ref_name(text):
+        return ""
+    return text
+
+
 def _normalize_workflow_ref_like(value: object) -> str:
-    text = _normalize_text(value)
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if value != text:
+        return ""
     if not text:
         return ""
     if "@" not in text:
@@ -700,9 +792,29 @@ def _normalize_workflow_ref_like(value: object) -> str:
     repository_slug = workflow_path[:marker_index]
     if not _normalize_repository_slug(repository_slug):
         return ""
+    workflow_relative_path = workflow_path[marker_index + len(GITHUB_WORKFLOW_PATH_MARKER):]
+    if not workflow_relative_path:
+        return ""
+    workflow_segments = workflow_relative_path.split("/")
+    for segment in workflow_segments:
+        if not segment or segment in {".", ".."}:
+            return ""
+        if "\\" in segment:
+            return ""
+        if "%" in segment:
+            return ""
+        decoded_segment = unquote(segment)
+        if not decoded_segment:
+            return ""
+        if decoded_segment in {".", ".."}:
+            return ""
+        if "/" in decoded_segment or "\\" in decoded_segment:
+            return ""
     if not workflow_path.endswith(GITHUB_WORKFLOW_FILE_SUFFIXES):
         return ""
     if not workflow_ref.startswith("refs/heads/") and not workflow_ref.startswith("refs/tags/"):
+        return ""
+    if not _normalize_git_ref_like(workflow_ref):
         return ""
     return "{0}@{1}".format(workflow_path, workflow_ref)
 
@@ -710,6 +822,8 @@ def _normalize_workflow_ref_like(value: object) -> str:
 def _normalize_ci_context_key_value(key: str, value: object) -> str:
     if key == "GITHUB_REPOSITORY":
         return _normalize_repository_slug(value)
+    if key == "GITHUB_REF":
+        return _normalize_git_ref_like(value)
     if key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY:
         return _normalize_ref_protected(value)
     if key == "GITHUB_WORKFLOW_REF":
@@ -725,12 +839,14 @@ def _normalize_ci_context_key_value(key: str, value: object) -> str:
     allowed_values = STRICT_CONTEXT_ENUM_VALUES.get(key)
     if allowed_values is not None:
         return _normalize_enum_like(value, allowed_values)
-    return _normalize_text(value)
+    return _normalize_strict_text(value)
 
 
 def _context_key_value_requirement(key: str) -> str:
     if key == "GITHUB_REPOSITORY":
         return "owner/repo slug value with exactly one slash and [a-z0-9._-] segments"
+    if key == "GITHUB_REF":
+        return "valid git refname value"
     if key == STRICT_CONTEXT_OPTIONAL_PROTECTED_REF_KEY or key in STRICT_CONTEXT_BOOLEAN_BINDING_KEYS:
         return "true/false-like value"
     if key == "GITHUB_WORKFLOW_REF":
@@ -785,7 +901,12 @@ def _validate_artifact_context_key_value(
 
 
 def _normalize_repository_slug(value: object) -> str:
-    text = _normalize_text(value).lower()
+    if not isinstance(value, str):
+        return ""
+    stripped = value.strip()
+    if value != stripped:
+        return ""
+    text = stripped.lower()
     if text.count("/") != 1:
         return ""
     owner, repo_name = text.split("/", 1)
@@ -801,7 +922,12 @@ def _normalize_repository_slug(value: object) -> str:
 
 
 def _normalize_repository_owner(value: object) -> str:
-    text = _normalize_text(value).lower()
+    if not isinstance(value, str):
+        return ""
+    stripped = value.strip()
+    if value != stripped:
+        return ""
+    text = stripped.lower()
     if not text or "/" in text:
         return ""
     return text

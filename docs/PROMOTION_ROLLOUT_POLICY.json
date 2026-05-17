@@ -101,6 +101,7 @@
       "promotion_artifact_audit_report_file",
       "rotation_report_file",
       "promotion_run_receipt_file",
+      "promotion_artifact_bundle_file",
       "GITHUB_JOB",
       "GITHUB_ACTOR",
       "GITHUB_TRIGGERING_ACTOR",
@@ -112,13 +113,16 @@
       "PROMOTION_WORKFLOW_FILE",
       "PROMOTION_ARTIFACT_AUDIT_REPORT_FILE",
       "PROMOTION_RUN_RECEIPT_FILE",
+      "PROMOTION_ARTIFACT_BUNDLE_FILE",
       "ROTATION_REPORT_FILE",
       "promotion_artifact_audit_report.json",
       "promotion_run_receipt.json",
+      "promotion_artifact_bundle.zip",
       "enc2sop-rotation-rehearsal/v1",
       "if: ${{ always() }}",
       "SOENC_RELEASE_APPROVAL_KEY_B64",
-      "if-no-files-found: error"
+      "if-no-files-found: error",
+      "python ./soenc.py bundle-promotion-artifacts"
     ]
   }
 }

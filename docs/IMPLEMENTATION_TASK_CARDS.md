@@ -2072,9 +2072,9 @@ Rationale:
 - Notes (2026-05-15, iteration 68):
   - Hardened strict CI host/API URL value semantics in `enc2sop/promotion_artifacts.py`:
     - strict context normalization now fail-closes malformed/non-HTTP(S) values for:
-      - `GITHUB_SERVER_URL`,
-      - `GITHUB_API_URL`,
-      - `GITHUB_GRAPHQL_URL`.
+        - `GITHUB_SERVER_URL`,
+        - `GITHUB_API_URL`,
+        - `GITHUB_GRAPHQL_URL`.
     - this validation applies consistently to:
       - runtime strict CI-context checks under `--require-ci-context-match`,
       - governed artifact contexts under `--require-artifact-context-consistency`,
@@ -2182,6 +2182,237 @@ Rationale:
   - Verification:
     - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_repository_slug_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_repository_slug or runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `6 passed, 49 deselected`
     - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or workflow_ref_repository_semantics or workflow_ref_ref_semantics"` => `10 passed, 45 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 75):
+  - Hardened strict `GITHUB_WORKFLOW_REF` canonical workflow-path semantics in `enc2sop/promotion_artifacts.py`:
+    - strict workflow-ref normalization now fail-closes non-canonical workflow definition paths inside `/.github/workflows/`:
+      - empty path segments,
+      - traversal-like segments (`.` / `..`),
+      - backslash-separated segments.
+    - this closes a permissive path where malformed workflow-definition path encodings could still satisfy strict CI-context key checks while bypassing canonical path-shape expectations.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed runtime `GITHUB_WORKFLOW_REF` path segments.
+    - offline artifact-context consistency fail-closed coverage for malformed evidence `GITHUB_WORKFLOW_REF` path segments.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `5 passed, 50 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_repository_slug_is_invalid or workflow_ref_repository_semantics or workflow_ref_ref_semantics"` => `5 passed, 50 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 76):
+  - Hardened strict git-refname provenance semantics in `enc2sop/promotion_artifacts.py`:
+    - strict `GITHUB_REF` normalization now fail-closes invalid git-refname values (for example `..`, `@{`, control chars, disallowed metacharacters, dot-leading segments, `.lock` segments, trailing dot/slash).
+    - strict `GITHUB_WORKFLOW_REF` normalization now also fail-closes when the `@ref` segment is not a valid git refname even if it still matches `refs/heads/*` or `refs/tags/*` prefix shape.
+    - this closes a permissive path where malformed refname encodings could satisfy branch/tag prefix checks yet remain semantically invalid as Git references.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed runtime `GITHUB_REF` git-refname values.
+    - offline artifact-context consistency fail-closed coverage for malformed evidence `GITHUB_REF` git-refname values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ref_git_refname_is_invalid or artifact_context_consistency_fails_on_invalid_ref_git_refname or runtime_ref_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_ref_semantics or runtime_workflow_ref_ref_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_ref_semantics"` => `6 passed, 51 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_repository_slug_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_repository_slug or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans"` => `6 passed, 51 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 77):
+  - Hardened strict CI URL provenance parsing in `enc2sop/promotion_artifacts.py`:
+    - strict URL normalization now fail-closes `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` values when URL userinfo is present (for example `https://token@github.com`).
+    - this closes a residual permissive path where credential-bearing endpoint encodings could still pass strict CI URL syntax checks despite being non-canonical provenance values.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks via shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for userinfo-bearing runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for userinfo-bearing evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 78):
+  - Hardened strict CI URL canonicalization in `enc2sop/promotion_artifacts.py`:
+    - strict URL normalization now fail-closes non-canonical host/authority encodings for `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL`, including:
+      - trailing-dot hostnames (for example `https://github.com.`),
+      - default-port forms (for example `:443` on HTTPS, `:80` on HTTP),
+      - non-lowercase authority/netloc encodings.
+    - this closes a residual permissive path where semantically equivalent but non-canonical endpoint encodings could pass strict provenance checks and reduce determinism of CI context evidence.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks via shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for non-canonical runtime URL provenance values (trailing-dot host, default-port URL, mixed-case authority).
+    - offline artifact-context consistency fail-closed coverage for non-canonical evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 79):
+  - Hardened strict CI URL parsing fail-closed behavior in `enc2sop/promotion_artifacts.py`:
+    - strict URL normalization now catches malformed port encodings (for example `https://github.com:abc`) and rejects them as invalid context values instead of allowing parser exceptions to bubble.
+    - this closes a residual reliability risk where malformed URL authorities in runtime/artifact provenance fields could raise and abort verification rather than producing deterministic fail-closed audit failures.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks via shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid non-numeric URL port values.
+    - offline artifact-context consistency fail-closed coverage for invalid non-numeric URL port values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 80):
+    - Hardened strict CI URL path canonicalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes non-canonical double-slash path encodings (for example `https://api.github.com//` and `https://api.github.com//graphql`) for:
+          - `GITHUB_SERVER_URL`,
+          - `GITHUB_API_URL`,
+          - `GITHUB_GRAPHQL_URL`.
+    - this closes a residual permissive path where equivalent-but-non-canonical endpoint paths could still pass strict provenance checks and weaken deterministic context binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for non-canonical double-slash runtime URL values.
+    - offline artifact-context consistency fail-closed coverage for non-canonical double-slash evidence URL values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 81):
+    - Hardened strict CI URL provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` when values contain leading/trailing whitespace instead of trimming them.
+      - this closes a residual permissive path where whitespace-decorated endpoint values could normalize into canonical URLs and pass strict CI-context provenance checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 82):
+    - Hardened strict `GITHUB_WORKFLOW_REF` canonical workflow-path normalization in `enc2sop/promotion_artifacts.py`:
+      - strict workflow-ref normalization now fail-closes percent-encoded traversal/separator bypasses in workflow path segments, including:
+        - `%2e` / `%2E` (encoded `.` segment),
+        - `%2e%2e` / `%2E%2E` (encoded `..` segment),
+        - any decoded segment containing `/` or `\`.
+      - this closes a residual permissive path where encoded workflow-path traversal-like segments could bypass raw segment checks and still satisfy strict provenance key-value validation.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared workflow-ref normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - runtime strict invalid-workflow-ref coverage now includes encoded traversal segment variants.
+    - offline artifact-context consistency invalid-workflow-ref coverage now includes encoded traversal segment variants.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `5 passed, 52 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 83):
+    - Hardened strict `GITHUB_WORKFLOW_REF` canonical workflow-path normalization in `enc2sop/promotion_artifacts.py`:
+      - strict workflow-ref normalization now fail-closes workflow-path segments that contain percent-encoding markers (`%`) even when decoded values are non-traversal.
+      - this closes a residual permissive path where encoded filename variants (for example `release%5Fpromotion.yml` and `release%2epromotion.yml`) could normalize into canonical workflow names and still satisfy strict provenance key-value validation.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared workflow-ref normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - runtime strict invalid-workflow-ref coverage now includes encoded workflow filename variants.
+    - offline artifact-context consistency invalid-workflow-ref coverage now includes encoded workflow filename variants.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `5 passed, 52 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 84):
+    - Hardened strict CI URL provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes empty-port authority encodings (for example `https://github.com:` and `https://api.github.com:/graphql`) for:
+        - `GITHUB_SERVER_URL`,
+        - `GITHUB_API_URL`,
+        - `GITHUB_GRAPHQL_URL`.
+      - this closes a residual permissive path where malformed authority encodings with a trailing colon could pass strict URL checks as parseable values and weaken deterministic CI-context binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for empty-port runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for empty-port evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 85):
+    - Hardened strict CI URL path canonicalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes non-root trailing-slash path encodings for CI provenance URL keys:
+        - `GITHUB_SERVER_URL`,
+        - `GITHUB_API_URL`,
+        - `GITHUB_GRAPHQL_URL`.
+      - this closes a residual permissive path where decorated endpoint values such as `https://api.github.com/graphql/` could still satisfy URL parsing but weaken deterministic canonical binding in strict provenance checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for trailing-slash runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for trailing-slash evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 86):
+    - Hardened strict CI SHA provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict SHA normalization now fail-closes leading/trailing whitespace for:
+        - `GITHUB_SHA`,
+        - `GITHUB_WORKFLOW_SHA`.
+      - this closes a residual permissive path where whitespace-decorated SHA values could normalize into canonical digests and still satisfy strict provenance checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated runtime SHA provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated evidence SHA provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_sha_values_are_invalid or artifact_context_consistency_fails_on_invalid_sha_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 87):
+    - Hardened strict CI repository/ref provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict normalization now fail-closes leading/trailing whitespace for:
+        - `GITHUB_REPOSITORY`,
+        - `GITHUB_REF`,
+        - `GITHUB_WORKFLOW_REF`.
+      - this closes a residual permissive path where whitespace-decorated repository/ref provenance values could normalize into canonical identity strings and still satisfy strict CI-context checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated runtime repository/ref/workflow-ref provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated evidence repository/ref/workflow-ref provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or runtime_repository_slug_is_invalid or runtime_ref_git_refname_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref or artifact_context_consistency_fails_on_invalid_repository_slug_value or artifact_context_consistency_fails_on_invalid_ref_git_refname"` => `9 passed, 48 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 88):
+    - Hardened strict CI plain-text provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict CI context normalization now fail-closes leading/trailing whitespace (and control characters) for non-specialized text keys instead of trimming and accepting them.
+      - this applies to strict identity/binding keys such as:
+        - `GITHUB_EVENT_NAME`
+        - `GITHUB_WORKFLOW`
+        - `GITHUB_JOB`
+        - `GITHUB_ACTOR`
+      - this closes a residual permissive path where whitespace-decorated text provenance values could normalize into canonical text and still satisfy strict CI-context binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict context normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated plain-text runtime provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated plain-text evidence provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_text_binding_values_have_whitespace or artifact_context_consistency_fails_on_text_whitespace_values"` => `2 passed, 57 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `59 passed`
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
