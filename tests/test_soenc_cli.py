@@ -12,6 +12,7 @@ import encryption_helper
 from enc2sop import cli as soenc_cli
 from enc2sop import plugin_registry
 from enc2sop import promotion_artifacts
+from enc2sop import promotion_bundle
 from enc2sop import promotion_evidence
 
 
@@ -1041,6 +1042,98 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         mocked_verify.assert_called_once()
         self.assertEqual(mocked_verify.call_args.kwargs["promotion_policy_file"], str(policy_path))
         self.assertEqual(mocked_verify.call_args.kwargs["promotion_workflow_file"], str(workflow_path))
+
+    def test_bundle_promotion_artifacts_command_success(self):
+        root = self.make_case_root("soenc_bundle_promotion_artifacts")
+        bundle_path = root / "promotion_artifact_bundle.zip"
+        fake_manifest = {
+            "schema": "enc2sop-promotion-artifact-bundle/v1",
+            "bundle_sha256": "a" * 64,
+            "file_count": 8,
+        }
+        with mock.patch.object(
+            promotion_bundle,
+            "create_promotion_artifact_bundle",
+            autospec=True,
+            return_value=(bundle_path, fake_manifest),
+        ) as mocked_bundle:
+            exit_code = soenc_cli.main(
+                [
+                    "bundle-promotion-artifacts",
+                    "--dist-dir",
+                    str(root / "release"),
+                    "--promotion-evidence-file",
+                    str(root / "promotion_evidence.json"),
+                    "--promotion-report-file",
+                    str(root / "promotion_audit_report.json"),
+                    "--rotation-report-file",
+                    str(root / "rotation_rehearsal_report.json"),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_bundle.assert_called_once()
+        self.assertEqual(mocked_bundle.call_args.kwargs["dist_dir"], str(root / "release"))
+        self.assertEqual(mocked_bundle.call_args.kwargs["promotion_evidence_file"], str(root / "promotion_evidence.json"))
+        self.assertEqual(mocked_bundle.call_args.kwargs["promotion_report_file"], str(root / "promotion_audit_report.json"))
+        self.assertEqual(mocked_bundle.call_args.kwargs["rotation_report_file"], str(root / "rotation_rehearsal_report.json"))
+        self.assertIsNone(mocked_bundle.call_args.kwargs["promotion_artifact_audit_report_file"])
+        self.assertIsNone(mocked_bundle.call_args.kwargs["promotion_run_receipt_file"])
+        self.assertIsNone(mocked_bundle.call_args.kwargs["promotion_policy_file"])
+        self.assertIsNone(mocked_bundle.call_args.kwargs["promotion_workflow_file"])
+        self.assertIsNone(mocked_bundle.call_args.kwargs["bundle_file"])
+
+    def test_bundle_promotion_artifacts_command_wires_optional_overrides(self):
+        root = self.make_case_root("soenc_bundle_promotion_artifacts_overrides")
+        bundle_path = root / "ops" / "bundle.zip"
+        fake_manifest = {
+            "schema": "enc2sop-promotion-artifact-bundle/v1",
+            "bundle_sha256": "b" * 64,
+            "file_count": 10,
+        }
+        with mock.patch.object(
+            promotion_bundle,
+            "create_promotion_artifact_bundle",
+            autospec=True,
+            return_value=(bundle_path, fake_manifest),
+        ) as mocked_bundle:
+            exit_code = soenc_cli.main(
+                [
+                    "bundle-promotion-artifacts",
+                    "--dist-dir",
+                    str(root / "release"),
+                    "--promotion-evidence-file",
+                    str(root / "promotion_evidence.json"),
+                    "--promotion-report-file",
+                    str(root / "promotion_audit_report.json"),
+                    "--rotation-report-file",
+                    str(root / "rotation_rehearsal_report.json"),
+                    "--promotion-artifact-audit-report-file",
+                    str(root / "promotion_artifact_audit_report.json"),
+                    "--promotion-run-receipt-file",
+                    str(root / "promotion_run_receipt.json"),
+                    "--promotion-policy-file",
+                    str(root / "policy.json"),
+                    "--promotion-workflow-file",
+                    str(root / "workflow.yml"),
+                    "--bundle-file",
+                    str(bundle_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_bundle.assert_called_once()
+        self.assertEqual(
+            mocked_bundle.call_args.kwargs["promotion_artifact_audit_report_file"],
+            str(root / "promotion_artifact_audit_report.json"),
+        )
+        self.assertEqual(
+            mocked_bundle.call_args.kwargs["promotion_run_receipt_file"],
+            str(root / "promotion_run_receipt.json"),
+        )
+        self.assertEqual(mocked_bundle.call_args.kwargs["promotion_policy_file"], str(root / "policy.json"))
+        self.assertEqual(mocked_bundle.call_args.kwargs["promotion_workflow_file"], str(root / "workflow.yml"))
+        self.assertEqual(mocked_bundle.call_args.kwargs["bundle_file"], str(bundle_path))
 
 
 if __name__ == "__main__":

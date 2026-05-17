@@ -63,6 +63,12 @@ Use this when the Linux host has Docker but no Python environment:
 bash scripts/linux_docker_smoke.sh
 ```
 
+The Docker script defaults to `python:3.11-slim` and `DOCKER_PULL_POLICY=never`, so it uses a local image cache by default instead of blocking on Docker Hub. To allow pulling when the image is missing:
+
+```bash
+DOCKER_PULL_POLICY=missing bash scripts/linux_docker_smoke.sh
+```
+
 Both scripts create an isolated smoke fixture, run:
 
 ```text
@@ -80,7 +86,7 @@ Optional overrides:
 
 ```bash
 PYTHON_BIN=python3.11 SMOKE_ROOT=.tmp_custom bash scripts/linux_local_smoke.sh
-DOCKER_IMAGE=python:3.12-bookworm CONTAINER_SMOKE_ROOT=.tmp_docker_custom bash scripts/linux_docker_smoke.sh
+DOCKER_IMAGE=python:3.11-slim CONTAINER_SMOKE_ROOT=.tmp_docker_custom bash scripts/linux_docker_smoke.sh
 ```
 
 ## 4. Mainline Runbook

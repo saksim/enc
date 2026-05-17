@@ -4,8 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-DOCKER_IMAGE="${DOCKER_IMAGE:-python:3.11-bookworm}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-python:3.11-slim}"
+DOCKER_PULL_POLICY="${DOCKER_PULL_POLICY:-never}"
 CONTAINER_SMOKE_ROOT="${CONTAINER_SMOKE_ROOT:-.tmp_linux_smoke_docker}"
+SKIP_APT_INSTALL="${SKIP_APT_INSTALL:-0}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker not found. Install Docker first or use scripts/linux_local_smoke.sh on a Python-capable host." >&2
@@ -19,11 +21,21 @@ case "$CONTAINER_SMOKE_ROOT" in
     ;;
 esac
 
-echo "[1/2] Running smoke test in Docker image: $DOCKER_IMAGE"
+case "$DOCKER_PULL_POLICY" in
+  never|missing|always) ;;
+  *)
+    echo "Invalid DOCKER_PULL_POLICY: $DOCKER_PULL_POLICY (expected never, missing, or always)" >&2
+    exit 1
+    ;;
+esac
+
+echo "[1/2] Running smoke test in Docker image: $DOCKER_IMAGE (pull policy: $DOCKER_PULL_POLICY)"
 docker run --rm \
+  --pull "$DOCKER_PULL_POLICY" \
   -v "$ROOT_DIR":/workspace \
   -w /workspace \
   -e SMOKE_ROOT="$CONTAINER_SMOKE_ROOT" \
+  -e SKIP_APT_INSTALL="$SKIP_APT_INSTALL" \
   "$DOCKER_IMAGE" \
   bash -lc '
 set -euo pipefail
@@ -35,6 +47,7 @@ RELEASE_DIR="$SMOKE_ROOT/out/release"
 OPS_DIR="$SMOKE_ROOT/ops"
 SCOPE_FILE="$SMOKE_ROOT/demo_scope.json"
 APPROVAL_KEY_FILE="$OPS_DIR/release_approval.key"
+SKIP_APT_INSTALL="${SKIP_APT_INSTALL:-0}"
 
 mkdir -p "$SMOKE_ROOT"
 RESOLVED_SMOKE_ROOT="$(cd "$SMOKE_ROOT" && pwd)"
@@ -44,8 +57,16 @@ if [[ "$RESOLVED_SMOKE_ROOT" == "/" || "$RESOLVED_SMOKE_ROOT" == "/workspace" ]]
 fi
 
 echo "[container 1/7] Installing native and Python dependencies"
-apt-get update
-apt-get install -y --no-install-recommends build-essential
+if [[ "$SKIP_APT_INSTALL" != "1" ]]; then
+  apt-get update
+  apt-get install -y --no-install-recommends build-essential
+else
+  echo "Skipping apt install because SKIP_APT_INSTALL=1"
+fi
+if ! command -v gcc >/dev/null 2>&1; then
+  echo "gcc not found in container. Use an image with build-essential installed or run without SKIP_APT_INSTALL=1." >&2
+  exit 1
+fi
 python -m pip install -U pip wheel
 python -m pip install pycryptodome setuptools Cython pytest
 
