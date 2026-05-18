@@ -1189,6 +1189,20 @@ def _pick_compiled_runtime_candidate(build_dir, runtime_file, native_suffixes, s
         if candidate_path.exists():
             suffix = candidate.suffix.lower()
             existing.append((_normalized_relpath_text(candidate), suffix))
+    # Cython module paths are package-shaped only when package discovery is unambiguous.
+    # For directories without __init__.py (for example tests/ on modern projects),
+    # extension artifacts can land at build root: tests/enc_rt_x.py -> enc_rt_x.so
+    # Keep this fallback scoped to runtime loader stubs only.
+    runtime_source = Path(runtime_file)
+    runtime_name = runtime_source.stem
+    runtime_parent = runtime_source.parent
+    if runtime_parent != Path(".") and runtime_name.startswith(RUNTIME_MODULE_PREFIX + "_"):
+        for suffix in native_suffixes:
+            candidate = Path(runtime_name).with_suffix(suffix)
+            candidate_path = build_dir / candidate
+            if candidate_path.exists():
+                suffix_text = candidate.suffix.lower()
+                existing.append((_normalized_relpath_text(candidate), suffix_text))
 
     if not existing:
         return None

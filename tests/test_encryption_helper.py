@@ -301,6 +301,34 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(fp.get("algorithm"), encryption_helper.RUNTIME_FINGERPRINT_ALGORITHM_SHA256)
         self.assertEqual(len(str(fp.get("digest_hex") or "")), 64)
 
+    def test_validate_runtime_delivery_accepts_non_package_runtime_artifact_at_build_root(self):
+        root = self.make_case_root("runtime_validate_nonpkg_root")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        runtime_source = "tests/enc_rt_tests_1234.py"
+        native_suffix = encryption_helper.runtime_host_native_suffixes()[0]
+        runtime_native_rel = Path("enc_rt_tests_1234").with_suffix(native_suffix)
+        runtime_native = build_dir / runtime_native_rel
+        runtime_native.write_bytes(b"native-binary")
+        manifest = {
+            "runtime_files": [runtime_source],
+            "runtime_delivery": {"mode": encryption_helper.RUNTIME_DELIVERY_MODE},
+        }
+        manifest_path = staging_dir / "build_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        compiled = encryption_helper.validate_runtime_delivery(staging_dir, build_dir)
+
+        self.assertEqual(compiled, (runtime_native_rel,))
+        updated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            updated_manifest["runtime_delivery"]["compiled_runtime_files"],
+            [str(runtime_native_rel).replace("\\", "/")],
+        )
+
     def test_validate_runtime_delivery_keeps_manifest_signed_after_validation(self):
         root = self.make_case_root("runtime_validate_signed")
         staging_dir = root / "staging"

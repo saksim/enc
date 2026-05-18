@@ -2448,6 +2448,17 @@ Rationale:
         - build command regression ensuring explicit symlink interpreter path is forwarded unchanged into `compile_with_batch_builder(...)`.
     - Verification:
       - `python -m pytest -q tests/test_toolchain_profile.py tests/test_soenc_cli.py -k "python_exe or symlink"` (local workspace)
+  - Notes (2026-05-18, iteration 91):
+    - Landed Linux acceptance-blocker vertical slice for runtime artifact mapping under non-package directories:
+      - root cause: `validate_runtime_delivery(...)` only looked for compiled runtime artifacts at package-shaped paths derived from `runtime_files` (for example `tests/enc_rt_tests_x.py -> tests/enc_rt_tests_x.so`).
+      - in large projects where directories like `tests/` are namespace-style (no `__init__.py`), Cython can emit extensions at build root (`enc_rt_tests_x.so`), so strict package-path lookup produced false missing-runtime failures.
+      - fix: `_pick_compiled_runtime_candidate(...)` now includes a bounded fallback for runtime stubs (`enc_rt_*`) to also match build-root artifacts by runtime stem while keeping existing strict suffix policy behavior.
+    - Added focused regression coverage:
+      - `tests/test_encryption_helper.py`:
+        - `test_validate_runtime_delivery_accepts_non_package_runtime_artifact_at_build_root`.
+    - Verification:
+      - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_delivery and (non_package or marks_manifest_validated or rejects_missing_compiled_runtime)"` => `3 passed`
+      - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `83 passed, 6 skipped`
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
