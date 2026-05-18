@@ -13,39 +13,11 @@ from typing import List
 from setuptools import setup
 from Cython.Build import cythonize
 from setuptools.command.build_ext import build_ext as _build_ext
-
-WINDOWS_CL_PATH = r"D:\code_environment\visual_studio\enterprise\VC\Tools\MSVC\14.29.30133\bin\HostX64\x64"
-WINDOWS_RC_PATH = r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64"
-WINDOWS_INCLUDE = (
-    r"D:\code_environment\visual_studio\enterprise\VC\Tools\MSVC\14.29.30133\ATLMFC\include;"
-    r"D:\code_environment\visual_studio\enterprise\VC\Tools\MSVC\14.29.30133\include;"
-    r"C:\Program Files (x86)\Windows Kits\NETFXSDK\4.8\include\um;"
-    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.19041.0\ucrt;"
-    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.19041.0\shared;"
-    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.19041.0\um;"
-    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.19041.0\winrt;"
-    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.19041.0\cppwinrt"
-)
-WINDOWS_LIB = (
-    r"D:\code_environment\visual_studio\enterprise\VC\Tools\MSVC\14.29.30133\ATLMFC\lib\x64;"
-    r"D:\code_environment\visual_studio\enterprise\VC\Tools\MSVC\14.29.30133\lib\x64;"
-    r"C:\Program Files (x86)\Windows Kits\NETFXSDK\4.8\lib\um\x64;"
-    r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.19041.0\ucrt\x64;"
-    r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.19041.0\um\x64"
-)
-
-
-def inject_msvc_env():
-    if os.name != "nt":
-        return
-    if "64" not in __import__("platform").architecture()[0]:
-        return
-
-    os.environ["INCLUDE"] = WINDOWS_INCLUDE
-    os.environ["LIB"] = WINDOWS_LIB
-    os.environ["PATH"] = WINDOWS_CL_PATH + ";" + WINDOWS_RC_PATH + ";" + os.environ.get("PATH", "")
-    os.environ["DISTUTILS_USE_SDK"] = "1"
-    os.environ["MSSdk"] = "1"
+from toolchain_profile import DEFAULT_BUILD_PROFILE
+from toolchain_profile import ENV_PREPARED
+from toolchain_profile import SUPPORTED_BUILD_PROFILES
+from toolchain_profile import prepare_windows_build_env
+from toolchain_profile import resolve_build_profile
 
 
 class BuildExtWithoutPlatformSuffix(_build_ext):
@@ -121,14 +93,39 @@ class Py2SoUtil:
             except OSError as exc:
                 print(f"warning: skip removing {path}: {exc}")
 
-    def run(self, current_path="."):
-        inject_msvc_env()
-        target_dir = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(current_path).resolve()
+    @staticmethod
+    def parse_args(argv=None):
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Batch-compile a Python tree into native modules.")
+        parser.add_argument("target", nargs="?", default=".", help="Staging directory to compile.")
+        parser.add_argument(
+            "--build-profile",
+            default=DEFAULT_BUILD_PROFILE,
+            choices=SUPPORTED_BUILD_PROFILES,
+            help="Build profile used for toolchain assumptions.",
+        )
+        parser.add_argument("--vcvars-path", help="Optional explicit vcvars64.bat for windows-msvc profile.")
+        return parser.parse_args(argv)
+
+    def run(self, argv=None, current_path="."):
+        args = self.parse_args(argv)
+        if os.name == "nt":
+            prepared = prepare_windows_build_env(
+                output_dir=Path(args.target).resolve(),
+                profile=resolve_build_profile(args.build_profile),
+                vcvars_path=args.vcvars_path,
+            )
+            if prepared:
+                os.environ.update(prepared)
+        target_dir = Path(args.target).resolve() if args.target else Path(current_path).resolve()
         parent_dir = target_dir.parent
         build_dir = target_dir / "build"
         build_temp_dir = build_dir / "temp"
 
         print("start:", parent_dir, target_dir.name, build_dir)
+        print("build_profile={0}".format(resolve_build_profile(args.build_profile)))
+        print("prepared_env={0}".format(os.environ.get(ENV_PREPARED, "0")))
         os.chdir(parent_dir)
 
         module_list = self.iter_python_sources(target_dir)
@@ -162,4 +159,4 @@ class Py2SoUtil:
 
 
 if __name__ == "__main__":
-    Py2SoUtil().run()
+    Py2SoUtil().run(sys.argv[1:])

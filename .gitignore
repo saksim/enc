@@ -1,13 +1,111 @@
+# 日志文件
+*.log
+*.logs
+logs/
+logs_*.logs
+
+# 环境变量
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+
+# 密钥和证书
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Python
 __pycache__/
-.tmp_airgap*/
-.tmp_compile*/
-.tmp_run*/
-.tmp_test_*/
-.tmp_verify*/
-.tmp_debug_*.png
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Docker
+.dockerenv
+docker-compose.override.yml
+.docker/
+
+# Docker 数据卷（本地开发）
+docker/mysql_data/
+docker/redis_data/
+
+# 敏感配置
+config/secrets/
+*.secret
+config/*.runtime.env
+
+# 示例配置（用于参考，实际配置不提交）
+config/im_adapters/*.yaml.example
+config/models/*.yaml.example
+
+# 临时文件
+*.tmp
+*.bak
+*.orig
+.tmp_pytest*/
+
+# 测试覆盖率
+.coverage
+htmlcov/
 .pytest_cache/
-pytest-cache-files-*/
-ocr_cli_*/
-ocr_full_smoke_*/
-ocr_live_smoke_*/
-ocr_tess_*/
+
+# 类型检查
+.mypy_cache/
+.pytype/
+
+# 数据
+*.csv
+*.xlsx
+*.xls
+*.txt
+*.pdf
+*.tar
+*.rar
+*.7z
+*.zip
+
+# 其他垃圾数据
+*.tmp_*
+output/
+*.joblib
+*tests_round*
+*tests_iter*
+*test_round*
+*test_iter*
+artifacts/
