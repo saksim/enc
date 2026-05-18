@@ -54,6 +54,8 @@ ensure_safe_smoke_root "$SMOKE_ROOT"
 echo "[1/9] Creating virtual environment: $VENV_DIR"
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
+ACTIVE_PYTHON="$(command -v python)"
+echo "Using build python: $ACTIVE_PYTHON"
 
 echo "[2/9] Installing Python dependencies"
 python -m pip install -U pip wheel
@@ -77,7 +79,7 @@ PY
 
 echo "[4/9] Mainline pass: protect -> build -> verify -> package -> approve-release -> release"
 python soenc.py protect -t "$SRC_DIR" -o "$STAGING_DIR" --scope-config "$SCOPE_FILE"
-python soenc.py build --staging-dir "$STAGING_DIR" --build-profile auto
+python soenc.py build --staging-dir "$STAGING_DIR" --build-profile auto --python-exe "$ACTIVE_PYTHON"
 python soenc.py verify --staging-dir "$STAGING_DIR"
 python soenc.py package --staging-dir "$STAGING_DIR" --dist-dir "$RELEASE_DIR"
 python soenc.py approve-release \

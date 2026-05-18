@@ -113,6 +113,11 @@ Useful overrides:
 PYTHON_BIN=python3.11 TARGET_DIR=./src_pkg SMOKE_ROOT=.tmp_acceptance_custom bash scripts/linux_release_acceptance.sh
 ```
 
+Troubleshooting:
+
+1. If build reports `ModuleNotFoundError: No module named 'Cython'`, the compile step is likely running with a different interpreter than the venv.
+2. `linux_release_acceptance.sh` now pins `soenc build --python-exe` to the active venv Python automatically.
+
 ## 4. Mainline Runbook
 
 ### 4.1 Protect
