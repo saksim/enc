@@ -1755,6 +1755,89 @@ def _runtime_fingerprints_from_manifest(manifest, build_dir, source_to_compiled)
     return sorted(fingerprints, key=lambda item: (item["module_name"], item["compiled_relative_path"]))
 
 
+def _runtime_fingerprint_entry_map(entries):
+    mapped = {}  # type: Dict[str, Dict[str, str]]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError("runtime fingerprint entries must be JSON objects")
+        source_relative = _normalized_relpath_text(str(entry.get("source_relative_path") or "")).strip()
+        if not source_relative:
+            raise RuntimeError("runtime fingerprint entry missing source_relative_path")
+        if source_relative in mapped:
+            raise RuntimeError("duplicate runtime fingerprint entry for source: {0}".format(source_relative))
+        mapped[source_relative] = {
+            "source_relative_path": source_relative,
+            "compiled_relative_path": _normalized_relpath_text(str(entry.get("compiled_relative_path") or "")).strip(),
+            "algorithm": str(entry.get("algorithm") or "").strip().lower(),
+            "digest_hex": str(entry.get("digest_hex") or "").strip().lower(),
+            "module_name": str(entry.get("module_name") or "").strip(),
+            "package_relative_path": _normalized_relpath_text(str(entry.get("package_relative_path") or "")).strip(),
+        }
+    return mapped
+
+
+def _validate_existing_runtime_fingerprints(existing_entries, expected_entries):
+    if not isinstance(existing_entries, list) or not existing_entries:
+        return
+    existing_by_source = _runtime_fingerprint_entry_map(existing_entries)
+    expected_by_source = _runtime_fingerprint_entry_map(expected_entries)
+    existing_sources = set(existing_by_source.keys())
+    expected_sources = set(expected_by_source.keys())
+    if existing_sources != expected_sources:
+        missing_sources = sorted(expected_sources - existing_sources)
+        extra_sources = sorted(existing_sources - expected_sources)
+        raise RuntimeError(
+            "runtime fingerprint source set mismatch: missing={0} extra={1}".format(
+                ",".join(missing_sources) if missing_sources else "<none>",
+                ",".join(extra_sources) if extra_sources else "<none>",
+            )
+        )
+    for source_relative in sorted(expected_sources):
+        existing = existing_by_source[source_relative]
+        expected = expected_by_source[source_relative]
+        for field in (
+            "compiled_relative_path",
+            "algorithm",
+            "module_name",
+            "package_relative_path",
+        ):
+            if existing[field] != expected[field]:
+                raise RuntimeError(
+                    "runtime fingerprint metadata mismatch for {0}: {1} expected={2} actual={3}".format(
+                        source_relative,
+                        field,
+                        expected[field],
+                        existing[field],
+                    )
+                )
+        if not hmac.compare_digest(existing["digest_hex"], expected["digest_hex"]):
+            raise RuntimeError(
+                "runtime fingerprint digest mismatch for {0}".format(source_relative)
+            )
+
+
+def _validate_existing_compiled_runtime_files(existing_files, expected_files):
+    if not isinstance(existing_files, list) or not existing_files:
+        return
+    normalized_existing = sorted(
+        _normalized_relpath_text(str(item)).strip()
+        for item in existing_files
+        if str(item).strip()
+    )
+    normalized_expected = sorted(
+        _normalized_relpath_text(str(item)).strip()
+        for item in expected_files
+        if str(item).strip()
+    )
+    if normalized_existing != normalized_expected:
+        raise RuntimeError(
+            "runtime compiled artifact set mismatch: expected={0} actual={1}".format(
+                ",".join(normalized_expected),
+                ",".join(normalized_existing),
+            )
+        )
+
+
 def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_manifest_signature=False):
     manifest_path = staging_dir / "build_manifest.json"
     if not manifest_path.exists():
@@ -1833,12 +1916,22 @@ def validate_runtime_delivery(staging_dir, build_dir, signing_key=None, require_
             "compiled runtime modules missing from build output: {0}".format(", ".join(sorted(missing_runtime_files)))
         )
 
-    runtime_delivery["compiled_runtime_files"] = sorted(compiled_runtime_files)
-    runtime_delivery["compiled_runtime_fingerprints"] = _runtime_fingerprints_from_manifest(
+    resolved_compiled_runtime_files = sorted(compiled_runtime_files)
+    resolved_runtime_fingerprints = _runtime_fingerprints_from_manifest(
         manifest,
         build_dir,
         source_to_compiled,
     )
+    _validate_existing_compiled_runtime_files(
+        runtime_delivery.get("compiled_runtime_files"),
+        resolved_compiled_runtime_files,
+    )
+    _validate_existing_runtime_fingerprints(
+        runtime_delivery.get("compiled_runtime_fingerprints"),
+        resolved_runtime_fingerprints,
+    )
+    runtime_delivery["compiled_runtime_files"] = resolved_compiled_runtime_files
+    runtime_delivery["compiled_runtime_fingerprints"] = resolved_runtime_fingerprints
     runtime_delivery["validated"] = True
     manifest["runtime_delivery"] = runtime_delivery
     write_manifest(staging_dir, manifest, signing_key=signing_key, key_id=(manifest.get("signature") or {}).get("key_id"))

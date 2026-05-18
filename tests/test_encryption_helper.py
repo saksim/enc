@@ -364,6 +364,102 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(signature["key_id"], "team-main")
         self.assertTrue(loaded["runtime_delivery"]["validated"])
 
+    def test_validate_runtime_delivery_rejects_tampered_runtime_fingerprint_digest(self):
+        root = self.make_case_root("runtime_validate_tampered_fingerprint_digest")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        pkg_dir = build_dir / "pkg"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+
+        runtime_source = "pkg/enc_rt_pkg_1234.py"
+        runtime_native_rel = Path("pkg/enc_rt_pkg_1234").with_suffix(
+            encryption_helper.runtime_host_native_suffixes()[0]
+        )
+        runtime_native = build_dir / runtime_native_rel
+        runtime_native.write_bytes(b"native-binary")
+        digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+        manifest = {
+            "runtime_files": [runtime_source],
+            "runtime_modules": [
+                {
+                    "module_name": "enc_rt_pkg_1234",
+                    "source_relative_path": runtime_source,
+                    "package_relative_path": "pkg",
+                }
+            ],
+            "runtime_delivery": {
+                "mode": encryption_helper.RUNTIME_DELIVERY_MODE,
+                "compiled_runtime_files": [str(runtime_native_rel).replace("\\", "/")],
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": runtime_source,
+                        "package_relative_path": "pkg",
+                        "compiled_relative_path": str(runtime_native_rel).replace("\\", "/"),
+                        "algorithm": encryption_helper.RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                        "digest_hex": ("0" * 64) if digest != ("0" * 64) else ("1" * 64),
+                    }
+                ],
+            },
+        }
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "runtime fingerprint digest mismatch"):
+            encryption_helper.validate_runtime_delivery(staging_dir, build_dir)
+
+    def test_validate_runtime_delivery_rejects_tampered_compiled_runtime_file_set(self):
+        root = self.make_case_root("runtime_validate_tampered_compiled_set")
+        staging_dir = root / "staging"
+        build_dir = root / "build"
+        pkg_dir = build_dir / "pkg"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+
+        runtime_source = "pkg/enc_rt_pkg_1234.py"
+        runtime_native_rel = Path("pkg/enc_rt_pkg_1234").with_suffix(
+            encryption_helper.runtime_host_native_suffixes()[0]
+        )
+        runtime_native = build_dir / runtime_native_rel
+        runtime_native.write_bytes(b"native-binary")
+        digest = hashlib.sha256(runtime_native.read_bytes()).hexdigest()
+        manifest = {
+            "runtime_files": [runtime_source],
+            "runtime_modules": [
+                {
+                    "module_name": "enc_rt_pkg_1234",
+                    "source_relative_path": runtime_source,
+                    "package_relative_path": "pkg",
+                }
+            ],
+            "runtime_delivery": {
+                "mode": encryption_helper.RUNTIME_DELIVERY_MODE,
+                "compiled_runtime_files": [
+                    str(Path("pkg/enc_rt_pkg_9999").with_suffix(encryption_helper.runtime_host_native_suffixes()[0])).replace("\\", "/")
+                ],
+                "compiled_runtime_fingerprints": [
+                    {
+                        "module_name": "enc_rt_pkg_1234",
+                        "source_relative_path": runtime_source,
+                        "package_relative_path": "pkg",
+                        "compiled_relative_path": str(runtime_native_rel).replace("\\", "/"),
+                        "algorithm": encryption_helper.RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                        "digest_hex": digest,
+                    }
+                ],
+            },
+        }
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "runtime compiled artifact set mismatch"):
+            encryption_helper.validate_runtime_delivery(staging_dir, build_dir)
+
     def test_copy_release_requires_validated_runtime_delivery_for_runtime_files(self):
         root = self.make_case_root("release_runtime_validation_required")
         staging_dir = root / "staging"

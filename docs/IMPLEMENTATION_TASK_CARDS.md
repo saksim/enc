@@ -2459,6 +2459,24 @@ Rationale:
     - Verification:
       - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_delivery and (non_package or marks_manifest_validated or rejects_missing_compiled_runtime)"` => `3 passed`
       - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `83 passed, 6 skipped`
+  - Notes (2026-05-18, iteration 92):
+    - Landed Linux acceptance fail-closed verification hardening for runtime manifest integrity:
+      - root cause: `validate_runtime_delivery(...)` recomputed runtime fingerprints and wrote fresh values without first validating pre-existing manifest runtime-delivery metadata, so a tampered `compiled_runtime_fingerprints[].digest_hex` could be silently overwritten and pass `soenc verify`.
+      - fix:
+        - added strict pre-write checks for existing runtime delivery metadata:
+          - `compiled_runtime_files` must match recomputed runtime artifact set,
+          - `compiled_runtime_fingerprints` source set/metadata/digests must match recomputed values.
+        - any mismatch now fails closed before manifest rewrite.
+      - this aligns `soenc verify` behavior with tamper-evidence expectations used by `scripts/linux_release_acceptance.sh` fail-closed test B.
+    - Added focused regression coverage:
+      - `tests/test_encryption_helper.py`:
+        - `test_validate_runtime_delivery_rejects_tampered_runtime_fingerprint_digest`
+        - `test_validate_runtime_delivery_rejects_tampered_compiled_runtime_file_set`
+    - Minor acceptance-script observability improvement:
+      - `scripts/linux_release_acceptance.sh` now prints explicit `ok:` lines when fail-closed tamper checks are correctly rejected.
+    - Verification:
+      - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_delivery and (tampered_runtime_fingerprint_digest or tampered_compiled_runtime_file_set or non_package or marks_manifest_validated)"` => `4 passed`
+      - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.

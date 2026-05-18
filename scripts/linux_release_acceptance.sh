@@ -122,6 +122,7 @@ then
   echo "ERROR: tampered release_approval.json unexpectedly passed release gate" >&2
   exit 1
 fi
+echo "ok: tampered release_approval.json rejected by release gate"
 
 echo "[7/9] Fail-closed test B: tampered runtime fingerprint in build_manifest.json must fail verify"
 cp "$STAGING_DIR/build_manifest.json" "$TAMPER_DIR/build_manifest.json.bak"
@@ -145,6 +146,7 @@ then
   echo "ERROR: tampered build_manifest runtime fingerprint unexpectedly passed verify" >&2
   exit 1
 fi
+echo "ok: tampered runtime fingerprint rejected by verify gate"
 mv "$TAMPER_DIR/build_manifest.json.bak" "$STAGING_DIR/build_manifest.json"
 
 echo "[8/9] Sanity: verify passes again after restoring manifest"
