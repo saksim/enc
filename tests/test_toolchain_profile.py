@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 import shutil
+import os
 
 import toolchain_profile
 
@@ -20,7 +21,24 @@ class ToolchainProfileTests(unittest.TestCase):
             python_exe=None,
             environ={toolchain_profile.ENV_PYTHON_EXE: str(fake_python)},
         )
-        self.assertEqual(resolved, fake_python.resolve())
+        self.assertEqual(resolved, (Path.cwd() / fake_python).absolute())
+
+    def test_resolve_python_executable_preserves_symlink_path_for_explicit_value(self):
+        temp_dir = Path(__file__).resolve().parents[1] / ".tmp_test_runs" / "toolchain_profile_symlink"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(str(temp_dir), ignore_errors=True))
+
+        real_python = temp_dir / "python-real"
+        real_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        link_python = temp_dir / "python-link"
+        try:
+            os.symlink(real_python, link_python)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation not supported in this environment")
+
+        resolved = toolchain_profile.resolve_python_executable(str(link_python))
+        self.assertEqual(resolved, link_python.absolute())
+        self.assertNotEqual(resolved, real_python.absolute())
 
     def test_discover_vcvars64_uses_env_override(self):
         with mock.patch.object(toolchain_profile.os, "name", "nt"):

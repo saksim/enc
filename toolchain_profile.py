@@ -62,11 +62,17 @@ def resolve_build_profile(profile: Optional[str] = None, environ: Optional[Dict[
 def resolve_python_executable(python_exe: Optional[Union[str, Path]] = None, environ: Optional[Dict[str, str]] = None) -> Path:
     env = environ if environ is not None else os.environ
     if python_exe:
-        return normalize_path(python_exe)
+        explicit = Path(os.fspath(python_exe).strip().strip('"')).expanduser()
+        if not explicit.is_absolute():
+            explicit = Path.cwd() / explicit
+        return explicit.absolute()
     env_python = (env.get(ENV_PYTHON_EXE) or "").strip()
     if env_python:
-        return normalize_path(env_python)
-    return Path(sys.executable).resolve()
+        explicit = Path(env_python).expanduser()
+        if not explicit.is_absolute():
+            explicit = Path.cwd() / explicit
+        return explicit.absolute()
+    return Path(sys.executable).absolute()
 
 
 def _base_program_files_paths(environ: Optional[Dict[str, str]] = None) -> Tuple[Path, ...]:

@@ -1,6 +1,7 @@
 import json
 import hashlib
 import hmac
+import os
 import shutil
 import sys
 import unittest
@@ -141,6 +142,36 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mocked_compile.assert_called_once()
         self.assertEqual(str(mocked_compile.call_args.kwargs["python_exe"]), cli_python)
+
+    def test_build_command_preserves_explicit_symlink_python_path(self):
+        root = self.make_case_root("soenc_build_python_symlink")
+        staging_dir = root / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        real_python = root / "python-real"
+        real_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        link_python = root / "python-link"
+        try:
+            os.symlink(real_python, link_python)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation not supported in this environment")
+
+        with mock.patch.object(encryption_helper, "compile_with_batch_builder", return_value=staging_dir / "build") as mocked_compile:
+            exit_code = soenc_cli.main(
+                [
+                    "build",
+                    "--staging-dir",
+                    str(staging_dir),
+                    "--python-exe",
+                    str(link_python),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_compile.assert_called_once()
+        self.assertEqual(
+            str(mocked_compile.call_args.kwargs["python_exe"]),
+            str(link_python.absolute()),
+        )
 
     def test_package_command_copies_release_files(self):
         root = self.make_case_root("soenc_package")

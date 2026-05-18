@@ -2432,6 +2432,22 @@ Rationale:
     - `python -m pytest -q tests/test_promotion_artifacts.py -k "rotation_context_normalization_accepts_valid_aliases or runtime_boolean_values_are_noncanonical"` => `1 passed, 59 deselected`
     - `python -m pytest -q tests/test_promotion_artifacts.py` => `60 passed`
     - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts"` => `3 passed, 27 deselected`
+  - Notes (2026-05-18, iteration 90):
+    - Landed Linux acceptance-blocker vertical slice for interpreter determinism across `soenc build`:
+      - root cause: explicit/venv `--python-exe` paths were normalized via `Path.resolve()`, which dereferenced symlinked venv launchers to system interpreters on Linux (for example `/usr/bin/python3.12`), causing `py2_linux_rec_opera.py` to run outside the prepared venv and fail on `ModuleNotFoundError: No module named 'Cython'`.
+      - fix: `toolchain_profile.resolve_python_executable(...)` now preserves explicit interpreter path identity (absolute path without symlink dereference) for:
+        - CLI `--python-exe` input,
+        - `SOENC_PYTHON_EXE` override,
+        - fallback `sys.executable`.
+      - this keeps build invocation bound to the caller-selected interpreter context and prevents venv/system drift in release acceptance runs.
+    - Added focused regression coverage:
+      - `tests/test_toolchain_profile.py`:
+        - symlink-preservation test for explicit interpreter path resolution.
+        - updated env-override assertion to match absolute non-dereferenced behavior.
+      - `tests/test_soenc_cli.py`:
+        - build command regression ensuring explicit symlink interpreter path is forwarded unchanged into `compile_with_batch_builder(...)`.
+    - Verification:
+      - `python -m pytest -q tests/test_toolchain_profile.py tests/test_soenc_cli.py -k "python_exe or symlink"` (local workspace)
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
