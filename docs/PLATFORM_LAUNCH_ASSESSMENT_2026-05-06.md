@@ -1317,6 +1317,22 @@ Current go-live gate note (2026-05-07):
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
 
+- As of 2026-05-18 (iteration 93), Linux pre-production acceptance has completed against a real target project:
+  - `scripts/linux_release_acceptance.sh` completed through `[9/9] Acceptance checks passed` for `omniprompt-gateway`.
+  - The run exercised the full mainline:
+    - `protect -> build -> verify -> package -> approve-release -> release`.
+  - The run verified fail-closed behavior for:
+    - tampered `release_approval.json`,
+    - tampered runtime fingerprint metadata in `build_manifest.json`,
+    - post-restore runtime verification.
+  - Current launch posture:
+    - mainline Linux project packaging is now pre-production-candidate,
+    - `ENC-P0-016` remains blocked only by live protected-branch/environment promotion execution and archived CI evidence.
+  - next required launch evidence:
+    - real `.github/workflows/release_promotion.yml` execution from protected branch/environment,
+    - archived promotion evidence, audit report, rotation report, artifact audit report, and run receipt,
+    - live old-key rejection rehearsal using real previous approval-key material.
+
 ## 9. Assessment Status
 
 Status: `[APPROVED BASELINE]`

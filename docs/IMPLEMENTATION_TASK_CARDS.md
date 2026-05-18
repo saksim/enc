@@ -2477,6 +2477,23 @@ Rationale:
     - Verification:
       - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_delivery and (tampered_runtime_fingerprint_digest or tampered_compiled_runtime_file_set or non_package or marks_manifest_validated)"` => `4 passed`
       - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+  - Notes (2026-05-18, iteration 93):
+    - External Linux pre-production acceptance run is now complete against a real target project (`omniprompt-gateway`) using:
+      - `TARGET_DIR=/home/saksim/program_git/omniprompt-gateway nohup bash scripts/linux_release_acceptance.sh > logs 2>&1 &`
+    - The run completed through `[9/9] Acceptance checks passed`.
+    - Verified production mainline in a Linux environment:
+      - `protect -> build -> verify -> package -> approve-release -> release`.
+    - Verified fail-closed tamper checks in the same run:
+      - tampered `release_approval.json` was rejected by the release gate,
+      - tampered runtime fingerprint in `build_manifest.json` was rejected by the verify gate,
+      - restoring the manifest allowed `verify` to pass again.
+    - Current progress assessment:
+      - core mainline is now pre-production-candidate for Linux project packaging,
+      - remaining `ENC-P0-016` scope is no longer local code-path validation; it is live protected-branch/environment promotion execution and evidence archival.
+    - Next iteration target:
+      - execute `.github/workflows/release_promotion.yml` from a real protected branch/environment,
+      - archive real CI promotion/rotation/run-receipt artifacts,
+      - complete live stale-key rejection rehearsal with real previous-key material.
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
