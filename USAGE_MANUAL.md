@@ -89,6 +89,30 @@ PYTHON_BIN=python3.11 SMOKE_ROOT=.tmp_custom bash scripts/linux_local_smoke.sh
 DOCKER_IMAGE=python:3.11-slim CONTAINER_SMOKE_ROOT=.tmp_docker_custom bash scripts/linux_docker_smoke.sh
 ```
 
+## 3.2 Linux Release Acceptance Script
+
+For pre-production acceptance (mainline pass + fail-closed tamper checks), use:
+
+```bash
+TARGET_DIR=./src_pkg bash scripts/linux_release_acceptance.sh
+```
+
+What it validates:
+
+1. Mainline flow passes:
+   - `protect -> build -> verify -> package -> approve-release -> release`
+2. Fail-closed behavior:
+   - tampered `release_approval.json` is rejected by `soenc release`
+   - tampered runtime fingerprint in `build_manifest.json` is rejected by `soenc verify`
+3. Recovery sanity:
+   - `soenc verify` passes again after restoring the manifest
+
+Useful overrides:
+
+```bash
+PYTHON_BIN=python3.11 TARGET_DIR=./src_pkg SMOKE_ROOT=.tmp_acceptance_custom bash scripts/linux_release_acceptance.sh
+```
+
 ## 4. Mainline Runbook
 
 ### 4.1 Protect

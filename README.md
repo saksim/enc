@@ -87,6 +87,14 @@ python .\soenc.py promotion-dry-run --github-repo owner/repo --github-token $env
 4. [docs/IMPLEMENTATION_TASK_CARDS.md](./docs/IMPLEMENTATION_TASK_CARDS.md)
    - Execution backlog and card-level status
 
+## Linux Acceptance
+
+After smoke passes, run the Linux pre-production acceptance script (mainline + fail-closed tamper checks):
+
+```bash
+TARGET_DIR=./src_pkg bash scripts/linux_release_acceptance.sh
+```
+
 ## Compatibility Notes
 
 Legacy script entrypoints still exist for compatibility:
