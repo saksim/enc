@@ -2413,6 +2413,25 @@ Rationale:
   - Verification:
     - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_text_binding_values_have_whitespace or artifact_context_consistency_fails_on_text_whitespace_values"` => `2 passed, 57 deselected`
     - `python -m pytest -q tests/test_promotion_artifacts.py` => `59 passed`
+  - Notes (2026-05-17, iteration 89):
+    - Hardened strict CI boolean provenance canonicalization in `enc2sop/promotion_artifacts.py`:
+      - strict CI-context normalization now fail-closes non-canonical boolean aliases for:
+        - `GITHUB_ACTIONS`,
+        - `CI`,
+        - `GITHUB_REF_PROTECTED`.
+      - accepted values are now canonical lowercase `true`/`false` only (no `1/0`, `yes/no`, or `on/off` aliases).
+      - this closes a residual permissive path where semantically truthy/falsy aliases could bypass deterministic provenance string binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict context normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for non-canonical boolean runtime provenance values.
+    - updated normalization acceptance coverage to require canonical boolean tokens.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "rotation_context_normalization_accepts_valid_aliases or runtime_boolean_values_are_noncanonical"` => `1 passed, 59 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `60 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts"` => `3 passed, 27 deselected`
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.

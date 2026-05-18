@@ -1301,6 +1301,22 @@ Current go-live gate note (2026-05-07):
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
 
+- As of 2026-05-17 (iteration 89), `ENC-P0-016` tightens strict CI boolean provenance canonicalization:
+  - `soenc verify-promotion-artifacts` strict CI-context checks now fail-close non-canonical boolean aliases for:
+    - `GITHUB_ACTIONS`,
+    - `CI`,
+    - `GITHUB_REF_PROTECTED`.
+  - accepted values are now canonical lowercase `true`/`false` only (no `1/0`, `yes/no`, or `on/off` aliases).
+  - this validation now applies consistently across:
+    - runtime strict CI-context completeness checks,
+    - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+    - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - this closes a residual permissive path where semantically equivalent truthy/falsy aliases could still satisfy strict provenance checks without deterministic string-level canonical binding.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
 ## 9. Assessment Status
 
 Status: `[APPROVED BASELINE]`

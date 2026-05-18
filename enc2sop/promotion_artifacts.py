@@ -613,19 +613,19 @@ def _normalize_strict_text(value: object) -> str:
 
 
 def _normalize_ref_protected(value: object) -> str:
-    text = _normalize_text(value).lower()
-    if text in {"true", "1", "yes", "y", "on"}:
+    text = _normalize_strict_text(value)
+    if text == "true":
         return "true"
-    if text in {"false", "0", "no", "n", "off"}:
+    if text == "false":
         return "false"
     return ""
 
 
 def _normalize_boolean_like(value: object) -> str:
-    text = _normalize_text(value).lower()
-    if text in {"true", "1", "yes", "y", "on"}:
+    text = _normalize_strict_text(value)
+    if text == "true":
         return "true"
-    if text in {"false", "0", "no", "n", "off"}:
+    if text == "false":
         return "false"
     return ""
 

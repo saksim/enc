@@ -56,12 +56,12 @@ def add(a, b):
 PY
 cat > "$SCOPE_FILE" <<'JSON'
 {
-  "rules": [
-    {
-      "pattern": "**/*.py",
-      "action": "protect"
+  "__init__.py": {
+    "functions": [
+      "add"
+    ],
+    "all": false
     }
-  ]
 }
 JSON
 APPROVAL_KEY_FILE="$APPROVAL_KEY_FILE" python - <<'PY'

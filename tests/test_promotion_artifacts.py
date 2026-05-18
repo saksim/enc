@@ -1256,10 +1256,10 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "workflow_retention_days": "090",
                     "workflow_ref": "refs/heads/main",
                     "workflow_ref_name": "main",
-                    "workflow_ref_type": "BRANCH",
+                    "workflow_ref_type": "branch",
                     "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                    "workflow_github_actions": "TRUE",
-                    "workflow_ci": "ON",
+                    "workflow_github_actions": "true",
+                    "workflow_ci": "true",
                     "workflow_runner_environment": "github-hosted",
                     "workflow_runner_os": "Linux",
                     "workflow_runner_arch": "X64",
@@ -1277,7 +1277,7 @@ class PromotionArtifactsTests(unittest.TestCase):
                     "workflow_repository_id": "04242",
                     "workflow_repository_owner": "acme",
                     "workflow_repository_owner_id": "0424242",
-                    "workflow_ref_protected": "YES",
+                    "workflow_ref_protected": "true",
                     "requested": False,
                     "executed": False,
                     "old_key_rejected": None,
@@ -2263,7 +2263,7 @@ class PromotionArtifactsTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "runtime GitHub context.CI must be true in GitHub Actions CI context" in item
+                "invalid runtime GitHub context key for CI match: CI" in item
                 for item in report["failures"]
             )
         )
@@ -2727,6 +2727,157 @@ class PromotionArtifactsTests(unittest.TestCase):
         )
         self.assertTrue(
             any("invalid runtime GitHub context key for CI match: GITHUB_ACTOR" in item for item in report["failures"])
+        )
+
+    def test_run_promotion_artifact_audit_fails_when_runtime_boolean_values_are_noncanonical(self):
+        root = self.make_case_root("promotion_artifacts_runtime_boolean_noncanonical")
+        release_dir = root / "release"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        github_context = {
+            "GITHUB_REPOSITORY": "acme/demo",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
+            "RUNNER_NAME": "runner-x64",
+            "GITHUB_RUN_ID": "12345",
+            "GITHUB_RUN_ATTEMPT": "3",
+            "GITHUB_RUN_NUMBER": "18",
+            "GITHUB_RETENTION_DAYS": "90",
+            "GITHUB_SHA": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "GITHUB_WORKFLOW": "release-promotion-gate",
+            "GITHUB_WORKFLOW_REF": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "facefeedfacefeedfacefeedfacefeedfacefeed",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
+            "GITHUB_JOB": "promotion-gate",
+            "GITHUB_ACTOR": "octocat",
+            "GITHUB_ACTOR_ID": "42",
+            "GITHUB_REPOSITORY_ID": "4242",
+            "GITHUB_REPOSITORY_OWNER": "acme",
+            "GITHUB_REPOSITORY_OWNER_ID": "424242",
+        }
+        self._write_release_artifacts(
+            release_dir,
+            approval_github_context=github_context,
+            release_github_context=github_context,
+        )
+        policy_path, workflow_path = self._write_policy_and_workflow(root)
+
+        evidence_path = root / "promotion_evidence.json"
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-promotion-evidence/v1",
+                    "github_context": dict(github_context),
+                    "branches": [{"name": "main", "required_status_checks": ["Signed Approval Promotion Gate"]}],
+                    "environments": [{"name": "production-promotion", "required_reviewers_count": 1}],
+                    "secrets": ["SOENC_RELEASE_APPROVAL_KEY_B64"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        promotion_report = root / "promotion_audit_report.json"
+        promotion_report.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-promotion-audit-report/v1",
+                    "passed": True,
+                    "summary": {"total_failures": 0},
+                    "failures": [],
+                    "inputs": {
+                        "policy_file": str(policy_path.resolve()),
+                        "policy_sha256": encryption_helper._sha256_file(policy_path),
+                        "evidence_file": str(evidence_path.resolve()),
+                        "evidence_sha256": encryption_helper._sha256_file(evidence_path),
+                        "workflow_file": str(workflow_path.resolve()),
+                        "workflow_sha256": encryption_helper._sha256_file(workflow_path),
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        rotation_report = root / "rotation_rehearsal_report.json"
+        rotation_report.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-rotation-rehearsal/v1",
+                    "workflow_repository": "acme/demo",
+                    "workflow_run_id": "12345",
+                    "workflow_run_attempt": "3",
+                    "workflow_run_number": "18",
+                    "workflow_retention_days": "90",
+                    "workflow_ref": "refs/heads/main",
+                    "workflow_ref_name": "main",
+                    "workflow_ref_type": "branch",
+                    "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    "workflow_github_actions": "true",
+                    "workflow_ci": "true",
+                    "workflow_runner_environment": "github-hosted",
+                    "workflow_runner_os": "Linux",
+                    "workflow_runner_arch": "X64",
+                    "workflow_runner_name": "runner-x64",
+                    "workflow_name": "release-promotion-gate",
+                    "workflow_name_ref": "acme/demo/.github/workflows/release_promotion.yml@refs/heads/main",
+                    "workflow_name_sha": "facefeedfacefeedfacefeedfacefeedfacefeed",
+                    "workflow_event": "push",
+                    "workflow_server_url": "https://github.com",
+                    "workflow_api_url": "https://api.github.com",
+                    "workflow_graphql_url": "https://api.github.com/graphql",
+                    "workflow_job": "promotion-gate",
+                    "workflow_actor": "octocat",
+                    "workflow_actor_id": "42",
+                    "workflow_repository_id": "4242",
+                    "workflow_repository_owner": "acme",
+                    "workflow_repository_owner_id": "424242",
+                    "workflow_ref_protected": "true",
+                    "requested": False,
+                    "executed": False,
+                    "old_key_rejected": None,
+                    "status": "not-requested",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        invalid_runtime_context = dict(github_context)
+        invalid_runtime_context["GITHUB_ACTIONS"] = "yes"
+        invalid_runtime_context["CI"] = "1"
+        invalid_runtime_context["GITHUB_REF_PROTECTED"] = "on"
+        with mock.patch.dict(os.environ, invalid_runtime_context, clear=False):
+            _, report = promotion_artifacts.run_promotion_artifact_audit(
+                dist_dir=str(release_dir),
+                promotion_evidence_file=str(evidence_path),
+                promotion_report_file=str(promotion_report),
+                rotation_report_file=str(rotation_report),
+                promotion_policy_file=str(policy_path),
+                promotion_workflow_file=str(workflow_path),
+                require_ci_context_match=True,
+                repo_root=root,
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("invalid runtime GitHub context key for CI match: GITHUB_ACTIONS" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("invalid runtime GitHub context key for CI match: CI" in item for item in report["failures"])
+        )
+        self.assertTrue(
+            any("invalid runtime GitHub context key for CI match: GITHUB_REF_PROTECTED" in item for item in report["failures"])
         )
 
     def test_run_promotion_artifact_audit_fails_when_runtime_sha_values_are_invalid(self):
@@ -6963,7 +7114,7 @@ class PromotionArtifactsTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "promotion_evidence.github_context.CI must be true in GitHub Actions CI context"
+                "promotion_evidence.github_context invalid key value: CI"
                 in item
                 for item in report["failures"]
             )
