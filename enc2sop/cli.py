@@ -98,7 +98,8 @@ def _run_build(args) -> int:
     build_profile = args.build_profile or _project_default(project_config, "build_profile") or DEFAULT_BUILD_PROFILE
     vcvars_text = args.vcvars_path or _project_default(project_config, "vcvars_path")
     vcvars_path = encryption_helper.normalize_path(vcvars_text) if vcvars_text else None
-    python_exe_text = args.python_exe or _project_default(project_config, "python_exe")
+    # Explicit CLI override must win over config defaults to avoid venv/system interpreter drift.
+    python_exe_text = args.python_exe if args.python_exe is not None else _project_default(project_config, "python_exe")
     python_exe = resolve_python_executable(python_exe_text)
     if not python_exe.exists():
         raise FileNotFoundError("python executable not found: {0}".format(python_exe))

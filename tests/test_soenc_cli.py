@@ -108,6 +108,40 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(mocked_compile.call_args.kwargs["output_dir"], staging_dir.resolve())
         self.assertEqual(mocked_compile.call_args.kwargs["build_profile"], "native")
 
+    def test_build_command_cli_python_exe_overrides_config_python_exe(self):
+        root = self.make_case_root("soenc_build_python_exe_override")
+        staging_dir = root / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        config_path = root / "soenc.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[build]",
+                    "output_dir = \"./staging\"",
+                    "python_exe = \"/usr/bin/python3.12\"",
+                    "build_profile = \"native\"",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        cli_python = str(Path(sys.executable).resolve())
+
+        with mock.patch.object(encryption_helper, "compile_with_batch_builder", return_value=staging_dir / "build") as mocked_compile:
+            exit_code = soenc_cli.main(
+                [
+                    "build",
+                    "--config",
+                    str(config_path),
+                    "--python-exe",
+                    cli_python,
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_compile.assert_called_once()
+        self.assertEqual(str(mocked_compile.call_args.kwargs["python_exe"]), cli_python)
+
     def test_package_command_copies_release_files(self):
         root = self.make_case_root("soenc_package")
         staging_dir = root / "staging"
