@@ -119,6 +119,15 @@ jobs:
           echo "SOENC_PROMOTION_APPROVER=${approver}" >> "$GITHUB_ENV"
           echo "SOENC_PROMOTION_KEY_ID=${key_id}" >> "$GITHUB_ENV"
 
+      - name: Require Protected Ref Context
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_PROTECTED:-}" != "true" ]; then
+            echo "::error::Promotion workflow requires protected ref context (GITHUB_REF_PROTECTED=true)"
+            exit 1
+          fi
+
       - name: Initialize Rotation Rehearsal Report
         shell: bash
         run: |
@@ -369,7 +378,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: soenc-promotion-${{ github.run_id }}
+          name: soenc-promotion-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
             ${{ env.RELEASE_DIR }}/release_bundle.json
             ${{ env.RELEASE_DIR }}/release_approval.json

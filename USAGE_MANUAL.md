@@ -574,14 +574,127 @@ The workflow enforces the signed approval gate in CI by running:
    - `workflow_runner_name`
    - `workflow_ref_protected`
 
-### 11.3 Rollback Procedure
+### 11.3 Live Evidence Capture (Protected Branch/Environment)
+
+Use this helper to execute the real workflow-dispatch run and archive deterministic evidence locally:
+
+```bash
+bash scripts/github_release_promotion_evidence.sh --repo owner/repo --ref main --rotation-rehearsal true
+```
+
+If workflow dispatch is not available from your current environment, capture from an already started run:
+
+```bash
+bash scripts/github_release_promotion_evidence.sh --repo owner/repo --run-id 123456789 --run-attempt 2
+```
+
+Optional: tune artifact-index wait behavior when GitHub artifact listing lags run completion:
+
+```bash
+bash scripts/github_release_promotion_evidence.sh --repo owner/repo --run-id 123456789 --artifact-index-wait-seconds 300
+```
+
+What it does:
+
+1. Dispatches `.github/workflows/release_promotion.yml` via `gh workflow run`.
+   - helper first tries the GitHub workflow-dispatch API with `return_run_details=true` and extracts `workflow_run_id` directly from the dispatch response when available.
+   - if that API path is unavailable in the current GH CLI/runtime, helper falls back to `gh workflow run` and then resolves run id from dispatch output / recent-run fallback.
+   - or, with `--run-id`, reuses an existing workflow run without dispatching.
+2. Waits for completion and fails on non-success conclusions.
+3. Resolves the exact per-attempt artifact metadata via GitHub API and fails closed unless:
+    - exactly one matching artifact exists for the run attempt,
+    - artifact is not expired,
+    - artifact `workflow_run.id` matches the target run,
+    - artifact digest/size metadata are present and valid,
+    - artifact-linked `workflow_head_branch` and `workflow_head_sha` metadata match the resolved workflow run details.
+   - helper retries boundedly (default `180s`) when artifact metadata is not yet indexed after run success; timeout remains fail-closed.
+4. Downloads the artifact ZIP by artifact id and fails closed unless:
+   - downloaded archive SHA256 matches `artifact_metadata.digest`,
+   - downloaded archive byte size matches `artifact_metadata.size_in_bytes`.
+5. Extracts the verified archive:
+   - `soenc-promotion-<run_id>-attempt-<run_attempt>.zip`
+6. Verifies required files are present in the extracted artifact:
+   - `release_bundle.json`
+   - `release_approval.json`
+   - `release_receipt.json`
+   - `promotion_evidence.json`
+   - `promotion_audit_report.json`
+   - `rotation_rehearsal_report.json`
+   - `promotion_artifact_audit_report.json`
+   - `promotion_run_receipt.json`
+   - `promotion_artifact_bundle.zip`
+7. Verifies `promotion_artifact_bundle.zip` manifest binding before accepting capture:
+   - `bundle_manifest.json` exists and is valid `enc2sop-promotion-artifact-bundle/v1`.
+   - required bundle entries (`release_*`, `promotion_*`, `rotation_*`) are present with expected archive paths.
+   - each required bundle entry SHA256 matches the extracted required artifact file digest.
+8. Verifies `promotion_artifact_audit_report.json` and `promotion_run_receipt.json` semantics before capture receipt emission:
+   - `promotion_artifact_audit_report` must be `enc2sop-promotion-artifact-audit/v1` with `passed=true` and `summary.total_failures=0`.
+   - `promotion_run_receipt` must be `enc2sop-promotion-run-receipt/v1` with `passed=true`.
+   - `promotion_run_receipt.rotation_pass_required` must match requested mode (`--rotation-rehearsal true/false`).
+   - required run-receipt artifact entries (`release_*`, `promotion_*`, `rotation_*`) must exist and each digest must match extracted files.
+   - run-receipt GitHub context must include and match:
+     - `GITHUB_REPOSITORY`,
+     - `GITHUB_RUN_ID`,
+     - `GITHUB_RUN_ATTEMPT`,
+     - `GITHUB_ACTIONS=true`,
+     - `CI=true`,
+     - `GITHUB_REF_PROTECTED=true`,
+     - and, when present from run identity, `GITHUB_EVENT_NAME` / `GITHUB_WORKFLOW_REF`.
+9. Writes `promotion_capture_receipt.json` with artifact file paths plus SHA256 digests for replayable audit handoff.
+   - receipt now records validated run identity metadata:
+     - `workflow_path` and resolved `workflow_ref` (`.github/workflows/release_promotion.yml@<git-ref>`),
+     - `workflow_event`, `workflow_head_branch`, `workflow_head_sha`, and `workflow_run_number`,
+     - `workflow_run_html_url`,
+     - `workflow_run_id_resolution_mode` (`provided`, `dispatch-api`, `dispatch-output`, or `recent-runs`).
+   - receipt now records `artifact_metadata` from GitHub API:
+     - `id`, `digest`, `size_in_bytes`, `created_at`, `updated_at`, `expires_at`,
+     - `archive_download_url`,
+     - artifact-linked `workflow_run_id`, `workflow_head_branch`, and `workflow_head_sha`.
+   - receipt now records `artifact_archive_verification`:
+     - downloaded archive `path`,
+     - `digest_verified`,
+      - `size_in_bytes_verified`,
+      - `entry_count_verified`.
+    - receipt now records `bundle_manifest_verification`:
+      - `schema`,
+      - `path`,
+      - `required_entries_verified`,
+      - `required_entry_count_verified`,
+      - `file_count_reported`,
+       - `manifest_sha256`.
+    - receipt now records `promotion_run_receipt_verification`:
+      - `schema`,
+      - `passed`,
+      - `rotation_pass_required`,
+      - `artifact_entries_verified`,
+      - `artifact_entry_count_verified`.
+    - receipt now records `rotation_report_verification`:
+       - `requested`,
+       - `executed`,
+       - `old_key_rejected`,
+       - `status`.
+    - capture fails closed on run-identity mismatches (workflow path, event, or expected branch when dispatching / explicit `--ref` replay capture).
+    - capture fails closed when rotation evidence does not match requested mode:
+      - if `--rotation-rehearsal true`: requires `rotation_rehearsal_report` with `requested=true`, `executed=true`, `old_key_rejected=true`, `status=passed`.
+      - if `--rotation-rehearsal false`: requires `requested=false` (or omitted) and `status=not-requested` (or omitted).
+
+Operational prerequisites:
+
+1. `gh` CLI installed and authenticated (`gh auth status` must pass).
+2. Repository allows `workflow_dispatch` for `release_promotion.yml`.
+3. Required secrets are already configured:
+   - `SOENC_RELEASE_APPROVAL_KEY_B64`
+   - `SOENC_RELEASE_APPROVAL_KEY_ID` (optional but recommended)
+   - `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64` (required when `--rotation-rehearsal true`)
+
+### 11.4 Rollback Procedure
 
 1. Disable required status check `Signed Approval Promotion Gate` in branch protection.
 2. Temporarily remove environment protection gate on `production-promotion` if emergency promotion is required.
 3. Keep `SOENC_RELEASE_APPROVAL_KEY_B64` secret disabled until a rotated key is provisioned.
 4. Re-enable workflow gate only after rerunning the dry-run checklist.
 
-### 11.4 Promotion Evidence Contract
+### 11.5 Promotion Evidence Contract
 
 `soenc audit-promotion` expects evidence JSON in this shape:
 
@@ -607,5 +720,3 @@ The workflow enforces the signed approval gate in CI by running:
   "secrets": ["SOENC_RELEASE_APPROVAL_KEY_B64"]
 }
 ```
-
-
