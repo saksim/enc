@@ -608,12 +608,22 @@ What it does:
     - artifact digest/size metadata are present and valid,
     - artifact-linked `workflow_head_branch` and `workflow_head_sha` metadata match the resolved workflow run details.
    - helper retries boundedly (default `180s`) when artifact metadata is not yet indexed after run success; timeout remains fail-closed.
-4. Downloads the artifact ZIP by artifact id and fails closed unless:
+4. Verifies exact promotion gate job/step execution for the resolved run attempt before artifact acceptance:
+   - `actions/runs/<run_id>/attempts/<run_attempt>/jobs` must contain exactly one `Signed Approval Promotion Gate` job.
+   - that job must be `status=completed` and `conclusion=success`.
+   - that job must expose non-empty `runner_name` / `runner_group_name`, and labels must not mix `self-hosted` with `github-hosted`.
+   - when run-summary workflow identity is present, promotion-job `workflow_name` must match run `workflowName`.
+   - when promotion-job payload includes actor metadata, `actor.login` / `triggering_actor.login` must match run details.
+   - required control steps (`Require Protected Ref Context`, `Verify Promotion Artifacts`, `Bundle Promotion Artifacts`, `Upload Promotion Artifacts`, etc.) must each conclude `success`.
+   - rotation-step parity is enforced:
+     - with `--rotation-rehearsal true`, `Rehearse Approval Key Rotation (old key must fail)` must conclude `success`;
+     - with `--rotation-rehearsal false`, that step must conclude `skipped`.
+5. Downloads the artifact ZIP by artifact id and fails closed unless:
    - downloaded archive SHA256 matches `artifact_metadata.digest`,
    - downloaded archive byte size matches `artifact_metadata.size_in_bytes`.
-5. Extracts the verified archive:
+6. Extracts the verified archive:
    - `soenc-promotion-<run_id>-attempt-<run_attempt>.zip`
-6. Verifies required files are present in the extracted artifact:
+7. Verifies required files are present in the extracted artifact:
    - `release_bundle.json`
    - `release_approval.json`
    - `release_receipt.json`
@@ -623,29 +633,93 @@ What it does:
    - `promotion_artifact_audit_report.json`
    - `promotion_run_receipt.json`
    - `promotion_artifact_bundle.zip`
-7. Verifies `promotion_artifact_bundle.zip` manifest binding before accepting capture:
+8. Verifies `promotion_artifact_bundle.zip` manifest binding before accepting capture:
    - `bundle_manifest.json` exists and is valid `enc2sop-promotion-artifact-bundle/v1`.
    - required bundle entries (`release_*`, `promotion_*`, `rotation_*`) are present with expected archive paths.
    - each required bundle entry SHA256 matches the extracted required artifact file digest.
-8. Verifies `promotion_artifact_audit_report.json` and `promotion_run_receipt.json` semantics before capture receipt emission:
+9. Verifies `promotion_artifact_audit_report.json` and `promotion_run_receipt.json` semantics before capture receipt emission:
    - `promotion_artifact_audit_report` must be `enc2sop-promotion-artifact-audit/v1` with `passed=true` and `summary.total_failures=0`.
+   - `promotion_artifact_audit_report` must also prove strict gate-mode settings:
+     - `release_approval_signature_required=true`,
+     - `ci_context_match_required=true`,
+     - `artifact_context_consistency_required=true`,
+     - `rotation_pass_required` boolean parity with requested `--rotation-rehearsal` mode.
    - `promotion_run_receipt` must be `enc2sop-promotion-run-receipt/v1` with `passed=true`.
    - `promotion_run_receipt.rotation_pass_required` must match requested mode (`--rotation-rehearsal true/false`).
+   - release-approval key lineage must remain coherent across extracted artifacts:
+     - `release_approval.json` must be `enc2sop-release-approval/v1` with non-empty trimmed `signature.key_id`,
+     - `release_receipt.json` must be `enc2sop-release-receipt/v1` with non-empty trimmed `release_approval_key_id`,
+     - `promotion_run_receipt.release_approval_key_id` must match both values above.
+   - `promotion_run_receipt.signature` is mandatory and must include:
+     - `algorithm=hmac-sha256`,
+     - non-empty trimmed `key_id` matching `promotion_run_receipt.release_approval_key_id`,
+     - canonical 64-char lowercase hex `digest_hex`.
    - required run-receipt artifact entries (`release_*`, `promotion_*`, `rotation_*`) must exist and each digest must match extracted files.
+   - release-context parity is independently enforced against run-receipt context:
+     - `release_receipt.github_context` must exist as a JSON object.
+     - `release_receipt.release_approval_github_context` must exist as a JSON object.
+     - `release_approval.github_context` must exist as a JSON object.
+     - `release_receipt.release_approval_github_context` must exactly match `release_approval.github_context`.
+     - required keys must match run-receipt context:
+       - `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_ACTIONS`, `CI`, `GITHUB_REF_PROTECTED`,
+      - `GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_ID`, `GITHUB_REPOSITORY_OWNER_ID`, `GITHUB_ACTOR_ID`, `GITHUB_RETENTION_DAYS`,
+      - `GITHUB_WORKFLOW_SHA`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`.
+     - optional keys must match when present in run-receipt context:
+       - `GITHUB_SHA`, `GITHUB_RUN_NUMBER`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`,
+       - `GITHUB_EVENT_NAME`, `GITHUB_JOB`, `GITHUB_WORKFLOW`, `GITHUB_WORKFLOW_REF`,
+       - `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, `RUNNER_NAME`.
    - run-receipt GitHub context must include and match:
      - `GITHUB_REPOSITORY`,
      - `GITHUB_RUN_ID`,
      - `GITHUB_RUN_ATTEMPT`,
+     - when available from run identity: `GITHUB_SHA` and `GITHUB_RUN_NUMBER`,
+     - when run head branch is available from run identity: `GITHUB_REF=refs/heads/<head_branch>`, `GITHUB_REF_NAME=<head_branch>`, and `GITHUB_REF_TYPE=branch`,
+     - when available from promotion-job verification: `GITHUB_WORKFLOW`,
      - `GITHUB_ACTIONS=true`,
      - `CI=true`,
      - `GITHUB_REF_PROTECTED=true`,
+     - when available from promotion-job verification: `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and `RUNNER_NAME`,
      - and, when present from run identity, `GITHUB_EVENT_NAME` / `GITHUB_WORKFLOW_REF`.
-9. Writes `promotion_capture_receipt.json` with artifact file paths plus SHA256 digests for replayable audit handoff.
+    - promotion-gate job metadata must include and match resolved run identity for:
+      - `run_id`,
+      - `head_sha` (canonical 40-char lowercase hex),
+      - `head_branch` (when run identity includes a branch).
+    - retention-window parity must hold across capture inputs:
+      - run-detail `retention_days` must be present, numeric, and positive,
+      - `rotation_rehearsal_report.workflow_retention_days` must be present, trimmed, a positive integer, and match run-detail `retention_days`,
+      - `promotion_run_receipt.github_context.GITHUB_RETENTION_DAYS` must match run-detail `retention_days`,
+      - release-context payloads must match run-receipt `GITHUB_RETENTION_DAYS`.
+10. Writes `promotion_capture_receipt.json` with artifact file paths plus SHA256 digests for replayable audit handoff.
    - receipt now records validated run identity metadata:
-     - `workflow_path` and resolved `workflow_ref` (`.github/workflows/release_promotion.yml@<git-ref>`),
-     - `workflow_event`, `workflow_head_branch`, `workflow_head_sha`, and `workflow_run_number`,
-     - `workflow_run_html_url`,
-     - `workflow_run_id_resolution_mode` (`provided`, `dispatch-api`, `dispatch-output`, or `recent-runs`).
+      - `workflow_path` and resolved `workflow_ref` (`.github/workflows/release_promotion.yml@<git-ref>`),
+      - `workflow_event`, `workflow_head_branch`, `workflow_head_sha`, and `workflow_run_number`,
+      - `workflow_run_html_url`,
+      - `workflow_run_id_resolution_mode` (`provided`, `dispatch-api`, `dispatch-output`, or `recent-runs`).
+   - receipt now records `workflow_context_verification`:
+      - `repository_owner`,
+      - `repository_id`,
+      - `repository_owner_id`,
+      - `actor_id`,
+      - `run_repository_id`,
+      - `run_repository_owner_id`,
+      - `run_actor_id`,
+      - `retention_days`,
+      - `workflow_sha`,
+      - `server_url`,
+      - `api_url`,
+      - `graphql_url`.
+   - receipt now records `promotion_job_verification`:
+     - promotion job identity/status/conclusion/timestamps,
+     - `required_step_count_verified`,
+     - rotation-step conclusion parity (`success` when requested, `skipped` when not requested),
+     - runner and actor provenance binding:
+       - `runner_name`,
+       - `runner_group_name`,
+       - `runner_labels`,
+     - `actor_login`,
+     - `triggering_actor_login`.
+     - `actor_parity_checked`,
+     - `triggering_actor_parity_checked`.
    - receipt now records `artifact_metadata` from GitHub API:
      - `id`, `digest`, `size_in_bytes`, `created_at`, `updated_at`, `expires_at`,
      - `archive_download_url`,
@@ -653,30 +727,35 @@ What it does:
    - receipt now records `artifact_archive_verification`:
      - downloaded archive `path`,
      - `digest_verified`,
-      - `size_in_bytes_verified`,
-      - `entry_count_verified`.
-    - receipt now records `bundle_manifest_verification`:
-      - `schema`,
-      - `path`,
-      - `required_entries_verified`,
-      - `required_entry_count_verified`,
-      - `file_count_reported`,
-       - `manifest_sha256`.
-    - receipt now records `promotion_run_receipt_verification`:
-      - `schema`,
-      - `passed`,
-      - `rotation_pass_required`,
-      - `artifact_entries_verified`,
-      - `artifact_entry_count_verified`.
+     - `size_in_bytes_verified`,
+     - `entry_count_verified`.
+   - receipt now records `bundle_manifest_verification`:
+     - `schema`,
+     - `path`,
+     - `required_entries_verified`,
+     - `required_entry_count_verified`,
+     - `file_count_reported`,
+     - `manifest_sha256`.
+   - receipt now records `promotion_run_receipt_verification`:
+     - `schema`,
+     - `passed`,
+     - `rotation_pass_required`,
+     - `artifact_entries_verified`,
+     - `artifact_entry_count_verified`.
     - receipt now records `rotation_report_verification`:
-       - `requested`,
-       - `executed`,
-       - `old_key_rejected`,
-       - `status`.
-    - capture fails closed on run-identity mismatches (workflow path, event, or expected branch when dispatching / explicit `--ref` replay capture).
-    - capture fails closed when rotation evidence does not match requested mode:
-      - if `--rotation-rehearsal true`: requires `rotation_rehearsal_report` with `requested=true`, `executed=true`, `old_key_rejected=true`, `status=passed`.
-      - if `--rotation-rehearsal false`: requires `requested=false` (or omitted) and `status=not-requested` (or omitted).
+      - `requested`,
+      - `executed`,
+      - `old_key_rejected`,
+      - `status`,
+      - `workflow_retention_days`.
+   - receipt now records `release_context_verification`:
+     - `contexts_verified`,
+     - `required_keys_verified`,
+     - `optional_keys_verified_when_present`.
+   - capture fails closed on run-identity mismatches (workflow path, event, or expected branch when dispatching / explicit `--ref` replay capture).
+   - capture fails closed when rotation evidence does not match requested mode:
+     - if `--rotation-rehearsal true`: requires `rotation_rehearsal_report` with `requested=true`, `executed=true`, `old_key_rejected=true`, `status=passed`.
+     - if `--rotation-rehearsal false`: requires `requested=false` (or omitted) and `status=not-requested` (or omitted).
 
 Operational prerequisites:
 

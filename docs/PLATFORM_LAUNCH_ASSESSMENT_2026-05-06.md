@@ -1475,6 +1475,381 @@ Current go-live gate note (2026-05-07):
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
 
+- As of 2026-05-20 (iteration 106), `ENC-P0-016` tightens attempt-level promotion execution evidence binding during live capture:
+  - `scripts/github_release_promotion_evidence.sh` now verifies run-attempt job/step outcomes via GitHub jobs API (`actions/runs/<run_id>/attempts/<run_attempt>/jobs`) before artifact acceptance.
+  - capture now fail-closes unless exactly one `Signed Approval Promotion Gate` job is present with:
+    - `status=completed`,
+    - `conclusion=success`.
+  - capture now fail-closes unless required promotion-control steps report `conclusion=success`, including:
+    - protected-ref enforcement,
+    - promotion artifact verification,
+    - promotion artifact bundling,
+    - promotion artifact upload.
+  - rotation-step parity is now bound to requested mode:
+    - with `--rotation-rehearsal true`, rotation step must conclude `success`,
+    - with `--rotation-rehearsal false`, rotation step must conclude `skipped`.
+  - `promotion_capture_receipt.json` now records `promotion_job_verification` metadata (job identity/status/conclusion/timestamps, required-step count, and verified rotation-step conclusion) for deterministic replay/audit handoff.
+  - this reduces residual ambiguity where run-level success could otherwise be accepted without explicit proof that critical promotion gate steps executed as expected for the exact run attempt.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 107), `ENC-P0-016` tightens actor/runner provenance binding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now captures authoritative run-level actor identity (`actor.login`, `triggering_actor.login`) from `repos/<repo>/actions/runs/<run_id>` and binds it to promotion-job metadata.
+  - capture now fail-closes unless the resolved `Signed Approval Promotion Gate` job includes:
+    - non-empty `runner_name` and `runner_group_name`,
+    - structurally valid `labels` without mixed `self-hosted` and `github-hosted` markers,
+    - actor/triggering-actor parity with run identity when run-level actor metadata is present.
+  - capture now fail-closes when extracted `promotion_run_receipt.github_context` diverges from verified job/run identity for:
+    - `GITHUB_ACTOR`,
+    - `GITHUB_TRIGGERING_ACTOR`,
+    - `RUNNER_NAME`.
+  - `promotion_capture_receipt.json` now records additional verified promotion job provenance:
+    - `runner_name`, `runner_group_name`, `runner_labels`, `actor_login`, `triggering_actor_login`.
+  - this further reduces replay ambiguity where artifact capture could otherwise proceed despite actor/runner identity drift between run summary and job-level execution metadata.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 108), `ENC-P0-016` tightens run-identity parity across promotion-job metadata and archived run-receipt context during live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `Signed Approval Promotion Gate` job metadata matches resolved run identity for:
+    - `run_id`,
+    - `head_sha` (canonical 40-char lowercase hex),
+    - `head_branch` (when available from resolved run identity).
+  - capture now fail-closes unless `promotion_run_receipt.github_context` matches additional resolved run-identity keys when available:
+    - `GITHUB_SHA`,
+    - `GITHUB_RUN_NUMBER`,
+    - and, when run head branch is present, `GITHUB_REF=refs/heads/<head_branch>`, `GITHUB_REF_NAME=<head_branch>`, `GITHUB_REF_TYPE=branch`.
+  - this reduces residual replay ambiguity where run-receipt context could otherwise pass with a narrower key set despite run/job metadata drift on commit/run-ordinal or branch-ref identity.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 109), `ENC-P0-016` tightens workflow-name provenance parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `Signed Approval Promotion Gate` job metadata matches run-summary workflow identity for:
+    - `workflow_name` (when run summary exposes `workflowName`).
+  - capture now fail-closes unless `promotion_run_receipt.github_context.GITHUB_WORKFLOW` matches verified promotion-job workflow identity when available.
+  - `promotion_capture_receipt.json` now records verified `promotion_job_verification.workflow_name` for deterministic replay/audit handoff.
+  - this reduces residual ambiguity where run-receipt workflow identity could drift from actual promotion-job execution metadata while still satisfying narrower run-id/ref checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 110), `ENC-P0-016` improves live promotion evidence-capture robustness for actor provenance under API-shape variance:
+  - `scripts/github_release_promotion_evidence.sh` now applies actor/triggering-actor parity checks conditionally:
+    - when promotion-job payload includes `actor` / `triggering_actor`, login parity with run identity remains fail-closed,
+    - when those job-level payloads are absent, capture no longer fails solely due to missing optional job fields.
+  - capture receipt now records actor-parity execution state in `promotion_job_verification`:
+    - `actor_parity_checked`,
+    - `triggering_actor_parity_checked`.
+  - this reduces residual operational fragility in environments where GitHub jobs API omits actor sub-objects, while preserving strict mismatch rejection whenever actor data is available.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 111), `ENC-P0-016` tightens run-summary/detail identity parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now requests `headSha` and `number` from `gh run view` and fail-closes unless:
+    - summary `headSha` is canonical lowercase 40-hex when present,
+    - summary/detail commit identity matches (`headSha` == run-detail `head_sha`),
+    - summary/detail run ordinals are numeric when present,
+    - summary/detail run ordinals match (`number` == run-detail `run_number`).
+  - this reduces residual replay ambiguity where summary metadata drift on commit/run-ordinal identity could otherwise pass while detail/API-derived artifact checks remained internally consistent.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 112), `ENC-P0-016` tightens run-summary/detail URL identity parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless summary `gh run view` URL matches run-detail `html_url` for the same `run_id` when both are present.
+  - this reduces residual replay ambiguity where summary/detail event/branch/sha/run-number identity could pass while run URL identity drift remained undetected.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-20 (iteration 113), `ENC-P0-016` tightens promotion-job identity/time provenance parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless the resolved `Signed Approval Promotion Gate` job metadata additionally proves:
+    - numeric `job.id`,
+    - numeric `job.run_attempt` parity with the resolved workflow run attempt when run-attempt metadata is present,
+    - non-empty/non-whitespace `job.html_url` that structurally matches resolved run/job identity (`run_id` + `job_id`),
+    - valid ISO-8601 `started_at` / `completed_at` values with monotonic timestamp ordering (`completed_at >= started_at`).
+  - this reduces residual replay ambiguity where job-level metadata could pass prior step/status checks while remaining malformed or identity-incoherent on job URL/attempt/time provenance.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 114), `ENC-P0-016` tightens canonical run-URL provenance binding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless summary run URL (`gh run view`) and run-detail `html_url` both satisfy canonical identity checks:
+    - HTTPS-only URLs,
+    - no leading/trailing whitespace,
+    - no query/fragment components,
+    - canonical run path shape `/<owner>/<repo>/actions/runs/<run_id>[/attempts/<attempt>]`,
+    - repository-path parity with resolved repository slug,
+    - run-id path parity with resolved run id,
+    - attempt-path parity when attempt suffix is present,
+    - host parity between summary/detail URL views.
+  - promotion capture receipts now include `workflow_run_url_verification` metadata (`host_summary`, `host_detail`, `attempt_summary`, `attempt_detail`) for replay/audit provenance handoff.
+  - this reduces residual ambiguity where summary/detail URL equality could still pass with non-canonical or weakly structured URL identity forms.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 115), `ENC-P0-016` tightens run/artifact timestamp provenance semantics during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless run-summary and run-detail timestamps are both semantically valid and internally consistent:
+    - summary run timestamps (`createdAt`, `startedAt`, `updatedAt`) must be valid ISO-8601 with monotonic order (`createdAt <= startedAt <= updatedAt`),
+    - detail run timestamps (`created_at`, `run_started_at`, `updated_at`) must be valid ISO-8601 with monotonic order (`created_at <= run_started_at <= updated_at`),
+    - summary/detail timestamp parity is required for created/started/updated values.
+  - capture now fail-closes unless artifact metadata timestamps (`created_at`, `updated_at`, `expires_at`) are valid ISO-8601 with monotonic order (`created_at <= updated_at <= expires_at`).
+  - promotion capture receipts now include `workflow_run_timestamp_verification` metadata (summary/detail created/started/updated values) for replay/audit provenance handoff.
+  - this reduces residual ambiguity where run/artifact identity checks could pass while timestamp lineage remained malformed, non-monotonic, or drifted between summary/detail metadata sources.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 116), `ENC-P0-016` tightens artifact download-URL provenance binding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless artifact metadata `archive_download_url` satisfies canonical identity checks:
+    - no leading/trailing whitespace,
+    - HTTPS-only URL,
+    - non-empty host,
+    - no query/fragment components,
+    - canonical artifact-download path parity with resolved repository/artifact identity:
+      - `/repos/<owner>/<repo>/actions/artifacts/<artifact_id>/zip`,
+      - or `/api/v3/repos/<owner>/<repo>/actions/artifacts/<artifact_id>/zip` (GHES compatibility).
+  - capture now fail-closes unless artifact download URL host matches verified run URL host identity.
+  - promotion capture receipts now include `artifact_metadata.archive_download_url_host` for replay/audit provenance handoff.
+  - this reduces residual ambiguity where artifact metadata could provide a syntactically present but identity-divergent download URL.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 117), `ENC-P0-016` tightens promotion-job URL provenance binding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless resolved `Signed Approval Promotion Gate` `job.html_url` satisfies canonical identity checks:
+    - HTTPS-only URL,
+    - no leading/trailing whitespace,
+    - no query/fragment components,
+    - canonical job path shape `/<owner>/<repo>/(actions/)?runs/<run_id>[/attempts/<attempt>]/(job|jobs)/<job_id>`,
+    - repository-path parity with resolved repository slug,
+    - run-id path parity with resolved run id,
+    - job-id path parity with resolved promotion job id,
+    - attempt-path parity when attempt suffix is present.
+  - capture now fail-closes unless promotion job URL host matches verified run URL host identity.
+  - promotion capture receipts now include `promotion_job_verification` URL provenance fields (`job_html_url_host`, `job_html_url_path`, `job_html_url_attempt`) for replay/audit handoff.
+  - this reduces residual ambiguity where promotion-job URL strings could satisfy looser identity matching while still carrying non-canonical path/host semantics.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 118), `ENC-P0-016` tightens run-state parity and workflow-ref semantic binding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless run-detail state from `actions/runs/<run_id>` proves:
+    - non-empty `status` with `status=completed`,
+    - non-empty `conclusion` with `conclusion=success`,
+    - summary/detail parity for run `status` and `conclusion`.
+  - run-detail workflow `path` ref segment is now semantically normalized and validated:
+    - accepts canonical `refs/*`, normalized `heads/*`/`tags/*`, and short branch aliases only when consistent with run `head_branch` under supported events.
+    - capture now fail-closes when normalized workflow ref diverges from `refs/heads/<head_branch>` when `head_branch` is present.
+  - run-receipt `GITHUB_WORKFLOW_REF` binding is now stricter:
+    - capture validates both resolved run `workflow_path_ref` and receipt `GITHUB_WORKFLOW_REF` structure (`<path>@<ref>`),
+    - fail-closes on workflow path mismatch,
+    - fail-closes unless receipt ref segment matches normalized canonical workflow ref.
+  - this reduces residual ambiguity where run-level success from summary polling could pass while run-detail state or workflow-ref identity semantics drifted in archived replay context.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 121), `ENC-P0-016` tightens workflow-file identity and repository/server context parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `promotion_run_receipt.github_context` includes a canonical workflow-file commit identity:
+    - `GITHUB_WORKFLOW_SHA` must be present and a 40-char lowercase hex digest.
+  - capture now fail-closes unless numeric GitHub identity keys are present and valid in run receipt context:
+    - `GITHUB_REPOSITORY_ID`,
+    - `GITHUB_REPOSITORY_OWNER_ID`,
+    - `GITHUB_ACTOR_ID`.
+  - capture now fail-closes unless repository-owner parity is preserved:
+    - `promotion_run_receipt.github_context.GITHUB_REPOSITORY_OWNER` must equal the owner segment of resolved repository slug.
+  - capture now fail-closes unless GitHub URL context keys match the verified run host identity:
+    - `GITHUB_SERVER_URL=https://<run-host>`,
+    - for github.com host:
+      - `GITHUB_API_URL=https://api.github.com`,
+      - `GITHUB_GRAPHQL_URL=https://api.github.com/graphql`,
+    - for enterprise hosts:
+      - `GITHUB_API_URL=https://<run-host>/api/v3`,
+      - `GITHUB_GRAPHQL_URL=https://<run-host>/api/graphql`.
+  - promotion capture receipts now include `workflow_context_verification` metadata:
+    - `repository_owner`,
+    - `repository_id`,
+    - `repository_owner_id`,
+    - `actor_id`,
+    - `workflow_sha`,
+    - `server_url`,
+    - `api_url`,
+    - `graphql_url`.
+  - this reduces residual replay ambiguity where run receipt context could otherwise pass narrower run/ref checks while omitting immutable workflow commit identity or drifting on repository/server identity metadata.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 122), `ENC-P0-016` tightens run-detail numeric identity parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless run-detail payload (`actions/runs/<run_id>`) exposes numeric immutable identity keys:
+    - `repository.id`,
+    - `repository.owner.id`,
+    - `actor.id`.
+  - capture now fail-closes unless archived run-receipt context matches run-detail identity exactly:
+    - `promotion_run_receipt.github_context.GITHUB_REPOSITORY_ID == repository.id`,
+    - `promotion_run_receipt.github_context.GITHUB_REPOSITORY_OWNER_ID == repository.owner.id`,
+    - `promotion_run_receipt.github_context.GITHUB_ACTOR_ID == actor.id`.
+  - promotion capture receipts now include run-detail identity echoes under `workflow_context_verification`:
+    - `run_repository_id`,
+    - `run_repository_owner_id`,
+    - `run_actor_id`.
+  - this reduces residual ambiguity where numeric run-receipt context could be internally valid yet drift from authoritative run-detail identity metadata returned by GitHub for the resolved run id.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-21 (iteration 123), `ENC-P0-016` tightens run-detail repository-scope identity parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless run-detail payload (`actions/runs/<run_id>`) additionally proves:
+    - numeric `id` matching the resolved `run_id`,
+    - non-empty `repository.full_name` exactly matching resolved repository slug (`--repo`) without leading/trailing whitespace,
+    - non-empty `repository.owner.login` exactly matching the owner segment of resolved repository slug without leading/trailing whitespace.
+  - this reduces residual ambiguity where numeric run identity checks could pass while repository slug/owner metadata drifted from the resolved promotion scope.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 124), `ENC-P0-016` tightens signed-approval provenance lineage during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `promotion_artifact_audit_report.json` proves strict gate-mode semantics:
+    - `release_approval_signature_required=true`,
+    - `ci_context_match_required=true`,
+    - `artifact_context_consistency_required=true`,
+    - `rotation_pass_required` boolean parity with requested rehearsal mode.
+  - capture now fail-closes unless release-approval lineage across extracted artifacts is key-id coherent:
+    - `release_approval` schema/key-id integrity,
+    - `release_receipt` schema/release-approval-key-id integrity,
+    - `promotion_run_receipt` required signature metadata (`algorithm`, `key_id`, `digest_hex`) and key-id parity with release artifacts.
+  - this reduces residual ambiguity where replay capture could otherwise accept bundles with weaker audit-mode flags or key-id/signature-lineage drift despite passing digest/context checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 125), `ENC-P0-016` tightens release-gate receipt provenance semantics during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `release_receipt.json` explicitly proves release-gate approval state:
+    - `release_approval_required=true`,
+    - `release_approval_verified=true`,
+    - non-empty trimmed `release_approval_file`.
+  - capture now fail-closes unless `release_receipt.release_approval_file` semantically targets `release_approval.json` (basename parity check), reducing replay ambiguity where key-id/signature checks could pass while receipt approval-file reference drifted.
+  - this further binds captured promotion evidence to an explicitly enforced, verifiable signed-approval gate receipt state.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 126), `ENC-P0-016` tightens release-receipt digest parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `release_receipt.json` additionally proves digest integrity against archived release artifacts:
+    - `release_receipt.release_bundle_sha256` must be a canonical 64-char lowercase hex digest and match extracted `release_bundle.json`,
+    - `release_receipt.release_approval_sha256` must be a canonical 64-char lowercase hex digest and match extracted `release_approval.json`.
+  - this reduces residual replay ambiguity where release-gate approval booleans/key-id lineage could pass while release-receipt digest fields drifted from the archived release artifacts consumed in the same promotion bundle.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 127), `ENC-P0-016` tightens release-approval signature and bundle-binding parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `release_approval.json` proves canonical signature and bundle-target semantics:
+    - `release_approval.signature.algorithm` must be exactly `hmac-sha256`,
+    - `release_approval.signature.digest_hex` must be a canonical 64-char lowercase hex digest,
+    - `release_approval.release_bundle_relative_path` must be non-empty/trimmed and semantically point to `release_bundle.json`,
+    - `release_approval.release_bundle_sha256` must be a canonical 64-char lowercase hex digest and match extracted `release_bundle.json`.
+  - capture now fail-closes unless `release_receipt.release_approval_signature_digest` is a canonical 64-char lowercase hex digest and matches `release_approval.signature.digest_hex`.
+  - this reduces residual replay ambiguity where prior release-receipt and key-id lineage checks could pass while release-approval bundle-binding and signature digest semantics drifted from archived artifacts.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 129), `ENC-P0-016` tightens release-path and run-receipt artifact-path provenance parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `release_receipt.json` path semantics remain canonical and lineage-bound:
+    - `release_receipt.release_bundle_relative_path` must be present, trimmed, and exactly `release_bundle.json`,
+    - `release_receipt.release_bundle_relative_path` must match `release_approval.release_bundle_relative_path`.
+  - capture now fail-closes unless required `promotion_run_receipt.artifacts[*].path` values preserve canonical filename semantics:
+    - each required artifact entry path must end with the expected artifact filename for its key.
+  - capture now fail-closes on release-path drift versus run-receipt artifact lineage:
+    - `release_receipt.release_bundle_relative_path` basename must match `promotion_run_receipt.artifacts[release_bundle].path`,
+    - `release_receipt.release_approval_file` must exactly match `promotion_run_receipt.artifacts[release_approval].path`.
+  - this reduces residual replay ambiguity where digest/signature and key-id parity checks could pass while receipt path references diverged from archived run-receipt artifact paths.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 130), `ENC-P0-016` tightens cross-artifact approval timeline provenance during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless approval/release/audit receipt timestamps are canonical ISO-8601 and monotonic across the signed-approval lineage:
+    - `release_approval.approved_at_utc` is required, trimmed, and valid ISO-8601,
+    - `release_receipt.generated_at_utc` is required and must be `>= release_approval.approved_at_utc`,
+    - `promotion_audit_report.generated_at_utc` is required and must be `>= release_receipt.generated_at_utc`,
+    - `promotion_artifact_audit_report.generated_at_utc` is required and must be `>= promotion_audit_report.generated_at_utc`,
+    - `promotion_run_receipt.generated_at_utc` is required and must be `>= promotion_artifact_audit_report.generated_at_utc`.
+  - capture now fail-closes unless `release_approval.approvers` remains a non-empty unique list of trimmed non-empty strings, and optional `release_approval.notes` is trimmed/non-empty when present.
+  - promotion capture receipts now archive explicit `approval_lineage_timestamps` and `release_approval_metadata_verification` blocks for replay handoff.
+  - this reduces residual replay ambiguity where signature/digest/path lineage could pass while artifact emission chronology remained malformed or temporally inconsistent.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 131), `ENC-P0-016` tightens release-context parity binding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless release-context artifacts are explicitly context-coherent with archived run-receipt context:
+    - `release_receipt.github_context` must exist as a JSON object.
+    - `release_receipt.release_approval_github_context` must exist as a JSON object.
+    - `release_approval.github_context` must exist as a JSON object.
+    - `release_receipt.release_approval_github_context` must exactly match `release_approval.github_context`.
+  - capture now fail-closes unless each release-context object matches `promotion_run_receipt.github_context` for required canonical keys:
+    - `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_ACTIONS`, `CI`, `GITHUB_REF_PROTECTED`,
+    - `GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_ID`, `GITHUB_REPOSITORY_OWNER_ID`, `GITHUB_ACTOR_ID`,
+    - `GITHUB_WORKFLOW_SHA`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`.
+  - capture now fail-closes on optional-key drift when optional keys are present in run-receipt context:
+    - `GITHUB_SHA`, `GITHUB_RUN_NUMBER`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`,
+    - `GITHUB_EVENT_NAME`, `GITHUB_JOB`, `GITHUB_WORKFLOW`, `GITHUB_WORKFLOW_REF`,
+    - `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, `RUNNER_NAME`.
+  - promotion capture receipts now include `release_context_verification` metadata (`contexts_verified`, `required_keys_verified`, `optional_keys_verified_when_present`) for replay/audit handoff.
+  - this reduces residual replay ambiguity where strict-mode booleans in artifact-audit output could pass while release/approval context payloads drifted from the run-receipt context archived in the same evidence bundle.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-22 (iteration 132), `ENC-P0-016` tightens retention-window provenance parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless run-detail retention metadata from `actions/runs/<run_id>` proves:
+    - non-empty numeric positive `retention_days`.
+  - capture now fail-closes unless retention metadata stays coherent across archived artifacts:
+    - `rotation_rehearsal_report.workflow_retention_days` must be present/trimmed/positive and equal run-detail `retention_days`,
+    - `promotion_run_receipt.github_context.GITHUB_RETENTION_DAYS` must equal run-detail `retention_days`,
+    - required release-context parity now also includes `GITHUB_RETENTION_DAYS` for:
+      - `release_receipt.github_context`,
+      - `release_receipt.release_approval_github_context`,
+      - `release_approval.github_context`.
+  - promotion capture receipts now include explicit retention lineage echoes for replay/audit handoff:
+    - `workflow_context_verification.retention_days`,
+    - `rotation_report_verification.workflow_retention_days`.
+  - this reduces residual replay ambiguity where run/context identity checks could pass while retention-governance metadata drifted between run details and archived promotion artifacts.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
 ## 9. Assessment Status
 
 Status: `[APPROVED BASELINE]`

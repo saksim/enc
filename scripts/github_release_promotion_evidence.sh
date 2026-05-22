@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 WORKFLOW_FILE="release_promotion.yml"
+WORKFLOW_JOB_ID="promotion-gate"
 REF="main"
 REF_EXPLICIT="false"
 ROTATION_REHEARSAL="true"
@@ -27,6 +28,7 @@ Options:
   --repo <owner/repo>                GitHub repository slug (default: auto-detect from gh repo view).
   --ref <branch-or-tag>              Workflow ref for workflow_dispatch (default: main).
   --workflow-file <file>             Workflow file name/id (default: release_promotion.yml).
+  --workflow-job-id <job-id>         Workflow job id expected in run receipt context (default: promotion-gate).
   --rotation-rehearsal <true|false>  Pass workflow_dispatch input rotation_rehearsal (default: true).
   --skip-promotion-collect <true|false>
                                      Pass workflow_dispatch input skip_promotion_collect (default: false).
@@ -273,6 +275,10 @@ while [[ $# -gt 0 ]]; do
       WORKFLOW_FILE="$2"
       shift 2
       ;;
+    --workflow-job-id)
+      WORKFLOW_JOB_ID="$2"
+      shift 2
+      ;;
     --rotation-rehearsal)
       ROTATION_REHEARSAL="$2"
       shift 2
@@ -324,6 +330,11 @@ done
 require_command gh
 require_command python
 require_command sed
+
+if [[ -z "$WORKFLOW_JOB_ID" || "$WORKFLOW_JOB_ID" != "${WORKFLOW_JOB_ID//[[:space:]]/}" ]]; then
+  echo "Invalid workflow-job-id: ${WORKFLOW_JOB_ID} (expected non-empty token without whitespace)" >&2
+  exit 1
+fi
 
 require_boolean_token "$ROTATION_REHEARSAL" "rotation-rehearsal"
 require_boolean_token "$SKIP_PROMOTION_COLLECT" "skip-promotion-collect"
@@ -435,9 +446,13 @@ run_metadata_json=""
 run_event=""
 run_head_branch=""
 run_workflow_name=""
+run_head_sha=""
+run_number=""
+run_created_at=""
+run_started_at=""
 
 while :; do
-  run_metadata_json="$(gh run view "$run_id" --repo "$REPO" --json attempt,status,conclusion,url,updatedAt,event,headBranch,workflowName)"
+  run_metadata_json="$(gh run view "$run_id" --repo "$REPO" --json attempt,status,conclusion,url,updatedAt,event,headBranch,workflowName,headSha,number,createdAt,startedAt)"
   parsed="$(printf '%s\n' "$run_metadata_json" | python -c 'import json,sys
 payload=json.load(sys.stdin)
 print(payload.get("attempt",""))
@@ -448,6 +463,10 @@ print(payload.get("updatedAt",""))
 print(payload.get("event",""))
 print(payload.get("headBranch",""))
 print(payload.get("workflowName",""))
+print(payload.get("headSha",""))
+print(payload.get("number",""))
+print(payload.get("createdAt",""))
+print(payload.get("startedAt",""))
 ')"
   run_attempt="$(printf '%s\n' "$parsed" | sed -n '1p')"
   run_status="$(printf '%s\n' "$parsed" | sed -n '2p')"
@@ -457,8 +476,12 @@ print(payload.get("workflowName",""))
   run_event="$(printf '%s\n' "$parsed" | sed -n '6p')"
   run_head_branch="$(printf '%s\n' "$parsed" | sed -n '7p')"
   run_workflow_name="$(printf '%s\n' "$parsed" | sed -n '8p')"
-  echo "run_id=${run_id} attempt=${run_attempt:-unknown} status=${run_status:-unknown} conclusion=${run_conclusion:-pending}"
-  echo "event=${run_event:-unknown} head_branch=${run_head_branch:-unknown} workflow_name=${run_workflow_name:-unknown} updated=${run_updated_at:-unknown}"
+  run_head_sha="$(printf '%s\n' "$parsed" | sed -n '9p')"
+  run_number="$(printf '%s\n' "$parsed" | sed -n '10p')"
+  run_created_at="$(printf '%s\n' "$parsed" | sed -n '11p')"
+  run_started_at="$(printf '%s\n' "$parsed" | sed -n '12p')"
+  echo "run_id=${run_id} attempt=${run_attempt:-unknown} status=${run_status:-unknown} conclusion=${run_conclusion:-pending} run_number=${run_number:-unknown}"
+  echo "event=${run_event:-unknown} head_branch=${run_head_branch:-unknown} head_sha=${run_head_sha:-unknown} workflow_name=${run_workflow_name:-unknown} created=${run_created_at:-unknown} started=${run_started_at:-unknown} updated=${run_updated_at:-unknown}"
 
   if [[ "$run_status" == "completed" ]]; then
     break
@@ -495,21 +518,53 @@ fi
 run_detail_json="$(gh api "repos/${REPO}/actions/runs/${run_id}")"
 run_detail_parsed="$(printf '%s\n' "$run_detail_json" | python -c 'import json,sys
 payload=json.load(sys.stdin)
+actor = payload.get("actor")
+triggering_actor = payload.get("triggering_actor")
+repository = payload.get("repository")
+repository_owner = repository.get("owner") if isinstance(repository, dict) else None
 print(payload.get("event",""))
 print(payload.get("head_branch",""))
 print(payload.get("head_sha",""))
 print(payload.get("path",""))
 print(payload.get("html_url",""))
+print(payload.get("status",""))
+print(payload.get("conclusion",""))
+print(payload.get("created_at",""))
+print(payload.get("run_started_at",""))
+print(payload.get("updated_at",""))
 print(payload.get("run_attempt",""))
 print(payload.get("run_number",""))
+print(payload.get("retention_days",""))
+print(repository.get("id","") if isinstance(repository, dict) else "")
+print(repository_owner.get("id","") if isinstance(repository_owner, dict) else "")
+print(actor.get("id","") if isinstance(actor, dict) else "")
+print(actor.get("login","") if isinstance(actor, dict) else "")
+print(triggering_actor.get("login","") if isinstance(triggering_actor, dict) else "")
+print(payload.get("id",""))
+print(repository.get("full_name","") if isinstance(repository, dict) else "")
+print(repository_owner.get("login","") if isinstance(repository_owner, dict) else "")
 ')"
 run_event_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '1p')"
 run_head_branch_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '2p')"
 run_head_sha_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '3p')"
 run_workflow_path_ref="$(printf '%s\n' "$run_detail_parsed" | sed -n '4p')"
 run_html_url_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '5p')"
-run_attempt_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '6p')"
-run_number_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '7p')"
+run_status_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '6p')"
+run_conclusion_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '7p')"
+run_created_at_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '8p')"
+run_started_at_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '9p')"
+run_updated_at_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '10p')"
+run_attempt_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '11p')"
+run_number_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '12p')"
+run_retention_days_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '13p')"
+run_repository_id_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '14p')"
+run_repository_owner_id_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '15p')"
+run_actor_id_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '16p')"
+run_actor_login_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '17p')"
+run_triggering_actor_login_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '18p')"
+run_id_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '19p')"
+run_repository_full_name_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '20p')"
+run_repository_owner_login_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '21p')"
 
 if [[ -z "$run_workflow_path_ref" || "$run_workflow_path_ref" != *@* ]]; then
   echo "Unable to resolve workflow path@ref identity for run_id=${run_id}." >&2
@@ -524,6 +579,77 @@ if [[ -n "$expected_workflow_path" && "$run_workflow_path" != "$expected_workflo
   echo "workflow path mismatch for run_id=${run_id}: expected ${expected_workflow_path}, got ${run_workflow_path}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
+fi
+
+workflow_ref_normalization_verified="$(python - "$run_id" "$run_url" "$run_workflow_ref" "$run_head_branch_api" "$run_event_api" <<'PY'
+import sys
+
+run_id = sys.argv[1]
+run_url = sys.argv[2]
+run_workflow_ref = sys.argv[3]
+run_head_branch = sys.argv[4]
+run_event = sys.argv[5]
+
+if not isinstance(run_workflow_ref, str) or not run_workflow_ref:
+    print("run workflow ref is missing for run_id={0}".format(run_id), file=sys.stderr)
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+if run_workflow_ref != run_workflow_ref.strip():
+    print("run workflow ref must not contain leading or trailing whitespace for run_id={0}".format(run_id), file=sys.stderr)
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+
+if run_workflow_ref.startswith("refs/"):
+    print(run_workflow_ref)
+    sys.exit(0)
+
+if run_workflow_ref.startswith("heads/"):
+    normalized = "refs/{0}".format(run_workflow_ref)
+    print(normalized)
+    sys.exit(0)
+
+if run_workflow_ref.startswith("tags/"):
+    normalized = "refs/{0}".format(run_workflow_ref)
+    print(normalized)
+    sys.exit(0)
+
+if run_workflow_ref in ("main", "master"):
+    normalized = "refs/heads/{0}".format(run_workflow_ref)
+    if run_head_branch and run_workflow_ref != run_head_branch:
+        print(
+            "run workflow ref short branch mismatch for run_id={0}: workflow_ref={1}, head_branch={2}".format(
+                run_id, run_workflow_ref, run_head_branch
+            ),
+            file=sys.stderr,
+        )
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+    print(normalized)
+    sys.exit(0)
+
+if run_head_branch and run_workflow_ref == run_head_branch and run_event in ("push", "workflow_dispatch"):
+    print("refs/heads/{0}".format(run_workflow_ref))
+    sys.exit(0)
+
+print(
+    "run workflow ref is not canonical or semantically normalizable for run_id={0}: {1}".format(
+        run_id,
+        run_workflow_ref,
+    ),
+    file=sys.stderr,
+)
+print("run_url={0}".format(run_url), file=sys.stderr)
+sys.exit(1)
+PY
+)"
+
+if [[ -n "$run_head_branch_api" ]]; then
+  expected_workflow_ref_from_head_branch="refs/heads/${run_head_branch_api}"
+  if [[ "$workflow_ref_normalization_verified" != "$expected_workflow_ref_from_head_branch" ]]; then
+    echo "run workflow ref normalization mismatch with head branch for run_id=${run_id}: expected ${expected_workflow_ref_from_head_branch}, got ${workflow_ref_normalization_verified}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
 fi
 
 if [[ -n "$expected_branch_ref" ]]; then
@@ -565,17 +691,877 @@ if [[ -n "$run_event" && -n "$run_event_api" && "$run_event" != "$run_event_api"
   exit 1
 fi
 
+if [[ -z "$run_status_api" ]]; then
+  echo "run status is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_status_api" != "completed" ]]; then
+  echo "run status is not completed in run details for run_id=${run_id}: ${run_status_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ -n "$run_status" && "$run_status" != "$run_status_api" ]]; then
+  echo "run status mismatch between summary and run details for run_id=${run_id}: ${run_status} vs ${run_status_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -z "$run_conclusion_api" ]]; then
+  echo "run conclusion is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_conclusion_api" != "success" ]]; then
+  echo "run conclusion is not success in run details for run_id=${run_id}: ${run_conclusion_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ -n "$run_conclusion" && "$run_conclusion" != "$run_conclusion_api" ]]; then
+  echo "run conclusion mismatch between summary and run details for run_id=${run_id}: ${run_conclusion} vs ${run_conclusion_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -n "$run_url" && -n "$run_html_url_api" && "$run_url" != "$run_html_url_api" ]]; then
+  echo "run html_url mismatch between summary and run details for run_id=${run_id}: ${run_url} vs ${run_html_url_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+run_url_identity_verification="$(python - "$run_id" "$run_attempt" "$REPO" "$run_url" "$run_html_url_api" <<'PY'
+import re
+import sys
+from urllib.parse import urlsplit
+
+run_id = sys.argv[1]
+run_attempt = sys.argv[2]
+repo = sys.argv[3]
+summary_url = sys.argv[4]
+detail_url = sys.argv[5]
+
+def _parse_and_verify_run_url(label: str, value: str):
+    if not isinstance(value, str) or not value:
+        print("{0} is missing.".format(label), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print("{0} must not contain leading or trailing whitespace.".format(label), file=sys.stderr)
+        sys.exit(1)
+    parts = urlsplit(value)
+    if parts.scheme != "https":
+        print("{0} must use https scheme.".format(label), file=sys.stderr)
+        sys.exit(1)
+    if not parts.netloc:
+        print("{0} host is missing.".format(label), file=sys.stderr)
+        sys.exit(1)
+    if parts.query or parts.fragment:
+        print("{0} must not include query or fragment components.".format(label), file=sys.stderr)
+        sys.exit(1)
+    match = re.fullmatch(
+        r"/(?P<repo>[^/\s]+/[^/\s]+)/actions/runs/(?P<run_id>[0-9]+)(?:/attempts/(?P<attempt>[0-9]+))?/?",
+        parts.path,
+    )
+    if match is None:
+        print(
+            "{0} path is not a canonical GitHub Actions run URL: {1}".format(label, value),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    path_repo = match.group("repo")
+    if path_repo != repo:
+        print(
+            "{0} repository path mismatch: expected {1}, got {2}".format(
+                label,
+                repo,
+                path_repo,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    path_run_id = match.group("run_id")
+    if path_run_id != run_id:
+        print(
+            "{0} run_id path mismatch: expected {1}, got {2}".format(
+                label,
+                run_id,
+                path_run_id,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    attempt = match.group("attempt") or ""
+    if attempt and run_attempt and attempt != run_attempt:
+        print(
+            "{0} attempt path mismatch: expected {1}, got {2}".format(
+                label,
+                run_attempt,
+                attempt,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return parts.netloc, attempt
+
+summary_host, summary_attempt = _parse_and_verify_run_url("run summary url", summary_url)
+detail_host, detail_attempt = _parse_and_verify_run_url("run detail html_url", detail_url)
+if summary_host != detail_host:
+    print(
+        "run url host mismatch between summary and run details for run_id={0}: {1} vs {2}".format(
+            run_id,
+            summary_host,
+            detail_host,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+print(summary_host)
+print(summary_attempt)
+print(detail_host)
+print(detail_attempt)
+PY
+)"
+run_url_host_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '1p')"
+run_url_attempt_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '2p')"
+run_html_url_host_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '3p')"
+run_html_url_attempt_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '4p')"
+
 if [[ -n "$run_head_branch" && -n "$run_head_branch_api" && "$run_head_branch" != "$run_head_branch_api" ]]; then
   echo "head_branch mismatch between summary and run details for run_id=${run_id}: ${run_head_branch} vs ${run_head_branch_api}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
 
-if [[ -n "$run_attempt_api" && "$run_attempt_api" != "$run_attempt" ]]; then
+if [[ -n "$run_head_sha" ]]; then
+  if [[ ! "$run_head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "run head_sha is not a canonical 40-char lowercase hex digest in summary metadata for run_id=${run_id}: ${run_head_sha}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+fi
+if [[ -n "$run_head_sha" && -n "$run_head_sha_api" && "$run_head_sha" != "$run_head_sha_api" ]]; then
+  echo "head_sha mismatch between summary and run details for run_id=${run_id}: ${run_head_sha} vs ${run_head_sha_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -n "$run_number" && ! "$run_number" =~ ^[0-9]+$ ]]; then
+  echo "run number is not numeric in summary metadata for run_id=${run_id}: ${run_number}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ -n "$run_number_api" && ! "$run_number_api" =~ ^[0-9]+$ ]]; then
+  echo "run number is not numeric in run details metadata for run_id=${run_id}: ${run_number_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ -n "$run_number" && -n "$run_number_api" && "$run_number" != "$run_number_api" ]]; then
+  echo "run number mismatch between summary and run details for run_id=${run_id}: ${run_number} vs ${run_number_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -z "$run_retention_days_api" ]]; then
+  echo "run retention_days is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_retention_days_api" =~ ^[0-9]+$ ]]; then
+  echo "run retention_days is not numeric in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_retention_days_api" -le 0 ]]; then
+  echo "run retention_days must be positive in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+run_timestamp_verification="$(python - "$run_id" "$run_url" "$run_created_at" "$run_started_at" "$run_updated_at" "$run_created_at_api" "$run_started_at_api" "$run_updated_at_api" <<'PY'
+import sys
+from datetime import datetime
+
+run_id = sys.argv[1]
+run_url = sys.argv[2]
+run_created_at_summary = sys.argv[3]
+run_started_at_summary = sys.argv[4]
+run_updated_at_summary = sys.argv[5]
+run_created_at_detail = sys.argv[6]
+run_started_at_detail = sys.argv[7]
+run_updated_at_detail = sys.argv[8]
+
+def parse_required_iso8601_utc(label: str, value: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        print("{0} is missing for run_id={1}".format(label, run_id), file=sys.stderr)
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print("{0} must not contain leading or trailing whitespace for run_id={1}".format(label, run_id), file=sys.stderr)
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        print("{0} is not valid ISO-8601 for run_id={1}: {2}".format(label, run_id, value), file=sys.stderr)
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+
+created_summary_dt = parse_required_iso8601_utc("run summary createdAt", run_created_at_summary)
+started_summary_dt = parse_required_iso8601_utc("run summary startedAt", run_started_at_summary)
+updated_summary_dt = parse_required_iso8601_utc("run summary updatedAt", run_updated_at_summary)
+if started_summary_dt < created_summary_dt:
+    print(
+        "run summary startedAt precedes createdAt for run_id={0}: {1} < {2}".format(
+            run_id,
+            run_started_at_summary,
+            run_created_at_summary,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+if updated_summary_dt < started_summary_dt:
+    print(
+        "run summary updatedAt precedes startedAt for run_id={0}: {1} < {2}".format(
+            run_id,
+            run_updated_at_summary,
+            run_started_at_summary,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+
+created_detail_dt = parse_required_iso8601_utc("run detail created_at", run_created_at_detail)
+started_detail_dt = parse_required_iso8601_utc("run detail run_started_at", run_started_at_detail)
+updated_detail_dt = parse_required_iso8601_utc("run detail updated_at", run_updated_at_detail)
+if started_detail_dt < created_detail_dt:
+    print(
+        "run detail run_started_at precedes created_at for run_id={0}: {1} < {2}".format(
+            run_id,
+            run_started_at_detail,
+            run_created_at_detail,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+if updated_detail_dt < started_detail_dt:
+    print(
+        "run detail updated_at precedes run_started_at for run_id={0}: {1} < {2}".format(
+            run_id,
+            run_updated_at_detail,
+            run_started_at_detail,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+
+if created_summary_dt != created_detail_dt:
+    print(
+        "run created timestamp mismatch between summary and run details for run_id={0}: {1} vs {2}".format(
+            run_id,
+            run_created_at_summary,
+            run_created_at_detail,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+if started_summary_dt != started_detail_dt:
+    print(
+        "run started timestamp mismatch between summary and run details for run_id={0}: {1} vs {2}".format(
+            run_id,
+            run_started_at_summary,
+            run_started_at_detail,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+if updated_summary_dt != updated_detail_dt:
+    print(
+        "run updated timestamp mismatch between summary and run details for run_id={0}: {1} vs {2}".format(
+            run_id,
+            run_updated_at_summary,
+            run_updated_at_detail,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+
+print(run_created_at_summary)
+print(run_started_at_summary)
+print(run_updated_at_summary)
+print(run_created_at_detail)
+print(run_started_at_detail)
+print(run_updated_at_detail)
+PY
+)"
+run_created_at_summary_verified="$(printf '%s\n' "$run_timestamp_verification" | sed -n '1p')"
+run_started_at_summary_verified="$(printf '%s\n' "$run_timestamp_verification" | sed -n '2p')"
+run_updated_at_summary_verified="$(printf '%s\n' "$run_timestamp_verification" | sed -n '3p')"
+run_created_at_detail_verified="$(printf '%s\n' "$run_timestamp_verification" | sed -n '4p')"
+run_started_at_detail_verified="$(printf '%s\n' "$run_timestamp_verification" | sed -n '5p')"
+run_updated_at_detail_verified="$(printf '%s\n' "$run_timestamp_verification" | sed -n '6p')"
+
+if [[ -z "$run_attempt_api" ]]; then
+  echo "run attempt is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_attempt_api" =~ ^[0-9]+$ ]]; then
+  echo "run attempt is not numeric in run details for run_id=${run_id}: ${run_attempt_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_attempt" =~ ^[0-9]+$ ]]; then
+  echo "run attempt is not numeric in summary metadata for run_id=${run_id}: ${run_attempt}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_attempt_api" != "$run_attempt" ]]; then
   echo "run attempt mismatch between summary and run details for run_id=${run_id}: ${run_attempt} vs ${run_attempt_api}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
+
+if [[ -z "$run_id_api" ]]; then
+  echo "run id is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_id_api" =~ ^[0-9]+$ ]]; then
+  echo "run id is not numeric in run details for run_id=${run_id}: ${run_id_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_id_api" != "$run_id" ]]; then
+  echo "run id mismatch between resolved run id and run details for run_id=${run_id}: ${run_id_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -z "$run_repository_full_name_api" ]]; then
+  echo "run repository.full_name is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+run_repository_full_name_api_trimmed="$(printf '%s\n' "$run_repository_full_name_api" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [[ "$run_repository_full_name_api" != "$run_repository_full_name_api_trimmed" ]]; then
+  echo "run repository.full_name must not contain leading or trailing whitespace in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_repository_full_name_api" != "$REPO" ]]; then
+  echo "run repository.full_name mismatch for run_id=${run_id}: expected ${REPO}, got ${run_repository_full_name_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ "$REPO" == */* ]]; then
+  expected_repo_owner_api="${REPO%%/*}"
+  if [[ -z "$run_repository_owner_login_api" ]]; then
+    echo "run repository.owner.login is missing in run details for run_id=${run_id}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  run_repository_owner_login_api_trimmed="$(printf '%s\n' "$run_repository_owner_login_api" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [[ "$run_repository_owner_login_api" != "$run_repository_owner_login_api_trimmed" ]]; then
+    echo "run repository.owner.login must not contain leading or trailing whitespace in run details for run_id=${run_id}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  if [[ "$run_repository_owner_login_api" != "$expected_repo_owner_api" ]]; then
+    echo "run repository.owner.login mismatch for run_id=${run_id}: expected ${expected_repo_owner_api}, got ${run_repository_owner_login_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "$run_repository_id_api" ]]; then
+  echo "run repository.id is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_repository_id_api" =~ ^[0-9]+$ ]]; then
+  echo "run repository.id is not numeric in run details for run_id=${run_id}: ${run_repository_id_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -z "$run_repository_owner_id_api" ]]; then
+  echo "run repository.owner.id is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_repository_owner_id_api" =~ ^[0-9]+$ ]]; then
+  echo "run repository.owner.id is not numeric in run details for run_id=${run_id}: ${run_repository_owner_id_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+if [[ -z "$run_actor_id_api" ]]; then
+  echo "run actor.id is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_actor_id_api" =~ ^[0-9]+$ ]]; then
+  echo "run actor.id is not numeric in run details for run_id=${run_id}: ${run_actor_id_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+
+echo "Verifying promotion gate job and step outcomes for run attempt ${run_attempt}"
+promotion_job_verification_parsed="$(gh api "repos/${REPO}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100" | python - "$ROTATION_REHEARSAL" "$run_actor_login_api" "$run_triggering_actor_login_api" "$run_id" "$run_attempt" "$run_head_sha_api" "$run_head_branch_api" "$REPO" "$run_url_host_verified" "$run_workflow_name" <<'PY'
+import json
+import re
+import sys
+from urllib.parse import urlsplit
+from datetime import datetime
+
+rotation_rehearsal = sys.argv[1]
+run_actor_login = sys.argv[2]
+run_triggering_actor_login = sys.argv[3]
+expected_run_id = sys.argv[4]
+expected_run_attempt = sys.argv[5]
+expected_head_sha = sys.argv[6]
+expected_head_branch = sys.argv[7]
+expected_repo = sys.argv[8]
+expected_run_url_host = sys.argv[9]
+expected_workflow_name = sys.argv[10]
+payload = json.load(sys.stdin)
+job_rows = payload.get("jobs")
+if not isinstance(job_rows, list):
+    print("Workflow jobs payload is invalid for promotion-gate verification.", file=sys.stderr)
+    sys.exit(1)
+
+promotion_job_name = "Signed Approval Promotion Gate"
+matches = [row for row in job_rows if isinstance(row, dict) and row.get("name") == promotion_job_name]
+if len(matches) != 1:
+    print(
+        "Expected exactly one job named {0}; found {1}.".format(
+            promotion_job_name, len(matches)
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+job = matches[0]
+job_status = job.get("status")
+job_conclusion = job.get("conclusion")
+if job_status != "completed":
+    print(
+        "Promotion gate job status must be completed; got {0}".format(job_status),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if job_conclusion != "success":
+    print(
+        "Promotion gate job conclusion must be success; got {0}".format(job_conclusion),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+job_id = job.get("id")
+job_id_text = str(job_id) if job_id is not None else ""
+if not job_id_text.isdigit():
+    print(
+        "Promotion gate job id must be numeric; got {0}".format(job_id_text or "<missing>"),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+job_run_id = job.get("run_id")
+job_run_id_text = str(job_run_id) if job_run_id is not None else ""
+if not job_run_id_text.isdigit() or job_run_id_text != expected_run_id:
+    print(
+        "Promotion gate job run_id mismatch: expected {0}, got {1}".format(
+            expected_run_id, job_run_id_text or "<missing>"
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+job_run_attempt = job.get("run_attempt")
+if job_run_attempt is not None:
+    job_run_attempt_text = str(job_run_attempt)
+    if not job_run_attempt_text.isdigit():
+        print("Promotion gate job run_attempt must be numeric when provided.", file=sys.stderr)
+        sys.exit(1)
+    if expected_run_attempt and job_run_attempt_text != expected_run_attempt:
+        print(
+            "Promotion gate job run_attempt mismatch: expected {0}, got {1}".format(
+                expected_run_attempt, job_run_attempt_text
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+job_html_url = job.get("html_url")
+if not isinstance(job_html_url, str) or not job_html_url.strip():
+    print("Promotion gate job html_url is missing.", file=sys.stderr)
+    sys.exit(1)
+if job_html_url != job_html_url.strip():
+    print("Promotion gate job html_url must not contain leading or trailing whitespace.", file=sys.stderr)
+    sys.exit(1)
+job_html_url_parts = urlsplit(job_html_url)
+if job_html_url_parts.scheme != "https":
+    print("Promotion gate job html_url must use https scheme.", file=sys.stderr)
+    sys.exit(1)
+if not job_html_url_parts.netloc:
+    print("Promotion gate job html_url host is missing.", file=sys.stderr)
+    sys.exit(1)
+if job_html_url_parts.query or job_html_url_parts.fragment:
+    print("Promotion gate job html_url must not include query or fragment components.", file=sys.stderr)
+    sys.exit(1)
+job_url_match = re.fullmatch(
+    r"/(?P<repo>[^/\s]+/[^/\s]+)/(?:actions/)?runs/(?P<run_id>[0-9]+)(?:/attempts/(?P<attempt>[0-9]+))?/(?:(?:job|jobs)/)(?P<job_id>[0-9]+)/?",
+    job_html_url_parts.path,
+)
+if job_url_match is None:
+    print(
+        "Promotion gate job html_url path is not canonical: {0}".format(job_html_url),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+job_html_url_repo = job_url_match.group("repo")
+if job_html_url_repo != expected_repo:
+    print(
+        "Promotion gate job html_url repository path mismatch: expected {0}, got {1}".format(
+            expected_repo, job_html_url_repo
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+job_html_url_run_id = job_url_match.group("run_id")
+if job_html_url_run_id != expected_run_id:
+    print(
+        "Promotion gate job html_url run_id path mismatch: expected {0}, got {1}".format(
+            expected_run_id, job_html_url_run_id
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+job_html_url_job_id = job_url_match.group("job_id")
+if job_html_url_job_id != job_id_text:
+    print(
+        "Promotion gate job html_url job_id path mismatch: expected {0}, got {1}".format(
+            job_id_text, job_html_url_job_id
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+job_html_url_attempt = job_url_match.group("attempt") or ""
+if job_html_url_attempt and expected_run_attempt and job_html_url_attempt != expected_run_attempt:
+    print(
+        "Promotion gate job html_url attempt path mismatch: expected {0}, got {1}".format(
+            expected_run_attempt, job_html_url_attempt
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if expected_run_url_host and job_html_url_parts.netloc != expected_run_url_host:
+    print(
+        "Promotion gate job html_url host mismatch with run url host: expected {0}, got {1}".format(
+            expected_run_url_host,
+            job_html_url_parts.netloc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+def parse_iso8601_utc(value: str, label: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        print("Promotion gate job {0} is missing.".format(label), file=sys.stderr)
+        sys.exit(1)
+    text = value.strip()
+    if text != value:
+        print(
+            "Promotion gate job {0} must not contain leading or trailing whitespace.".format(label),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        print("Promotion gate job {0} is not valid ISO-8601: {1}".format(label, value), file=sys.stderr)
+        sys.exit(1)
+
+job_started_at = str(job.get("started_at", ""))
+job_completed_at = str(job.get("completed_at", ""))
+job_started_at_dt = parse_iso8601_utc(job_started_at, "started_at")
+job_completed_at_dt = parse_iso8601_utc(job_completed_at, "completed_at")
+if job_completed_at_dt < job_started_at_dt:
+    print(
+        "Promotion gate job completed_at precedes started_at: {0} < {1}".format(
+            job_completed_at, job_started_at
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+job_head_sha = job.get("head_sha")
+if expected_head_sha:
+    if not isinstance(job_head_sha, str) or not job_head_sha:
+        print("Promotion gate job head_sha is missing while run head_sha is present.", file=sys.stderr)
+        sys.exit(1)
+    if not re.fullmatch(r"[0-9a-f]{40}", job_head_sha):
+        print("Promotion gate job head_sha is not a canonical 40-char lowercase hex digest.", file=sys.stderr)
+        sys.exit(1)
+    if job_head_sha != expected_head_sha:
+        print(
+            "Promotion gate job head_sha mismatch with run head_sha: expected {0}, got {1}".format(
+                expected_head_sha, job_head_sha
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+job_head_branch = job.get("head_branch")
+if expected_head_branch:
+    if not isinstance(job_head_branch, str) or not job_head_branch.strip():
+        print("Promotion gate job head_branch is missing while run head_branch is present.", file=sys.stderr)
+        sys.exit(1)
+    if job_head_branch != job_head_branch.strip():
+        print("Promotion gate job head_branch must not contain leading or trailing whitespace.", file=sys.stderr)
+        sys.exit(1)
+    if job_head_branch != expected_head_branch:
+        print(
+            "Promotion gate job head_branch mismatch with run head_branch: expected {0}, got {1}".format(
+                expected_head_branch, job_head_branch
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+runner_name = job.get("runner_name")
+if not isinstance(runner_name, str) or not runner_name.strip():
+    print("Promotion gate job runner_name is missing.", file=sys.stderr)
+    sys.exit(1)
+if runner_name != runner_name.strip():
+    print("Promotion gate job runner_name must not contain leading or trailing whitespace.", file=sys.stderr)
+    sys.exit(1)
+
+runner_group_name = job.get("runner_group_name")
+if not isinstance(runner_group_name, str) or not runner_group_name.strip():
+    print("Promotion gate job runner_group_name is missing.", file=sys.stderr)
+    sys.exit(1)
+if runner_group_name != runner_group_name.strip():
+    print("Promotion gate job runner_group_name must not contain leading or trailing whitespace.", file=sys.stderr)
+    sys.exit(1)
+
+labels = job.get("labels")
+if not isinstance(labels, list):
+    print("Promotion gate job labels payload is invalid.", file=sys.stderr)
+    sys.exit(1)
+normalized_labels = []
+for index, label in enumerate(labels):
+    if not isinstance(label, str) or not label.strip():
+        print("Promotion gate job label row {0} is invalid.".format(index), file=sys.stderr)
+        sys.exit(1)
+    if label != label.strip():
+        print("Promotion gate job label row {0} must not contain leading or trailing whitespace.".format(index), file=sys.stderr)
+        sys.exit(1)
+    normalized_labels.append(label)
+if "self-hosted" in normalized_labels and "github-hosted" in normalized_labels:
+    print("Promotion gate job labels must not mix self-hosted and github-hosted markers.", file=sys.stderr)
+    sys.exit(1)
+
+job_workflow_name = job.get("workflow_name")
+if expected_workflow_name:
+    if not isinstance(job_workflow_name, str) or not job_workflow_name:
+        print("Promotion gate job workflow_name is missing while run workflow_name is present.", file=sys.stderr)
+        sys.exit(1)
+    if job_workflow_name != job_workflow_name.strip():
+        print("Promotion gate job workflow_name must not contain leading or trailing whitespace.", file=sys.stderr)
+        sys.exit(1)
+    if expected_workflow_name != expected_workflow_name.strip():
+        print("Resolved run workflow_name must not contain leading or trailing whitespace.", file=sys.stderr)
+        sys.exit(1)
+    if job_workflow_name != expected_workflow_name:
+        print(
+            "Promotion gate job workflow_name mismatch with run workflow_name: expected {0}, got {1}".format(
+                expected_workflow_name, job_workflow_name
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+step_rows = job.get("steps")
+if not isinstance(step_rows, list):
+    print("Promotion gate job steps payload is invalid.", file=sys.stderr)
+    sys.exit(1)
+step_map = {}
+for index, row in enumerate(step_rows):
+    if not isinstance(row, dict):
+        print("Promotion gate step row {0} is invalid.".format(index), file=sys.stderr)
+        sys.exit(1)
+    step_name = row.get("name")
+    if not isinstance(step_name, str) or not step_name.strip():
+        print("Promotion gate step row {0} is missing name.".format(index), file=sys.stderr)
+        sys.exit(1)
+    if step_name in step_map:
+        print("Promotion gate contains duplicate step name: {0}".format(step_name), file=sys.stderr)
+        sys.exit(1)
+    step_map[step_name] = row
+
+required_success_steps = [
+    "Checkout",
+    "Setup Python",
+    "Install Mainline Dependencies",
+    "Resolve Promotion Inputs",
+    "Require Protected Ref Context",
+    "Initialize Rotation Rehearsal Report",
+    "Build Mainline Release Fixture",
+    "Generate Signed Release Approval",
+    "Enforce Mandatory Release Approval Gate",
+    "Run Promotion Dry Run Gate",
+    "Verify Promotion Artifacts",
+    "Bundle Promotion Artifacts",
+    "Upload Promotion Artifacts",
+]
+for step_name in required_success_steps:
+    step_row = step_map.get(step_name)
+    if step_row is None:
+        print("Missing required promotion gate step: {0}".format(step_name), file=sys.stderr)
+        sys.exit(1)
+    step_conclusion = step_row.get("conclusion")
+    if step_conclusion != "success":
+        print(
+            "Promotion gate step {0} must conclude with success; got {1}".format(
+                step_name, step_conclusion
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+rotation_step_name = "Rehearse Approval Key Rotation (old key must fail)"
+rotation_step_row = step_map.get(rotation_step_name)
+rotation_step_conclusion = ""
+if rotation_step_row is not None:
+    raw_rotation_step_conclusion = rotation_step_row.get("conclusion")
+    if isinstance(raw_rotation_step_conclusion, str):
+        rotation_step_conclusion = raw_rotation_step_conclusion
+
+if rotation_rehearsal == "true":
+    if rotation_step_row is None:
+        print(
+            "Missing required promotion gate step when rotation rehearsal is enabled: {0}".format(
+                rotation_step_name
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if rotation_step_conclusion != "success":
+        print(
+            "rotation rehearsal step must conclude with success when required; got {0}".format(
+                rotation_step_conclusion
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+else:
+    if rotation_step_row is not None and rotation_step_conclusion != "skipped":
+        print(
+            "rotation rehearsal step must conclude with skipped when rehearsal is not required; got {0}".format(
+                rotation_step_conclusion
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+actor_parity_checked = False
+if run_actor_login:
+    actor = job.get("actor")
+    if actor is not None:
+        if not isinstance(actor, dict):
+            print("Promotion gate job actor payload is invalid when provided.", file=sys.stderr)
+            sys.exit(1)
+        actor_login = actor.get("login")
+        if not isinstance(actor_login, str) or not actor_login:
+            print("Promotion gate job actor.login is missing when actor payload is provided.", file=sys.stderr)
+            sys.exit(1)
+        if actor_login != actor_login.strip():
+            print("Promotion gate job actor.login must not contain leading or trailing whitespace.", file=sys.stderr)
+            sys.exit(1)
+        if actor_login != run_actor_login:
+            print(
+                "Promotion gate job actor.login mismatch with run actor: expected {0}, got {1}".format(
+                    run_actor_login, actor_login
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        actor_parity_checked = True
+
+triggering_actor_parity_checked = False
+if run_triggering_actor_login:
+    triggering_actor = job.get("triggering_actor")
+    if triggering_actor is not None:
+        if not isinstance(triggering_actor, dict):
+            print("Promotion gate job triggering_actor payload is invalid when provided.", file=sys.stderr)
+            sys.exit(1)
+        triggering_actor_login = triggering_actor.get("login")
+        if not isinstance(triggering_actor_login, str) or not triggering_actor_login:
+            print("Promotion gate job triggering_actor.login is missing when triggering_actor payload is provided.", file=sys.stderr)
+            sys.exit(1)
+        if triggering_actor_login != triggering_actor_login.strip():
+            print("Promotion gate job triggering_actor.login must not contain leading or trailing whitespace.", file=sys.stderr)
+            sys.exit(1)
+        if triggering_actor_login != run_triggering_actor_login:
+            print(
+                "Promotion gate job triggering_actor.login mismatch with run triggering_actor: expected {0}, got {1}".format(
+                    run_triggering_actor_login, triggering_actor_login
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        triggering_actor_parity_checked = True
+
+print(str(job.get("id", "")))
+print(job_html_url)
+print(job_html_url_parts.netloc)
+print(job_html_url_parts.path)
+print(job_html_url_attempt)
+print(str(job_status or ""))
+print(str(job_conclusion or ""))
+print(job_started_at)
+print(job_completed_at)
+print(str(len(required_success_steps)))
+print(rotation_step_conclusion)
+print(rotation_step_name)
+print(runner_name)
+print(runner_group_name)
+print("|".join(normalized_labels))
+print(job_workflow_name or "")
+print(run_actor_login)
+print(run_triggering_actor_login)
+print("true" if actor_parity_checked else "false")
+print("true" if triggering_actor_parity_checked else "false")
+PY
+)"
+promotion_job_id="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '1p')"
+promotion_job_html_url="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '2p')"
+promotion_job_html_url_host_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '3p')"
+promotion_job_html_url_path_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '4p')"
+promotion_job_html_url_attempt_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '5p')"
+promotion_job_status_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '6p')"
+promotion_job_conclusion_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '7p')"
+promotion_job_started_at="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '8p')"
+promotion_job_completed_at="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '9p')"
+promotion_required_step_count_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '10p')"
+promotion_rotation_step_conclusion_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '11p')"
+promotion_rotation_step_name="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '12p')"
+promotion_runner_name_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '13p')"
+promotion_runner_group_name_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '14p')"
+promotion_runner_labels_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '15p')"
+promotion_workflow_name_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '16p')"
+promotion_actor_login_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '17p')"
+promotion_triggering_actor_login_verified="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '18p')"
+promotion_actor_parity_checked="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '19p')"
+promotion_triggering_actor_parity_checked="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '20p')"
 
 artifact_name="soenc-promotion-${run_id}-attempt-${run_attempt}"
 artifact_metadata_deadline_epoch="$(( $(date -u +%s) + ARTIFACT_INDEX_WAIT_SECONDS ))"
@@ -583,13 +1569,15 @@ artifact_metadata_parsed=""
 while :; do
 artifact_metadata_json="$(gh api "repos/${REPO}/actions/runs/${run_id}/artifacts?per_page=100&name=${artifact_name}")"
 set +e
-artifact_metadata_parsed="$(printf '%s\n' "$artifact_metadata_json" | python - "$artifact_name" "$run_id" <<'PY' 2>&1
+artifact_metadata_parsed="$(printf '%s\n' "$artifact_metadata_json" | python - "$artifact_name" "$run_id" "$REPO" <<'PY' 2>&1
 import json
 import re
 import sys
+from urllib.parse import urlsplit
 
 artifact_name = sys.argv[1]
 expected_run_id = sys.argv[2]
+expected_repo = sys.argv[3]
 payload = json.load(sys.stdin)
 artifact_rows = payload.get("artifacts")
 if not isinstance(artifact_rows, list):
@@ -638,6 +1626,34 @@ archive_download_url = artifact.get("archive_download_url")
 if not isinstance(archive_download_url, str) or not archive_download_url:
     print("Artifact {0} missing archive_download_url.".format(artifact_name), file=sys.stderr)
     sys.exit(1)
+if archive_download_url != archive_download_url.strip():
+    print("Artifact {0} archive_download_url must not contain leading or trailing whitespace.".format(artifact_name), file=sys.stderr)
+    sys.exit(1)
+archive_parts = urlsplit(archive_download_url)
+if archive_parts.scheme != "https":
+    print("Artifact {0} archive_download_url must use https scheme.".format(artifact_name), file=sys.stderr)
+    sys.exit(1)
+if not archive_parts.netloc:
+    print("Artifact {0} archive_download_url host is missing.".format(artifact_name), file=sys.stderr)
+    sys.exit(1)
+if archive_parts.query or archive_parts.fragment:
+    print("Artifact {0} archive_download_url must not include query or fragment components.".format(artifact_name), file=sys.stderr)
+    sys.exit(1)
+expected_archive_paths = {
+    "/repos/{0}/actions/artifacts/{1}/zip".format(expected_repo, artifact_id_text),
+    "/api/v3/repos/{0}/actions/artifacts/{1}/zip".format(expected_repo, artifact_id_text),
+}
+normalized_archive_path = archive_parts.path.rstrip("/") or "/"
+if normalized_archive_path not in expected_archive_paths:
+    print(
+        "Artifact {0} archive_download_url path mismatch: expected {1}, got {2}".format(
+            artifact_name,
+            " or ".join(sorted(expected_archive_paths)),
+            archive_parts.path,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 print(artifact_id_text)
 print(digest)
 print(size_in_bytes_text)
@@ -648,6 +1664,7 @@ print(archive_download_url)
 print(workflow_run_id_text)
 print(workflow_run.get("head_branch", ""))
 print(workflow_run.get("head_sha", ""))
+print(archive_parts.netloc)
 PY
 )"
 artifact_metadata_status=$?
@@ -680,6 +1697,86 @@ artifact_archive_download_url="$(printf '%s\n' "$artifact_metadata_parsed" | sed
 artifact_workflow_run_id="$(printf '%s\n' "$artifact_metadata_parsed" | sed -n '8p')"
 artifact_workflow_head_branch="$(printf '%s\n' "$artifact_metadata_parsed" | sed -n '9p')"
 artifact_workflow_head_sha="$(printf '%s\n' "$artifact_metadata_parsed" | sed -n '10p')"
+artifact_archive_download_url_host="$(printf '%s\n' "$artifact_metadata_parsed" | sed -n '11p')"
+
+artifact_timestamp_verification="$(python - "$artifact_name" "$run_id" "$run_url" "$artifact_created_at" "$artifact_updated_at" "$artifact_expires_at" <<'PY'
+import sys
+from datetime import datetime
+
+artifact_name = sys.argv[1]
+run_id = sys.argv[2]
+run_url = sys.argv[3]
+artifact_created_at = sys.argv[4]
+artifact_updated_at = sys.argv[5]
+artifact_expires_at = sys.argv[6]
+
+def parse_required_iso8601_utc(label: str, value: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        print("{0} is missing for artifact {1} (run_id={2})".format(label, artifact_name, run_id), file=sys.stderr)
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print(
+            "{0} must not contain leading or trailing whitespace for artifact {1} (run_id={2})".format(
+                label,
+                artifact_name,
+                run_id,
+            ),
+            file=sys.stderr,
+        )
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        print(
+            "{0} is not valid ISO-8601 for artifact {1} (run_id={2}): {3}".format(
+                label,
+                artifact_name,
+                run_id,
+                value,
+            ),
+            file=sys.stderr,
+        )
+        print("run_url={0}".format(run_url), file=sys.stderr)
+        sys.exit(1)
+
+created_at_dt = parse_required_iso8601_utc("artifact created_at", artifact_created_at)
+updated_at_dt = parse_required_iso8601_utc("artifact updated_at", artifact_updated_at)
+expires_at_dt = parse_required_iso8601_utc("artifact expires_at", artifact_expires_at)
+if updated_at_dt < created_at_dt:
+    print(
+        "artifact updated_at precedes created_at for {0} (run_id={1}): {2} < {3}".format(
+            artifact_name,
+            run_id,
+            artifact_updated_at,
+            artifact_created_at,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+if expires_at_dt < updated_at_dt:
+    print(
+        "artifact expires_at precedes updated_at for {0} (run_id={1}): {2} < {3}".format(
+            artifact_name,
+            run_id,
+            artifact_expires_at,
+            artifact_updated_at,
+        ),
+        file=sys.stderr,
+    )
+    print("run_url={0}".format(run_url), file=sys.stderr)
+    sys.exit(1)
+
+print(artifact_created_at)
+print(artifact_updated_at)
+print(artifact_expires_at)
+PY
+)"
+artifact_created_at_verified="$(printf '%s\n' "$artifact_timestamp_verification" | sed -n '1p')"
+artifact_updated_at_verified="$(printf '%s\n' "$artifact_timestamp_verification" | sed -n '2p')"
+artifact_expires_at_verified="$(printf '%s\n' "$artifact_timestamp_verification" | sed -n '3p')"
 
 if [[ -n "$run_head_branch_api" && -n "$artifact_workflow_head_branch" && "$run_head_branch_api" != "$artifact_workflow_head_branch" ]]; then
   echo "artifact workflow_head_branch mismatch for run_id=${run_id}: expected ${run_head_branch_api}, got ${artifact_workflow_head_branch}" >&2
@@ -689,6 +1786,11 @@ fi
 
 if [[ -n "$run_head_sha_api" && -n "$artifact_workflow_head_sha" && "$run_head_sha_api" != "$artifact_workflow_head_sha" ]]; then
   echo "artifact workflow_head_sha mismatch for run_id=${run_id}: expected ${run_head_sha_api}, got ${artifact_workflow_head_sha}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ -n "$run_url_host_verified" && -n "$artifact_archive_download_url_host" && "$run_url_host_verified" != "$artifact_archive_download_url_host" ]]; then
+  echo "artifact archive_download_url host mismatch for run_id=${run_id}: expected ${run_url_host_verified}, got ${artifact_archive_download_url_host}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
@@ -821,22 +1923,58 @@ python - \
   "$run_workflow_path" \
   "$run_workflow_ref" \
   "$run_html_url_api" \
+  "$run_url_host_verified" \
+  "$run_url_attempt_verified" \
+  "$run_html_url_host_verified" \
+  "$run_html_url_attempt_verified" \
+  "$run_created_at_summary_verified" \
+  "$run_started_at_summary_verified" \
+  "$run_updated_at_summary_verified" \
+  "$run_created_at_detail_verified" \
+  "$run_started_at_detail_verified" \
+  "$run_updated_at_detail_verified" \
+  "$WORKFLOW_JOB_ID" \
   "$run_head_sha_api" \
   "$run_number_api" \
+  "$run_retention_days_api" \
+  "$run_repository_id_api" \
+  "$run_repository_owner_id_api" \
+  "$run_actor_id_api" \
   "$artifact_id" \
   "$artifact_digest" \
   "$artifact_size_bytes" \
-  "$artifact_created_at" \
-  "$artifact_updated_at" \
-  "$artifact_expires_at" \
+  "$artifact_created_at_verified" \
+  "$artifact_updated_at_verified" \
+  "$artifact_expires_at_verified" \
   "$artifact_archive_download_url" \
+  "$artifact_archive_download_url_host" \
   "$artifact_workflow_run_id" \
   "$artifact_workflow_head_branch" \
   "$artifact_workflow_head_sha" \
   "$artifact_zip_path" \
   "$artifact_archive_digest_verified" \
   "$artifact_archive_size_bytes" \
-  "$artifact_archive_entry_count" <<'PY'
+  "$artifact_archive_entry_count" \
+  "$promotion_job_id" \
+  "$promotion_job_html_url" \
+  "$promotion_job_html_url_host_verified" \
+  "$promotion_job_html_url_path_verified" \
+  "$promotion_job_html_url_attempt_verified" \
+  "$promotion_job_status_verified" \
+  "$promotion_job_conclusion_verified" \
+  "$promotion_job_started_at" \
+  "$promotion_job_completed_at" \
+  "$promotion_required_step_count_verified" \
+  "$promotion_rotation_step_name" \
+  "$promotion_rotation_step_conclusion_verified" \
+  "$promotion_runner_name_verified" \
+  "$promotion_runner_group_name_verified" \
+  "$promotion_runner_labels_verified" \
+  "$promotion_workflow_name_verified" \
+  "$promotion_actor_login_verified" \
+  "$promotion_triggering_actor_login_verified" \
+  "$promotion_actor_parity_checked" \
+  "$promotion_triggering_actor_parity_checked" <<'PY'
 import hashlib
 import json
 import re
@@ -864,22 +2002,58 @@ workflow_head_branch = sys.argv[15]
 workflow_path = sys.argv[16]
 workflow_path_ref = sys.argv[17]
 workflow_html_url = sys.argv[18]
-workflow_head_sha = sys.argv[19]
-workflow_run_number = sys.argv[20]
-artifact_id = sys.argv[21]
-artifact_digest = sys.argv[22]
-artifact_size_in_bytes = sys.argv[23]
-artifact_created_at = sys.argv[24]
-artifact_updated_at = sys.argv[25]
-artifact_expires_at = sys.argv[26]
-artifact_archive_download_url = sys.argv[27]
-artifact_workflow_run_id = sys.argv[28]
-artifact_workflow_head_branch = sys.argv[29]
-artifact_workflow_head_sha = sys.argv[30]
-artifact_archive_path = sys.argv[31]
-artifact_archive_digest_verified = sys.argv[32]
-artifact_archive_size_bytes = sys.argv[33]
-artifact_archive_entry_count = sys.argv[34]
+workflow_run_url_host = sys.argv[19]
+workflow_run_url_attempt = sys.argv[20]
+workflow_run_html_url_host = sys.argv[21]
+workflow_run_html_url_attempt = sys.argv[22]
+workflow_created_at = sys.argv[23]
+workflow_started_at = sys.argv[24]
+workflow_updated_at = sys.argv[25]
+workflow_created_at_detail = sys.argv[26]
+workflow_started_at_detail = sys.argv[27]
+workflow_updated_at_detail = sys.argv[28]
+workflow_job_id = sys.argv[29]
+workflow_head_sha = sys.argv[30]
+workflow_run_number = sys.argv[31]
+workflow_retention_days = sys.argv[32]
+workflow_repository_id = sys.argv[33]
+workflow_repository_owner_id = sys.argv[34]
+workflow_actor_id = sys.argv[35]
+artifact_id = sys.argv[36]
+artifact_digest = sys.argv[37]
+artifact_size_in_bytes = sys.argv[38]
+artifact_created_at = sys.argv[39]
+artifact_updated_at = sys.argv[40]
+artifact_expires_at = sys.argv[41]
+artifact_archive_download_url = sys.argv[42]
+artifact_archive_download_url_host = sys.argv[43]
+artifact_workflow_run_id = sys.argv[44]
+artifact_workflow_head_branch = sys.argv[45]
+artifact_workflow_head_sha = sys.argv[46]
+artifact_archive_path = sys.argv[47]
+artifact_archive_digest_verified = sys.argv[48]
+artifact_archive_size_bytes = sys.argv[49]
+artifact_archive_entry_count = sys.argv[50]
+promotion_job_id = sys.argv[51]
+promotion_job_html_url = sys.argv[52]
+promotion_job_html_url_host_verified = sys.argv[53]
+promotion_job_html_url_path_verified = sys.argv[54]
+promotion_job_html_url_attempt_verified = sys.argv[55]
+promotion_job_status_verified = sys.argv[56]
+promotion_job_conclusion_verified = sys.argv[57]
+promotion_job_started_at = sys.argv[58]
+promotion_job_completed_at = sys.argv[59]
+promotion_required_step_count_verified = sys.argv[60]
+promotion_rotation_step_name = sys.argv[61]
+promotion_rotation_step_conclusion_verified = sys.argv[62]
+promotion_runner_name_verified = sys.argv[63]
+promotion_runner_group_name_verified = sys.argv[64]
+promotion_runner_labels_verified = sys.argv[65]
+promotion_workflow_name_verified = sys.argv[66]
+promotion_actor_login_verified = sys.argv[67]
+promotion_triggering_actor_login_verified = sys.argv[68]
+promotion_actor_parity_checked = sys.argv[69]
+promotion_triggering_actor_parity_checked = sys.argv[70]
 
 required_files = [
     "release_bundle.json",
@@ -923,6 +2097,33 @@ if missing or duplicate:
     sys.exit(1)
 
 generated_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def parse_required_iso8601_utc(label: str, value: object):
+    if not isinstance(value, str) or not value.strip():
+        print("{0} is required".format(label), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print("{0} must not contain leading or trailing whitespace".format(label), file=sys.stderr)
+        sys.exit(1)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        print("{0} is not valid ISO-8601: {1}".format(label, value), file=sys.stderr)
+        sys.exit(1)
+    return value, parsed
+
+def parse_required_positive_integer(label: str, value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        print("{0} is required".format(label), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print("{0} must not contain leading or trailing whitespace".format(label), file=sys.stderr)
+        sys.exit(1)
+    if not value.isdigit() or int(value) <= 0:
+        print("{0} must be a positive integer".format(label), file=sys.stderr)
+        sys.exit(1)
+    return value
+
 artifact_rows = []
 for name in required_files:
     path = resolved[name]
@@ -949,6 +2150,25 @@ rotation_requested = rotation_report_payload.get("requested")
 rotation_executed = rotation_report_payload.get("executed")
 rotation_old_key_rejected = rotation_report_payload.get("old_key_rejected")
 rotation_status = rotation_report_payload.get("status")
+rotation_workflow_retention_days = parse_required_positive_integer(
+    "rotation_rehearsal_report.workflow_retention_days",
+    rotation_report_payload.get("workflow_retention_days"),
+)
+if not workflow_retention_days or not workflow_retention_days.isdigit():
+    print("Resolved run retention_days is not numeric.", file=sys.stderr)
+    sys.exit(1)
+if int(workflow_retention_days) <= 0:
+    print("Resolved run retention_days must be positive.", file=sys.stderr)
+    sys.exit(1)
+if rotation_workflow_retention_days != workflow_retention_days:
+    print(
+        "rotation_rehearsal_report.workflow_retention_days mismatch with run retention_days: expected {0}, got {1}".format(
+            workflow_retention_days,
+            rotation_workflow_retention_days,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 if rotation_rehearsal == "true":
     if rotation_requested is not True:
@@ -1086,6 +2306,154 @@ for bundle_name, (expected_archive_path, expected_filename) in required_bundle_e
         )
         sys.exit(1)
 
+promotion_audit_report_path = resolved["promotion_audit_report.json"]
+try:
+    promotion_audit_report_payload = json.loads(
+        promotion_audit_report_path.read_text(encoding="utf-8")
+    )
+except Exception as exc:
+    print("promotion_audit_report.json is not valid JSON: {0}".format(exc), file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(promotion_audit_report_payload, dict):
+    print("promotion_audit_report.json must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_payload.get("schema") != "enc2sop-promotion-audit-report/v1":
+    print(
+        "promotion_audit_report schema mismatch: expected enc2sop-promotion-audit-report/v1, got {0}".format(
+            promotion_audit_report_payload.get("schema")
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_audit_report_payload.get("passed") is not True:
+    print("promotion_audit_report.passed must be true", file=sys.stderr)
+    sys.exit(1)
+promotion_audit_report_summary = promotion_audit_report_payload.get("summary")
+if not isinstance(promotion_audit_report_summary, dict):
+    print("promotion_audit_report.summary must be an object", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_summary.get("total_failures") != 0:
+    print("promotion_audit_report.summary.total_failures must be 0", file=sys.stderr)
+    sys.exit(1)
+promotion_audit_report_failures = promotion_audit_report_payload.get("failures")
+if not isinstance(promotion_audit_report_failures, list):
+    print("promotion_audit_report.failures must be a list", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_failures:
+    print("promotion_audit_report.failures must be empty when report passed=true", file=sys.stderr)
+    sys.exit(1)
+promotion_audit_report_inputs = promotion_audit_report_payload.get("inputs")
+if not isinstance(promotion_audit_report_inputs, dict):
+    print("promotion_audit_report.inputs is required", file=sys.stderr)
+    sys.exit(1)
+promotion_audit_report_generated_at_utc, promotion_audit_report_generated_at_dt = parse_required_iso8601_utc(
+    "promotion_audit_report.generated_at_utc",
+    promotion_audit_report_payload.get("generated_at_utc"),
+)
+if promotion_audit_report_generated_at_dt < release_receipt_generated_at_dt:
+    print(
+        "promotion_audit_report.generated_at_utc must be >= release_receipt.generated_at_utc; got {0} < {1}".format(
+            promotion_audit_report_generated_at_utc,
+            release_receipt_generated_at_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+promotion_audit_report_inputs_evidence_file = promotion_audit_report_inputs.get("evidence_file")
+if not isinstance(promotion_audit_report_inputs_evidence_file, str) or not promotion_audit_report_inputs_evidence_file.strip():
+    print("promotion_audit_report.inputs.evidence_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_inputs_evidence_file != promotion_audit_report_inputs_evidence_file.strip():
+    print(
+        "promotion_audit_report.inputs.evidence_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_audit_report_inputs_evidence_sha256 = promotion_audit_report_inputs.get("evidence_sha256")
+if not isinstance(promotion_audit_report_inputs_evidence_sha256, str) or not re.fullmatch(
+    r"[0-9a-f]{64}",
+    promotion_audit_report_inputs_evidence_sha256,
+):
+    print(
+        "promotion_audit_report.inputs.evidence_sha256 must be a 64-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+actual_promotion_evidence_sha256 = sha256_file(resolved["promotion_evidence.json"])
+if promotion_audit_report_inputs_evidence_sha256 != actual_promotion_evidence_sha256:
+    print(
+        "promotion_audit_report.inputs.evidence_sha256 mismatch with promotion_evidence.json: expected {0}, got {1}".format(
+            actual_promotion_evidence_sha256,
+            promotion_audit_report_inputs_evidence_sha256,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+promotion_audit_report_inputs_policy_file = promotion_audit_report_inputs.get("policy_file")
+if not isinstance(promotion_audit_report_inputs_policy_file, str) or not promotion_audit_report_inputs_policy_file.strip():
+    print("promotion_audit_report.inputs.policy_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_inputs_policy_file != promotion_audit_report_inputs_policy_file.strip():
+    print(
+        "promotion_audit_report.inputs.policy_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_audit_report_inputs_policy_sha256 = promotion_audit_report_inputs.get("policy_sha256")
+if not isinstance(promotion_audit_report_inputs_policy_sha256, str) or not re.fullmatch(
+    r"[0-9a-f]{64}",
+    promotion_audit_report_inputs_policy_sha256,
+):
+    print(
+        "promotion_audit_report.inputs.policy_sha256 must be a 64-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+bundle_policy_row = bundle_rows_by_name.get("promotion_policy")
+if bundle_policy_row is not None and promotion_audit_report_inputs_policy_sha256 != bundle_policy_row["sha256"]:
+    print(
+        "promotion_audit_report.inputs.policy_sha256 mismatch with promotion_policy bundle entry: expected {0}, got {1}".format(
+            bundle_policy_row["sha256"],
+            promotion_audit_report_inputs_policy_sha256,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+promotion_audit_report_inputs_workflow_file = promotion_audit_report_inputs.get("workflow_file")
+if not isinstance(promotion_audit_report_inputs_workflow_file, str) or not promotion_audit_report_inputs_workflow_file.strip():
+    print("promotion_audit_report.inputs.workflow_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_inputs_workflow_file != promotion_audit_report_inputs_workflow_file.strip():
+    print(
+        "promotion_audit_report.inputs.workflow_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_audit_report_inputs_workflow_sha256 = promotion_audit_report_inputs.get("workflow_sha256")
+if not isinstance(promotion_audit_report_inputs_workflow_sha256, str) or not re.fullmatch(
+    r"[0-9a-f]{64}",
+    promotion_audit_report_inputs_workflow_sha256,
+):
+    print(
+        "promotion_audit_report.inputs.workflow_sha256 must be a 64-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+bundle_workflow_row = bundle_rows_by_name.get("promotion_workflow")
+if bundle_workflow_row is not None and promotion_audit_report_inputs_workflow_sha256 != bundle_workflow_row["sha256"]:
+    print(
+        "promotion_audit_report.inputs.workflow_sha256 mismatch with promotion_workflow bundle entry: expected {0}, got {1}".format(
+            bundle_workflow_row["sha256"],
+            promotion_audit_report_inputs_workflow_sha256,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 promotion_artifact_audit_report_path = resolved["promotion_artifact_audit_report.json"]
 try:
     promotion_artifact_audit_report_payload = json.loads(
@@ -1119,6 +2487,406 @@ if not isinstance(promotion_artifact_audit_report_summary, dict):
 if promotion_artifact_audit_report_summary.get("total_failures") != 0:
     print("promotion_artifact_audit_report.summary.total_failures must be 0", file=sys.stderr)
     sys.exit(1)
+promotion_artifact_audit_report_generated_at_utc, promotion_artifact_audit_report_generated_at_dt = parse_required_iso8601_utc(
+    "promotion_artifact_audit_report.generated_at_utc",
+    promotion_artifact_audit_report_payload.get("generated_at_utc"),
+)
+if promotion_artifact_audit_report_generated_at_dt < promotion_audit_report_generated_at_dt:
+    print(
+        "promotion_artifact_audit_report.generated_at_utc must be >= promotion_audit_report.generated_at_utc; got {0} < {1}".format(
+            promotion_artifact_audit_report_generated_at_utc,
+            promotion_audit_report_generated_at_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_release_dir = promotion_artifact_audit_report_payload.get("release_dir")
+if not isinstance(promotion_artifact_audit_report_release_dir, str) or not promotion_artifact_audit_report_release_dir.strip():
+    print("promotion_artifact_audit_report.release_dir is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_release_dir != promotion_artifact_audit_report_release_dir.strip():
+    print("promotion_artifact_audit_report.release_dir must not contain leading or trailing whitespace", file=sys.stderr)
+    sys.exit(1)
+promotion_artifact_audit_report_evidence_file = promotion_artifact_audit_report_payload.get("promotion_evidence_file")
+if not isinstance(promotion_artifact_audit_report_evidence_file, str) or not promotion_artifact_audit_report_evidence_file.strip():
+    print("promotion_artifact_audit_report.promotion_evidence_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_evidence_file != promotion_artifact_audit_report_evidence_file.strip():
+    print(
+        "promotion_artifact_audit_report.promotion_evidence_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_promotion_report_file = promotion_artifact_audit_report_payload.get("promotion_report_file")
+if (
+    not isinstance(promotion_artifact_audit_report_promotion_report_file, str)
+    or not promotion_artifact_audit_report_promotion_report_file.strip()
+):
+    print("promotion_artifact_audit_report.promotion_report_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_promotion_report_file != promotion_artifact_audit_report_promotion_report_file.strip():
+    print(
+        "promotion_artifact_audit_report.promotion_report_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_rotation_report_file = promotion_artifact_audit_report_payload.get("rotation_report_file")
+if (
+    not isinstance(promotion_artifact_audit_report_rotation_report_file, str)
+    or not promotion_artifact_audit_report_rotation_report_file.strip()
+):
+    print("promotion_artifact_audit_report.rotation_report_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_rotation_report_file != promotion_artifact_audit_report_rotation_report_file.strip():
+    print(
+        "promotion_artifact_audit_report.rotation_report_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_policy_file = promotion_artifact_audit_report_payload.get("promotion_policy_file")
+if not isinstance(promotion_artifact_audit_report_policy_file, str) or not promotion_artifact_audit_report_policy_file.strip():
+    print("promotion_artifact_audit_report.promotion_policy_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_policy_file != promotion_artifact_audit_report_policy_file.strip():
+    print(
+        "promotion_artifact_audit_report.promotion_policy_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_workflow_file = promotion_artifact_audit_report_payload.get("promotion_workflow_file")
+if (
+    not isinstance(promotion_artifact_audit_report_workflow_file, str)
+    or not promotion_artifact_audit_report_workflow_file.strip()
+):
+    print("promotion_artifact_audit_report.promotion_workflow_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_workflow_file != promotion_artifact_audit_report_workflow_file.strip():
+    print(
+        "promotion_artifact_audit_report.promotion_workflow_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_run_receipt_file = promotion_artifact_audit_report_payload.get("promotion_run_receipt_file")
+if (
+    not isinstance(promotion_artifact_audit_report_run_receipt_file, str)
+    or not promotion_artifact_audit_report_run_receipt_file.strip()
+):
+    print("promotion_artifact_audit_report.promotion_run_receipt_file is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_run_receipt_file != promotion_artifact_audit_report_run_receipt_file.strip():
+    print(
+        "promotion_artifact_audit_report.promotion_run_receipt_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_report_key_id_expected = promotion_artifact_audit_report_payload.get(
+    "release_approval_key_id_expected"
+)
+if (
+    not isinstance(promotion_artifact_audit_report_key_id_expected, str)
+    or not promotion_artifact_audit_report_key_id_expected.strip()
+):
+    print("promotion_artifact_audit_report.release_approval_key_id_expected is required", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_key_id_expected != promotion_artifact_audit_report_key_id_expected.strip():
+    print(
+        "promotion_artifact_audit_report.release_approval_key_id_expected must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+expected_rotation_pass_required = rotation_rehearsal == "true"
+if promotion_artifact_audit_report_payload.get("release_approval_signature_required") is not True:
+    print(
+        "promotion_artifact_audit_report.release_approval_signature_required must be true",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_payload.get("ci_context_match_required") is not True:
+    print(
+        "promotion_artifact_audit_report.ci_context_match_required must be true",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_payload.get("artifact_context_consistency_required") is not True:
+    print(
+        "promotion_artifact_audit_report.artifact_context_consistency_required must be true",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+promotion_artifact_audit_rotation_required = promotion_artifact_audit_report_payload.get("rotation_pass_required")
+if not isinstance(promotion_artifact_audit_rotation_required, bool):
+    print("promotion_artifact_audit_report.rotation_pass_required must be boolean", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_rotation_required != expected_rotation_pass_required:
+    print(
+        "promotion_artifact_audit_report.rotation_pass_required mismatch: expected {0}, got {1}".format(
+            expected_rotation_pass_required,
+            promotion_artifact_audit_rotation_required,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+release_approval_path = resolved["release_approval.json"]
+try:
+    release_approval_payload = json.loads(release_approval_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print("release_approval.json is not valid JSON: {0}".format(exc), file=sys.stderr)
+    sys.exit(1)
+if not isinstance(release_approval_payload, dict):
+    print("release_approval.json must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+if release_approval_payload.get("schema") != "enc2sop-release-approval/v1":
+    print(
+        "release_approval schema mismatch: expected enc2sop-release-approval/v1, got {0}".format(
+            release_approval_payload.get("schema")
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_approval_signature = release_approval_payload.get("signature")
+if not isinstance(release_approval_signature, dict):
+    print("release_approval.signature is required", file=sys.stderr)
+    sys.exit(1)
+release_approval_signature_algorithm = release_approval_signature.get("algorithm")
+if release_approval_signature_algorithm != "hmac-sha256":
+    print("release_approval.signature.algorithm must be hmac-sha256", file=sys.stderr)
+    sys.exit(1)
+release_approval_signature_key_id = release_approval_signature.get("key_id")
+if not isinstance(release_approval_signature_key_id, str) or not release_approval_signature_key_id.strip():
+    print("release_approval.signature.key_id is required", file=sys.stderr)
+    sys.exit(1)
+if release_approval_signature_key_id != release_approval_signature_key_id.strip():
+    print(
+        "release_approval.signature.key_id must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_approval_signature_digest_hex = release_approval_signature.get("digest_hex")
+if not isinstance(release_approval_signature_digest_hex, str) or not re.fullmatch(r"[0-9a-f]{64}", release_approval_signature_digest_hex):
+    print("release_approval.signature.digest_hex must be a 64-char lowercase hex digest", file=sys.stderr)
+    sys.exit(1)
+release_approval_bundle_relative_path = release_approval_payload.get("release_bundle_relative_path")
+if not isinstance(release_approval_bundle_relative_path, str) or not release_approval_bundle_relative_path.strip():
+    print("release_approval.release_bundle_relative_path is required", file=sys.stderr)
+    sys.exit(1)
+if release_approval_bundle_relative_path != release_approval_bundle_relative_path.strip():
+    print(
+        "release_approval.release_bundle_relative_path must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if Path(release_approval_bundle_relative_path).name != "release_bundle.json":
+    print(
+        "release_approval.release_bundle_relative_path must point to release_bundle.json; got {0}".format(
+            release_approval_bundle_relative_path
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_approval_bundle_sha256 = release_approval_payload.get("release_bundle_sha256")
+if not isinstance(release_approval_bundle_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", release_approval_bundle_sha256):
+    print("release_approval.release_bundle_sha256 must be a 64-char lowercase hex digest", file=sys.stderr)
+    sys.exit(1)
+actual_release_bundle_sha256 = sha256_file(resolved["release_bundle.json"])
+if release_approval_bundle_sha256 != actual_release_bundle_sha256:
+    print(
+        "release_approval.release_bundle_sha256 mismatch with release_bundle.json: expected {0}, got {1}".format(
+            actual_release_bundle_sha256,
+            release_approval_bundle_sha256,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_approval_approved_at_utc, release_approval_approved_at_dt = parse_required_iso8601_utc(
+    "release_approval.approved_at_utc",
+    release_approval_payload.get("approved_at_utc"),
+)
+release_approval_approvers = release_approval_payload.get("approvers")
+if not isinstance(release_approval_approvers, list) or not release_approval_approvers:
+    print("release_approval.approvers must be a non-empty list", file=sys.stderr)
+    sys.exit(1)
+normalized_release_approval_approvers = []
+seen_release_approval_approvers = set()
+for index, item in enumerate(release_approval_approvers):
+    if not isinstance(item, str) or not item.strip():
+        print("release_approval.approvers[{0}] must be a non-empty string".format(index), file=sys.stderr)
+        sys.exit(1)
+    if item != item.strip():
+        print(
+            "release_approval.approvers[{0}] must not contain leading or trailing whitespace".format(index),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if item in seen_release_approval_approvers:
+        print("release_approval.approvers contains duplicate value: {0}".format(item), file=sys.stderr)
+        sys.exit(1)
+    normalized_release_approval_approvers.append(item)
+    seen_release_approval_approvers.add(item)
+release_approval_notes = release_approval_payload.get("notes")
+if release_approval_notes is not None:
+    if not isinstance(release_approval_notes, str) or not release_approval_notes.strip():
+        print("release_approval.notes must be a non-empty string when present", file=sys.stderr)
+        sys.exit(1)
+    if release_approval_notes != release_approval_notes.strip():
+        print("release_approval.notes must not contain leading or trailing whitespace", file=sys.stderr)
+        sys.exit(1)
+
+release_receipt_path = resolved["release_receipt.json"]
+try:
+    release_receipt_payload = json.loads(release_receipt_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print("release_receipt.json is not valid JSON: {0}".format(exc), file=sys.stderr)
+    sys.exit(1)
+if not isinstance(release_receipt_payload, dict):
+    print("release_receipt.json must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+if release_receipt_payload.get("schema") != "enc2sop-release-receipt/v1":
+    print(
+        "release_receipt schema mismatch: expected enc2sop-release-receipt/v1, got {0}".format(
+            release_receipt_payload.get("schema")
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if release_receipt_payload.get("release_approval_required") is not True:
+    print("release_receipt.release_approval_required must be true", file=sys.stderr)
+    sys.exit(1)
+if release_receipt_payload.get("release_approval_verified") is not True:
+    print("release_receipt.release_approval_verified must be true", file=sys.stderr)
+    sys.exit(1)
+release_receipt_bundle_relative_path = release_receipt_payload.get("release_bundle_relative_path")
+if not isinstance(release_receipt_bundle_relative_path, str) or not release_receipt_bundle_relative_path.strip():
+    print("release_receipt.release_bundle_relative_path is required", file=sys.stderr)
+    sys.exit(1)
+if release_receipt_bundle_relative_path != release_receipt_bundle_relative_path.strip():
+    print(
+        "release_receipt.release_bundle_relative_path must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if release_receipt_bundle_relative_path != "release_bundle.json":
+    print(
+        "release_receipt.release_bundle_relative_path must be release_bundle.json; got {0}".format(
+            release_receipt_bundle_relative_path
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if release_receipt_bundle_relative_path != release_approval_bundle_relative_path:
+    print(
+        "release_receipt.release_bundle_relative_path mismatch with release_approval.release_bundle_relative_path: expected {0}, got {1}".format(
+            release_approval_bundle_relative_path,
+            release_receipt_bundle_relative_path,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_bundle_sha256 = release_receipt_payload.get("release_bundle_sha256")
+if not isinstance(release_receipt_bundle_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", release_receipt_bundle_sha256):
+    print(
+        "release_receipt.release_bundle_sha256 must be a 64-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if release_receipt_bundle_sha256 != actual_release_bundle_sha256:
+    print(
+        "release_receipt.release_bundle_sha256 mismatch with release_bundle.json: expected {0}, got {1}".format(
+            actual_release_bundle_sha256,
+            release_receipt_bundle_sha256,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_approval_sha256 = release_receipt_payload.get("release_approval_sha256")
+if not isinstance(release_receipt_approval_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", release_receipt_approval_sha256):
+    print(
+        "release_receipt.release_approval_sha256 must be a 64-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+actual_release_approval_sha256 = sha256_file(resolved["release_approval.json"])
+if release_receipt_approval_sha256 != actual_release_approval_sha256:
+    print(
+        "release_receipt.release_approval_sha256 mismatch with release_approval.json: expected {0}, got {1}".format(
+            actual_release_approval_sha256,
+            release_receipt_approval_sha256,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_approval_signature_digest = release_receipt_payload.get("release_approval_signature_digest")
+if not isinstance(release_receipt_approval_signature_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", release_receipt_approval_signature_digest):
+    print(
+        "release_receipt.release_approval_signature_digest must be a 64-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if release_receipt_approval_signature_digest != release_approval_signature_digest_hex:
+    print(
+        "release_receipt.release_approval_signature_digest mismatch with release_approval.signature.digest_hex: expected {0}, got {1}".format(
+            release_approval_signature_digest_hex,
+            release_receipt_approval_signature_digest,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_approval_file = release_receipt_payload.get("release_approval_file")
+if not isinstance(release_receipt_approval_file, str) or not release_receipt_approval_file.strip():
+    print("release_receipt.release_approval_file is required", file=sys.stderr)
+    sys.exit(1)
+if release_receipt_approval_file != release_receipt_approval_file.strip():
+    print(
+        "release_receipt.release_approval_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if Path(release_receipt_approval_file).name != "release_approval.json":
+    print(
+        "release_receipt.release_approval_file must point to release_approval.json; got {0}".format(
+            release_receipt_approval_file
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_key_id = release_receipt_payload.get("release_approval_key_id")
+if not isinstance(release_receipt_key_id, str) or not release_receipt_key_id.strip():
+    print("release_receipt.release_approval_key_id is required", file=sys.stderr)
+    sys.exit(1)
+if release_receipt_key_id != release_receipt_key_id.strip():
+    print(
+        "release_receipt.release_approval_key_id must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_generated_at_utc, release_receipt_generated_at_dt = parse_required_iso8601_utc(
+    "release_receipt.generated_at_utc",
+    release_receipt_payload.get("generated_at_utc"),
+)
+if release_receipt_generated_at_dt < release_approval_approved_at_dt:
+    print(
+        "release_receipt.generated_at_utc must be >= release_approval.approved_at_utc; got {0} < {1}".format(
+            release_receipt_generated_at_utc,
+            release_approval_approved_at_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_receipt_context = release_receipt_payload.get("github_context")
+if not isinstance(release_receipt_context, dict):
+    print("release_receipt.github_context must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+release_receipt_approval_context = release_receipt_payload.get("release_approval_github_context")
+if not isinstance(release_receipt_approval_context, dict):
+    print("release_receipt.release_approval_github_context must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+release_approval_context = release_approval_payload.get("github_context")
+if not isinstance(release_approval_context, dict):
+    print("release_approval.github_context must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+if release_receipt_approval_context != release_approval_context:
+    print("release_receipt.release_approval_github_context must match release_approval.github_context", file=sys.stderr)
+    sys.exit(1)
 
 run_receipt_path = resolved["promotion_run_receipt.json"]
 try:
@@ -1145,7 +2913,6 @@ rotation_pass_required = run_receipt_payload.get("rotation_pass_required")
 if not isinstance(rotation_pass_required, bool):
     print("promotion_run_receipt.rotation_pass_required must be boolean", file=sys.stderr)
     sys.exit(1)
-expected_rotation_pass_required = rotation_rehearsal == "true"
 if rotation_pass_required != expected_rotation_pass_required:
     print(
         "promotion_run_receipt.rotation_pass_required mismatch: expected {0}, got {1}".format(
@@ -1213,6 +2980,16 @@ for run_receipt_name, expected_filename in required_run_receipt_entries.items():
             file=sys.stderr,
         )
         sys.exit(1)
+    if Path(row["path"]).name != expected_filename:
+        print(
+            "promotion_run_receipt.artifacts[{0}].path must end with {1}; got {2}".format(
+                run_receipt_name,
+                expected_filename,
+                row["path"],
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
     expected_digest = sha256_file(resolved[expected_filename])
     if row["sha256"] != expected_digest:
         print(
@@ -1224,6 +3001,56 @@ for run_receipt_name, expected_filename in required_run_receipt_entries.items():
             file=sys.stderr,
         )
         sys.exit(1)
+
+report_binding_rows = (
+    ("promotion_artifact_audit_report.promotion_evidence_file", promotion_artifact_audit_report_evidence_file, "promotion_evidence"),
+    (
+        "promotion_artifact_audit_report.promotion_report_file",
+        promotion_artifact_audit_report_promotion_report_file,
+        "promotion_audit_report",
+    ),
+    (
+        "promotion_artifact_audit_report.rotation_report_file",
+        promotion_artifact_audit_report_rotation_report_file,
+        "rotation_rehearsal_report",
+    ),
+    ("promotion_audit_report.inputs.evidence_file", promotion_audit_report_inputs_evidence_file, "promotion_evidence"),
+)
+for binding_label, binding_value, artifact_name in report_binding_rows:
+    artifact_row = run_receipt_rows_by_name.get(artifact_name)
+    if artifact_row is None:
+        continue
+    if binding_value != artifact_row["path"]:
+        print(
+            "{0} does not match promotion_run_receipt.artifacts[{1}].path: expected {2}, got {3}".format(
+                binding_label,
+                artifact_name,
+                artifact_row["path"],
+                binding_value,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+policy_row = run_receipt_rows_by_name.get("promotion_policy")
+if policy_row is not None and promotion_audit_report_inputs_policy_file != policy_row["path"]:
+    print(
+        "promotion_audit_report.inputs.policy_file does not match promotion_run_receipt.artifacts[promotion_policy].path: expected {0}, got {1}".format(
+            policy_row["path"],
+            promotion_audit_report_inputs_policy_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+workflow_row = run_receipt_rows_by_name.get("promotion_workflow")
+if workflow_row is not None and promotion_audit_report_inputs_workflow_file != workflow_row["path"]:
+    print(
+        "promotion_audit_report.inputs.workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}".format(
+            workflow_row["path"],
+            promotion_audit_report_inputs_workflow_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 run_receipt_report_file = run_receipt_payload.get("promotion_artifact_audit_report_file")
 report_row = run_receipt_rows_by_name.get("promotion_artifact_audit_report")
@@ -1239,6 +3066,132 @@ if run_receipt_report_file != run_receipt_report_file.strip():
 if report_row is not None and run_receipt_report_file != report_row["path"]:
     print(
         "promotion_run_receipt.promotion_artifact_audit_report_file does not match artifacts[promotion_artifact_audit_report].path",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_bundle_row = run_receipt_rows_by_name.get("release_bundle")
+if release_bundle_row is not None and release_receipt_bundle_relative_path != Path(release_bundle_row["path"]).name:
+    print(
+        "release_receipt.release_bundle_relative_path does not match promotion_run_receipt.artifacts[release_bundle].path basename: expected {0}, got {1}".format(
+            Path(release_bundle_row["path"]).name,
+            release_receipt_bundle_relative_path,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+release_approval_row = run_receipt_rows_by_name.get("release_approval")
+if release_approval_row is not None and release_receipt_approval_file != release_approval_row["path"]:
+    print(
+        "release_receipt.release_approval_file does not match promotion_run_receipt.artifacts[release_approval].path: expected {0}, got {1}".format(
+            release_approval_row["path"],
+            release_receipt_approval_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+run_receipt_row = run_receipt_rows_by_name.get("promotion_run_receipt")
+if run_receipt_row is not None and promotion_artifact_audit_report_run_receipt_file != run_receipt_row["path"]:
+    print(
+        "promotion_artifact_audit_report.promotion_run_receipt_file does not match promotion_run_receipt.artifacts[promotion_run_receipt].path",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+run_receipt_release_approval_key_id = run_receipt_payload.get("release_approval_key_id")
+if not isinstance(run_receipt_release_approval_key_id, str) or not run_receipt_release_approval_key_id.strip():
+    print("promotion_run_receipt.release_approval_key_id is required", file=sys.stderr)
+    sys.exit(1)
+if run_receipt_release_approval_key_id != run_receipt_release_approval_key_id.strip():
+    print(
+        "promotion_run_receipt.release_approval_key_id must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if run_receipt_release_approval_key_id != release_approval_signature_key_id:
+    print(
+        "promotion_run_receipt.release_approval_key_id mismatch with release_approval.signature.key_id: expected {0}, got {1}".format(
+            release_approval_signature_key_id,
+            run_receipt_release_approval_key_id,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if run_receipt_release_approval_key_id != release_receipt_key_id:
+    print(
+        "promotion_run_receipt.release_approval_key_id mismatch with release_receipt.release_approval_key_id: expected {0}, got {1}".format(
+            release_receipt_key_id,
+            run_receipt_release_approval_key_id,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_key_id_expected != release_approval_signature_key_id:
+    print(
+        "promotion_artifact_audit_report.release_approval_key_id_expected mismatch with release_approval.signature.key_id: expected {0}, got {1}".format(
+            release_approval_signature_key_id,
+            promotion_artifact_audit_report_key_id_expected,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_key_id_expected != release_receipt_key_id:
+    print(
+        "promotion_artifact_audit_report.release_approval_key_id_expected mismatch with release_receipt.release_approval_key_id: expected {0}, got {1}".format(
+            release_receipt_key_id,
+            promotion_artifact_audit_report_key_id_expected,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_key_id_expected != run_receipt_release_approval_key_id:
+    print(
+        "promotion_artifact_audit_report.release_approval_key_id_expected mismatch with promotion_run_receipt.release_approval_key_id: expected {0}, got {1}".format(
+            run_receipt_release_approval_key_id,
+            promotion_artifact_audit_report_key_id_expected,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+run_receipt_signature = run_receipt_payload.get("signature")
+if not isinstance(run_receipt_signature, dict):
+    print("promotion_run_receipt.signature is required", file=sys.stderr)
+    sys.exit(1)
+run_receipt_signature_algorithm = run_receipt_signature.get("algorithm")
+if run_receipt_signature_algorithm != "hmac-sha256":
+    print("promotion_run_receipt.signature.algorithm must be hmac-sha256", file=sys.stderr)
+    sys.exit(1)
+run_receipt_signature_key_id = run_receipt_signature.get("key_id")
+if not isinstance(run_receipt_signature_key_id, str) or not run_receipt_signature_key_id.strip():
+    print("promotion_run_receipt.signature.key_id is required", file=sys.stderr)
+    sys.exit(1)
+if run_receipt_signature_key_id != run_receipt_signature_key_id.strip():
+    print(
+        "promotion_run_receipt.signature.key_id must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if run_receipt_signature_key_id != run_receipt_release_approval_key_id:
+    print(
+        "promotion_run_receipt.signature.key_id mismatch with promotion_run_receipt.release_approval_key_id: expected {0}, got {1}".format(
+            run_receipt_release_approval_key_id,
+            run_receipt_signature_key_id,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+run_receipt_signature_digest = run_receipt_signature.get("digest_hex")
+if not isinstance(run_receipt_signature_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", run_receipt_signature_digest):
+    print("promotion_run_receipt.signature.digest_hex must be a 64-char lowercase hex digest", file=sys.stderr)
+    sys.exit(1)
+promotion_run_receipt_generated_at_utc, promotion_run_receipt_generated_at_dt = parse_required_iso8601_utc(
+    "promotion_run_receipt.generated_at_utc",
+    run_receipt_payload.get("generated_at_utc"),
+)
+if promotion_run_receipt_generated_at_dt < promotion_artifact_audit_report_generated_at_dt:
+    print(
+        "promotion_run_receipt.generated_at_utc must be >= promotion_artifact_audit_report.generated_at_utc; got {0} < {1}".format(
+            promotion_run_receipt_generated_at_utc,
+            promotion_artifact_audit_report_generated_at_utc,
+        ),
         file=sys.stderr,
     )
     sys.exit(1)
@@ -1270,16 +3223,313 @@ def _require_run_receipt_context_key(key: str, expected: str):
         )
         sys.exit(1)
 
+def _require_positive_integer_context_key(key: str) -> str:
+    value = run_receipt_context.get(key)
+    if not isinstance(value, str) or not value:
+        print("promotion_run_receipt.github_context missing required key: {0}".format(key), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print(
+            "promotion_run_receipt.github_context.{0} must not contain leading or trailing whitespace".format(key),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not value.isdigit():
+        print(
+            "promotion_run_receipt.github_context.{0} must be a positive integer".format(key),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return value
+
+def _require_context_key_from_run_receipt(
+    context_payload: dict,
+    context_label: str,
+    key: str,
+    *,
+    required: bool,
+):
+    expected_value = run_receipt_context.get(key)
+    if not isinstance(expected_value, str) or not expected_value:
+        if required:
+            print("promotion_run_receipt.github_context missing required key: {0}".format(key), file=sys.stderr)
+            sys.exit(1)
+        return
+    if expected_value != expected_value.strip():
+        print(
+            "promotion_run_receipt.github_context.{0} must not contain leading or trailing whitespace".format(key),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    value = context_payload.get(key)
+    if not isinstance(value, str) or not value:
+        print("{0} missing required key: {1}".format(context_label, key), file=sys.stderr)
+        sys.exit(1)
+    if value != value.strip():
+        print(
+            "{0}.{1} must not contain leading or trailing whitespace".format(context_label, key),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if value != expected_value:
+        print(
+            "{0}.{1} mismatch with promotion_run_receipt.github_context: expected {2}, got {3}".format(
+                context_label,
+                key,
+                expected_value,
+                value,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 _require_run_receipt_context_key("GITHUB_REPOSITORY", repo)
 _require_run_receipt_context_key("GITHUB_RUN_ID", run_id)
 _require_run_receipt_context_key("GITHUB_RUN_ATTEMPT", run_attempt)
 _require_run_receipt_context_key("GITHUB_ACTIONS", "true")
 _require_run_receipt_context_key("CI", "true")
 _require_run_receipt_context_key("GITHUB_REF_PROTECTED", "true")
+if "/" in repo:
+    expected_repo_owner = repo.split("/", 1)[0]
+    _require_run_receipt_context_key("GITHUB_REPOSITORY_OWNER", expected_repo_owner)
+else:
+    expected_repo_owner = ""
+repository_id_context = _require_positive_integer_context_key("GITHUB_REPOSITORY_ID")
+repository_owner_id_context = _require_positive_integer_context_key("GITHUB_REPOSITORY_OWNER_ID")
+actor_id_context = _require_positive_integer_context_key("GITHUB_ACTOR_ID")
+if not workflow_repository_id or not workflow_repository_id.isdigit():
+    print("Resolved run repository.id is not numeric.", file=sys.stderr)
+    sys.exit(1)
+if repository_id_context != workflow_repository_id:
+    print(
+        "promotion_run_receipt.github_context.GITHUB_REPOSITORY_ID mismatch with run repository.id: expected {0}, got {1}".format(
+            workflow_repository_id,
+            repository_id_context,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if not workflow_repository_owner_id or not workflow_repository_owner_id.isdigit():
+    print("Resolved run repository.owner.id is not numeric.", file=sys.stderr)
+    sys.exit(1)
+if repository_owner_id_context != workflow_repository_owner_id:
+    print(
+        "promotion_run_receipt.github_context.GITHUB_REPOSITORY_OWNER_ID mismatch with run repository.owner.id: expected {0}, got {1}".format(
+            workflow_repository_owner_id,
+            repository_owner_id_context,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if not workflow_actor_id or not workflow_actor_id.isdigit():
+    print("Resolved run actor.id is not numeric.", file=sys.stderr)
+    sys.exit(1)
+if actor_id_context != workflow_actor_id:
+    print(
+        "promotion_run_receipt.github_context.GITHUB_ACTOR_ID mismatch with run actor.id: expected {0}, got {1}".format(
+            workflow_actor_id,
+            actor_id_context,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+workflow_sha_context = run_receipt_context.get("GITHUB_WORKFLOW_SHA")
+if not isinstance(workflow_sha_context, str) or not workflow_sha_context:
+    print("promotion_run_receipt.github_context missing required key: GITHUB_WORKFLOW_SHA", file=sys.stderr)
+    sys.exit(1)
+if workflow_sha_context != workflow_sha_context.strip():
+    print(
+        "promotion_run_receipt.github_context.GITHUB_WORKFLOW_SHA must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if not re.fullmatch(r"[0-9a-f]{40}", workflow_sha_context):
+    print(
+        "promotion_run_receipt.github_context.GITHUB_WORKFLOW_SHA must be a 40-char lowercase hex digest",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+run_url_host_normalized = (workflow_run_url_host or "").strip().lower()
+expected_server_url = ""
+expected_api_url = ""
+expected_graphql_url = ""
+if run_url_host_normalized:
+    expected_server_url = "https://{0}".format(run_url_host_normalized)
+    if run_url_host_normalized == "github.com":
+        expected_api_url = "https://api.github.com"
+        expected_graphql_url = "https://api.github.com/graphql"
+    else:
+        expected_api_url = "{0}/api/v3".format(expected_server_url)
+        expected_graphql_url = "{0}/api/graphql".format(expected_server_url)
+if expected_server_url:
+    _require_run_receipt_context_key("GITHUB_SERVER_URL", expected_server_url)
+if expected_api_url:
+    _require_run_receipt_context_key("GITHUB_API_URL", expected_api_url)
+if expected_graphql_url:
+    _require_run_receipt_context_key("GITHUB_GRAPHQL_URL", expected_graphql_url)
+if workflow_head_sha:
+    if not re.fullmatch(r"[0-9a-f]{40}", workflow_head_sha):
+        print("Resolved run head_sha is not a canonical 40-char lowercase hex digest.", file=sys.stderr)
+        sys.exit(1)
+    _require_run_receipt_context_key("GITHUB_SHA", workflow_head_sha)
+if workflow_run_number:
+    if not workflow_run_number.isdigit():
+        print("Resolved run_number is not numeric.", file=sys.stderr)
+        sys.exit(1)
+    _require_run_receipt_context_key("GITHUB_RUN_NUMBER", workflow_run_number)
+if workflow_retention_days:
+    if not workflow_retention_days.isdigit():
+        print("Resolved run retention_days is not numeric.", file=sys.stderr)
+        sys.exit(1)
+    if int(workflow_retention_days) <= 0:
+        print("Resolved run retention_days must be positive.", file=sys.stderr)
+        sys.exit(1)
+    _require_run_receipt_context_key("GITHUB_RETENTION_DAYS", workflow_retention_days)
+if workflow_head_branch:
+    if workflow_head_branch != workflow_head_branch.strip():
+        print("Resolved run head_branch must not contain leading or trailing whitespace.", file=sys.stderr)
+        sys.exit(1)
+    _require_run_receipt_context_key("GITHUB_REF", "refs/heads/{0}".format(workflow_head_branch))
+    _require_run_receipt_context_key("GITHUB_REF_NAME", workflow_head_branch)
+    _require_run_receipt_context_key("GITHUB_REF_TYPE", "branch")
 if workflow_event:
     _require_run_receipt_context_key("GITHUB_EVENT_NAME", workflow_event)
+if workflow_job_id:
+    _require_run_receipt_context_key("GITHUB_JOB", workflow_job_id)
 if workflow_path_ref:
-    _require_run_receipt_context_key("GITHUB_WORKFLOW_REF", workflow_path_ref)
+    if workflow_path_ref != workflow_path_ref.strip():
+        print("Resolved run workflow path@ref identity must not contain leading or trailing whitespace.", file=sys.stderr)
+        sys.exit(1)
+    if "@" not in workflow_path_ref:
+        print("Resolved run workflow path@ref identity is invalid: {0}".format(workflow_path_ref), file=sys.stderr)
+        sys.exit(1)
+    workflow_path_ref_path, workflow_path_ref_ref = workflow_path_ref.rsplit("@", 1)
+    if not workflow_path_ref_path or not workflow_path_ref_ref:
+        print("Resolved run workflow path@ref identity is invalid: {0}".format(workflow_path_ref), file=sys.stderr)
+        sys.exit(1)
+    if workflow_path_ref_ref != workflow_path_ref_ref.strip():
+        print("Resolved run workflow ref segment must not contain leading or trailing whitespace.", file=sys.stderr)
+        sys.exit(1)
+    context_workflow_ref_value = run_receipt_context.get("GITHUB_WORKFLOW_REF")
+    if not isinstance(context_workflow_ref_value, str) or not context_workflow_ref_value:
+        print("promotion_run_receipt.github_context missing required key: GITHUB_WORKFLOW_REF", file=sys.stderr)
+        sys.exit(1)
+    if context_workflow_ref_value != context_workflow_ref_value.strip():
+        print(
+            "promotion_run_receipt.github_context.GITHUB_WORKFLOW_REF must not contain leading or trailing whitespace",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if "@" not in context_workflow_ref_value:
+        print(
+            "promotion_run_receipt.github_context.GITHUB_WORKFLOW_REF is invalid: {0}".format(
+                context_workflow_ref_value
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    context_workflow_ref_path, context_workflow_ref_ref = context_workflow_ref_value.rsplit("@", 1)
+    if not context_workflow_ref_path or not context_workflow_ref_ref:
+        print(
+            "promotion_run_receipt.github_context.GITHUB_WORKFLOW_REF is invalid: {0}".format(
+                context_workflow_ref_value
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if context_workflow_ref_ref != context_workflow_ref_ref.strip():
+        print(
+            "promotion_run_receipt.github_context.GITHUB_WORKFLOW_REF ref segment must not contain leading or trailing whitespace",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if context_workflow_ref_path != workflow_path_ref_path:
+        print(
+            "promotion_run_receipt.github_context.GITHUB_WORKFLOW_REF workflow path mismatch: expected {0}, got {1}".format(
+                workflow_path_ref_path,
+                context_workflow_ref_path,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if workflow_ref:
+        if not workflow_ref.startswith("refs/"):
+            print(
+                "Resolved run workflow_ref is not canonical for semantic parity checks: {0}".format(
+                    workflow_ref
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if context_workflow_ref_ref != workflow_ref:
+            print(
+                "promotion_run_receipt.github_context.GITHUB_WORKFLOW_REF ref mismatch: expected {0}, got {1}".format(
+                    workflow_ref,
+                    context_workflow_ref_ref,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+if promotion_workflow_name_verified:
+    _require_run_receipt_context_key("GITHUB_WORKFLOW", promotion_workflow_name_verified)
+if promotion_actor_login_verified:
+    _require_run_receipt_context_key("GITHUB_ACTOR", promotion_actor_login_verified)
+if promotion_triggering_actor_login_verified:
+    _require_run_receipt_context_key("GITHUB_TRIGGERING_ACTOR", promotion_triggering_actor_login_verified)
+if promotion_runner_name_verified:
+    _require_run_receipt_context_key("RUNNER_NAME", promotion_runner_name_verified)
+
+required_release_context_keys = (
+    "GITHUB_REPOSITORY",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_ACTIONS",
+    "CI",
+    "GITHUB_REF_PROTECTED",
+    "GITHUB_REPOSITORY_OWNER",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REPOSITORY_OWNER_ID",
+    "GITHUB_ACTOR_ID",
+    "GITHUB_RETENTION_DAYS",
+    "GITHUB_WORKFLOW_SHA",
+    "GITHUB_SERVER_URL",
+    "GITHUB_API_URL",
+    "GITHUB_GRAPHQL_URL",
+)
+optional_release_context_keys = (
+    "GITHUB_SHA",
+    "GITHUB_RUN_NUMBER",
+    "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_TYPE",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_JOB",
+    "GITHUB_WORKFLOW",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_ACTOR",
+    "GITHUB_TRIGGERING_ACTOR",
+    "RUNNER_NAME",
+)
+release_context_rows = (
+    ("release_receipt.github_context", release_receipt_context),
+    ("release_receipt.release_approval_github_context", release_receipt_approval_context),
+    ("release_approval.github_context", release_approval_context),
+)
+for release_context_label, release_context_payload in release_context_rows:
+    for required_key in required_release_context_keys:
+        _require_context_key_from_run_receipt(
+            release_context_payload,
+            release_context_label,
+            required_key,
+            required=True,
+        )
+    for optional_key in optional_release_context_keys:
+        _require_context_key_from_run_receipt(
+            release_context_payload,
+            release_context_label,
+            optional_key,
+            required=False,
+        )
 
 def _maybe_int(text: str):
     if text and text.isdigit():
@@ -1296,6 +3546,7 @@ receipt = {
     "workflow_ref": workflow_path_ref,
     "workflow_dispatch_ref": ref,
     "workflow_path": workflow_path,
+    "workflow_job_id": workflow_job_id,
     "workflow_event": workflow_event,
     "workflow_head_branch": workflow_head_branch or None,
     "workflow_head_sha": workflow_head_sha or None,
@@ -1305,6 +3556,62 @@ receipt = {
     "workflow_run_number": _maybe_int(workflow_run_number),
     "workflow_run_url": run_url,
     "workflow_run_html_url": workflow_html_url or run_url,
+    "workflow_run_url_verification": {
+        "host_summary": workflow_run_url_host or None,
+        "host_detail": workflow_run_html_url_host or None,
+        "attempt_summary": _maybe_int(workflow_run_url_attempt),
+        "attempt_detail": _maybe_int(workflow_run_html_url_attempt),
+    },
+    "workflow_run_timestamp_verification": {
+        "created_at_summary": workflow_created_at or None,
+        "started_at_summary": workflow_started_at or None,
+        "updated_at_summary": workflow_updated_at or None,
+        "created_at_detail": workflow_created_at_detail or None,
+        "started_at_detail": workflow_started_at_detail or None,
+        "updated_at_detail": workflow_updated_at_detail or None,
+    },
+    "workflow_context_verification": {
+        "repository_owner": expected_repo_owner or None,
+        "repository_id": _maybe_int(repository_id_context),
+        "repository_owner_id": _maybe_int(repository_owner_id_context),
+        "actor_id": _maybe_int(actor_id_context),
+        "run_repository_id": _maybe_int(workflow_repository_id),
+        "run_repository_owner_id": _maybe_int(workflow_repository_owner_id),
+        "run_actor_id": _maybe_int(workflow_actor_id),
+        "retention_days": _maybe_int(workflow_retention_days),
+        "workflow_sha": workflow_sha_context,
+        "server_url": expected_server_url or None,
+        "api_url": expected_api_url or None,
+        "graphql_url": expected_graphql_url or None,
+    },
+    "release_context_verification": {
+        "contexts_verified": [label for label, _ in release_context_rows],
+        "required_keys_verified": [key for key in required_release_context_keys],
+        "optional_keys_verified_when_present": [key for key in optional_release_context_keys],
+    },
+    "promotion_job_verification": {
+        "job_name": "Signed Approval Promotion Gate",
+        "job_id": _maybe_int(promotion_job_id),
+        "job_html_url": promotion_job_html_url or None,
+        "job_html_url_host": promotion_job_html_url_host_verified or None,
+        "job_html_url_path": promotion_job_html_url_path_verified or None,
+        "job_html_url_attempt": _maybe_int(promotion_job_html_url_attempt_verified),
+        "status": promotion_job_status_verified or None,
+        "conclusion": promotion_job_conclusion_verified or None,
+        "started_at": promotion_job_started_at or None,
+        "completed_at": promotion_job_completed_at or None,
+        "required_step_count_verified": _maybe_int(promotion_required_step_count_verified),
+        "rotation_step_name": promotion_rotation_step_name or None,
+        "rotation_step_conclusion": promotion_rotation_step_conclusion_verified or None,
+        "runner_name": promotion_runner_name_verified or None,
+        "runner_group_name": promotion_runner_group_name_verified or None,
+        "runner_labels": [label for label in promotion_runner_labels_verified.split("|") if label] if promotion_runner_labels_verified else [],
+        "workflow_name": promotion_workflow_name_verified or None,
+        "actor_login": promotion_actor_login_verified or None,
+        "triggering_actor_login": promotion_triggering_actor_login_verified or None,
+        "actor_parity_checked": promotion_actor_parity_checked == "true",
+        "triggering_actor_parity_checked": promotion_triggering_actor_parity_checked == "true",
+    },
     "artifact_name": artifact_name,
     "artifact_metadata": {
         "id": _maybe_int(artifact_id),
@@ -1315,6 +3622,7 @@ receipt = {
         "updated_at": artifact_updated_at or None,
         "expires_at": artifact_expires_at or None,
         "archive_download_url": artifact_archive_download_url,
+        "archive_download_url_host": artifact_archive_download_url_host or None,
         "workflow_run_id": _maybe_int(artifact_workflow_run_id),
         "workflow_head_branch": artifact_workflow_head_branch or None,
         "workflow_head_sha": artifact_workflow_head_sha or None,
@@ -1340,12 +3648,25 @@ receipt = {
         "artifact_entries_verified": sorted(required_run_receipt_entries.keys()),
         "artifact_entry_count_verified": len(required_run_receipt_entries),
     },
+    "approval_lineage_timestamps": {
+        "release_approval_approved_at_utc": release_approval_approved_at_utc,
+        "release_receipt_generated_at_utc": release_receipt_generated_at_utc,
+        "promotion_audit_report_generated_at_utc": promotion_audit_report_generated_at_utc,
+        "promotion_artifact_audit_report_generated_at_utc": promotion_artifact_audit_report_generated_at_utc,
+        "promotion_run_receipt_generated_at_utc": promotion_run_receipt_generated_at_utc,
+    },
+    "release_approval_metadata_verification": {
+        "approver_count": len(normalized_release_approval_approvers),
+        "approvers": normalized_release_approval_approvers,
+        "notes_present": release_approval_notes is not None,
+    },
     "rotation_rehearsal": rotation_rehearsal == "true",
     "rotation_report_verification": {
         "requested": rotation_requested,
         "executed": rotation_executed,
         "old_key_rejected": rotation_old_key_rejected,
         "status": rotation_status,
+        "workflow_retention_days": _maybe_int(rotation_workflow_retention_days),
     },
     "artifact_download_root": str(download_root),
     "artifacts": artifact_rows,
