@@ -2112,6 +2112,74 @@ def parse_required_iso8601_utc(label: str, value: object):
         sys.exit(1)
     return value, parsed
 
+workflow_run_started_at_detail_utc, workflow_run_started_at_detail_dt = parse_required_iso8601_utc(
+    "workflow_run_timestamp_verification.started_at_detail",
+    workflow_started_at_detail,
+)
+workflow_run_updated_at_detail_utc, workflow_run_updated_at_detail_dt = parse_required_iso8601_utc(
+    "workflow_run_timestamp_verification.updated_at_detail",
+    workflow_updated_at_detail,
+)
+if workflow_run_updated_at_detail_dt < workflow_run_started_at_detail_dt:
+    print(
+        "workflow_run_timestamp_verification.updated_at_detail must be >= workflow_run_timestamp_verification.started_at_detail; got {0} < {1}".format(
+            workflow_run_updated_at_detail_utc,
+            workflow_run_started_at_detail_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+def require_timestamp_within_workflow_run_window(label: str, value_utc: str, value_dt):
+    if value_dt < workflow_run_started_at_detail_dt:
+        print(
+            "{0} must be >= workflow_run_timestamp_verification.started_at_detail; got {1} < {2}".format(
+                label,
+                value_utc,
+                workflow_run_started_at_detail_utc,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if value_dt > workflow_run_updated_at_detail_dt:
+        print(
+            "{0} must be <= workflow_run_timestamp_verification.updated_at_detail; got {1} > {2}".format(
+                label,
+                value_utc,
+                workflow_run_updated_at_detail_utc,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+artifact_created_at_utc, artifact_created_at_dt = parse_required_iso8601_utc(
+    "artifact_metadata.created_at",
+    artifact_created_at,
+)
+artifact_updated_at_utc, artifact_updated_at_dt = parse_required_iso8601_utc(
+    "artifact_metadata.updated_at",
+    artifact_updated_at,
+)
+if artifact_updated_at_dt < artifact_created_at_dt:
+    print(
+        "artifact_metadata.updated_at must be >= artifact_metadata.created_at; got {0} < {1}".format(
+            artifact_updated_at_utc,
+            artifact_created_at_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+require_timestamp_within_workflow_run_window(
+    "artifact_metadata.created_at",
+    artifact_created_at_utc,
+    artifact_created_at_dt,
+)
+require_timestamp_within_workflow_run_window(
+    "artifact_metadata.updated_at",
+    artifact_updated_at_utc,
+    artifact_updated_at_dt,
+)
+
 def parse_required_positive_integer(label: str, value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         print("{0} is required".format(label), file=sys.stderr)
@@ -2145,14 +2213,44 @@ except Exception as exc:
 if not isinstance(rotation_report_payload, dict):
     print("rotation_rehearsal_report must be a JSON object", file=sys.stderr)
     sys.exit(1)
+if rotation_report_payload.get("schema") != "enc2sop-rotation-rehearsal/v1":
+    print(
+        "rotation_rehearsal_report schema mismatch: expected enc2sop-rotation-rehearsal/v1, got {0}".format(
+            rotation_report_payload.get("schema")
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 rotation_requested = rotation_report_payload.get("requested")
 rotation_executed = rotation_report_payload.get("executed")
 rotation_old_key_rejected = rotation_report_payload.get("old_key_rejected")
 rotation_status = rotation_report_payload.get("status")
+if not isinstance(rotation_status, str) or not rotation_status.strip():
+    print("rotation_rehearsal_report.status is required", file=sys.stderr)
+    sys.exit(1)
+if rotation_status != rotation_status.strip():
+    print("rotation_rehearsal_report.status must not contain leading or trailing whitespace", file=sys.stderr)
+    sys.exit(1)
+rotation_details = rotation_report_payload.get("details")
+if not isinstance(rotation_details, str) or not rotation_details.strip():
+    print("rotation_rehearsal_report.details is required", file=sys.stderr)
+    sys.exit(1)
+if rotation_details != rotation_details.strip():
+    print("rotation_rehearsal_report.details must not contain leading or trailing whitespace", file=sys.stderr)
+    sys.exit(1)
+rotation_report_generated_at_utc, rotation_report_generated_at_dt = parse_required_iso8601_utc(
+    "rotation_rehearsal_report.generated_at_utc",
+    rotation_report_payload.get("generated_at_utc"),
+)
 rotation_workflow_retention_days = parse_required_positive_integer(
     "rotation_rehearsal_report.workflow_retention_days",
     rotation_report_payload.get("workflow_retention_days"),
+)
+require_timestamp_within_workflow_run_window(
+    "rotation_rehearsal_report.generated_at_utc",
+    rotation_report_generated_at_utc,
+    rotation_report_generated_at_dt,
 )
 if not workflow_retention_days or not workflow_retention_days.isdigit():
     print("Resolved run retention_days is not numeric.", file=sys.stderr)
@@ -2189,10 +2287,16 @@ if rotation_rehearsal == "true":
         )
         sys.exit(1)
 else:
-    if rotation_requested not in (False, None):
+    if rotation_requested is not False:
         print("rotation_rehearsal_report.requested must be false when rotation rehearsal is not required", file=sys.stderr)
         sys.exit(1)
-    if rotation_status not in ("not-requested", None):
+    if rotation_executed is not False:
+        print("rotation_rehearsal_report.executed must be false when rotation rehearsal is not required", file=sys.stderr)
+        sys.exit(1)
+    if rotation_old_key_rejected is not None:
+        print("rotation_rehearsal_report.old_key_rejected must be null when rotation rehearsal is not required", file=sys.stderr)
+        sys.exit(1)
+    if rotation_status != "not-requested":
         print(
             "rotation_rehearsal_report.status must be not-requested when rotation rehearsal is not required; got {0}".format(
                 rotation_status
@@ -2211,10 +2315,57 @@ required_bundle_entries = {
     "promotion_artifact_audit_report": ("ops/promotion_artifact_audit_report.json", "promotion_artifact_audit_report.json"),
     "promotion_run_receipt": ("ops/promotion_run_receipt.json", "promotion_run_receipt.json"),
 }
+required_bundle_entry_names = set(required_bundle_entries) | {"promotion_policy", "promotion_workflow"}
 
 bundle_archive_path = resolved["promotion_artifact_bundle.zip"]
 try:
     with zipfile.ZipFile(bundle_archive_path, "r") as bundle_archive:
+        bundle_archive_member_paths = []
+        bundle_archive_member_path_set = set()
+        bundle_archive_member_sha256 = {}
+        for entry in bundle_archive.infolist():
+            normalized_entry_name = entry.filename.replace("\\", "/")
+            if normalized_entry_name != entry.filename:
+                print(
+                    "promotion_artifact_bundle.zip member path must use forward slashes: {0}".format(entry.filename),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if not normalized_entry_name or normalized_entry_name.startswith("/"):
+                print(
+                    "promotion_artifact_bundle.zip member path is not relative: {0}".format(entry.filename),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if any(segment in ("", ".", "..") for segment in normalized_entry_name.split("/")):
+                print(
+                    "promotion_artifact_bundle.zip member path traversal detected: {0}".format(entry.filename),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                print(
+                    "promotion_artifact_bundle.zip contains symlink entry: {0}".format(entry.filename),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if entry.is_dir():
+                print(
+                    "promotion_artifact_bundle.zip contains undeclared directory entry: {0}".format(entry.filename),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if normalized_entry_name in bundle_archive_member_path_set:
+                print(
+                    "promotion_artifact_bundle.zip contains duplicate member path: {0}".format(normalized_entry_name),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            bundle_archive_member_path_set.add(normalized_entry_name)
+            bundle_archive_member_paths.append(normalized_entry_name)
+            bundle_archive_member_sha256[normalized_entry_name] = hashlib.sha256(
+                bundle_archive.read(entry.filename)
+            ).hexdigest()
         try:
             bundle_manifest_bytes = bundle_archive.read("bundle_manifest.json")
         except KeyError:
@@ -2250,8 +2401,23 @@ bundle_manifest_rows = bundle_manifest_payload.get("files")
 if not isinstance(bundle_manifest_rows, list):
     print("bundle_manifest.files must be a list", file=sys.stderr)
     sys.exit(1)
+bundle_manifest_file_count = bundle_manifest_payload.get("file_count")
+if not isinstance(bundle_manifest_file_count, int) or isinstance(bundle_manifest_file_count, bool):
+    print("bundle_manifest.file_count must be an integer", file=sys.stderr)
+    sys.exit(1)
+if bundle_manifest_file_count != len(bundle_manifest_rows):
+    print(
+        "bundle_manifest.file_count must match length of bundle_manifest.files: expected {0}, got {1}".format(
+            len(bundle_manifest_rows),
+            bundle_manifest_file_count,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 bundle_rows_by_name = {}
+bundle_manifest_archive_paths = []
+bundle_manifest_archive_path_set = set()
 for index, row in enumerate(bundle_manifest_rows):
     if not isinstance(row, dict):
         print("bundle_manifest.files[{0}] must be an object".format(index), file=sys.stderr)
@@ -2268,16 +2434,72 @@ for index, row in enumerate(bundle_manifest_rows):
     if not isinstance(archive_path, str) or not archive_path.strip():
         print("bundle_manifest.files[{0}].archive_path is required".format(index), file=sys.stderr)
         sys.exit(1)
+    if archive_path != archive_path.strip():
+        print("bundle_manifest.files[{0}].archive_path must not contain leading or trailing whitespace".format(index), file=sys.stderr)
+        sys.exit(1)
+    if "\\" in archive_path or archive_path.startswith("/"):
+        print("bundle_manifest.files[{0}].archive_path must be a relative forward-slash path".format(index), file=sys.stderr)
+        sys.exit(1)
+    if any(segment in ("", ".", "..") for segment in archive_path.split("/")):
+        print("bundle_manifest.files[{0}].archive_path contains traversal or empty path segment".format(index), file=sys.stderr)
+        sys.exit(1)
+    if archive_path == "bundle_manifest.json":
+        print("bundle_manifest.files[{0}].archive_path must not target bundle_manifest.json".format(index), file=sys.stderr)
+        sys.exit(1)
+    if archive_path in bundle_manifest_archive_path_set:
+        print("bundle_manifest.files duplicate archive_path: {0}".format(archive_path), file=sys.stderr)
+        sys.exit(1)
     if not isinstance(digest_hex, str) or len(digest_hex) != 64 or any(ch not in "0123456789abcdef" for ch in digest_hex):
         print(
             "bundle_manifest.files[{0}].sha256 must be a 64-char lowercase hex digest".format(index),
             file=sys.stderr,
         )
         sys.exit(1)
+    archive_member_digest = bundle_archive_member_sha256.get(archive_path)
+    if archive_member_digest is not None and digest_hex != archive_member_digest:
+        print(
+            "bundle_manifest.files[{0}].sha256 mismatch with promotion_artifact_bundle.zip member {1}: expected {2}, got {3}".format(
+                index,
+                archive_path,
+                archive_member_digest,
+                digest_hex,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    bundle_manifest_archive_path_set.add(archive_path)
+    bundle_manifest_archive_paths.append(archive_path)
     bundle_rows_by_name[name] = {
         "archive_path": archive_path,
         "sha256": digest_hex,
     }
+
+actual_bundle_entry_names = set(bundle_rows_by_name)
+if actual_bundle_entry_names != required_bundle_entry_names:
+    missing_entry_names = sorted(required_bundle_entry_names - actual_bundle_entry_names)
+    extra_entry_names = sorted(actual_bundle_entry_names - required_bundle_entry_names)
+    print(
+        "bundle_manifest.files names must exactly match required promotion evidence entries; missing={0}; extra={1}".format(
+            ", ".join(missing_entry_names) if missing_entry_names else "<none>",
+            ", ".join(extra_entry_names) if extra_entry_names else "<none>",
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+expected_bundle_archive_paths = sorted(bundle_manifest_archive_path_set | {"bundle_manifest.json"})
+actual_bundle_archive_paths = sorted(bundle_archive_member_path_set)
+if actual_bundle_archive_paths != expected_bundle_archive_paths:
+    missing_archive_paths = sorted(set(expected_bundle_archive_paths) - set(actual_bundle_archive_paths))
+    extra_archive_paths = sorted(set(actual_bundle_archive_paths) - set(expected_bundle_archive_paths))
+    print(
+        "promotion_artifact_bundle.zip entries must exactly match bundle_manifest.files archive_path values plus bundle_manifest.json; missing={0}; extra={1}".format(
+            ", ".join(missing_archive_paths) if missing_archive_paths else "<none>",
+            ", ".join(extra_archive_paths) if extra_archive_paths else "<none>",
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 for bundle_name, (expected_archive_path, expected_filename) in required_bundle_entries.items():
     row = bundle_rows_by_name.get(bundle_name)
@@ -2301,6 +2523,17 @@ for bundle_name, (expected_archive_path, expected_filename) in required_bundle_e
                 bundle_name,
                 expected_digest,
                 row["sha256"],
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    archive_member_digest = bundle_archive_member_sha256.get(row["archive_path"])
+    if archive_member_digest != expected_digest:
+        print(
+            "promotion_artifact_bundle.zip member digest mismatch for {0}: expected {1}, got {2}".format(
+                bundle_name,
+                expected_digest,
+                archive_member_digest or "<missing>",
             ),
             file=sys.stderr,
         )
@@ -2333,12 +2566,19 @@ promotion_audit_report_summary = promotion_audit_report_payload.get("summary")
 if not isinstance(promotion_audit_report_summary, dict):
     print("promotion_audit_report.summary must be an object", file=sys.stderr)
     sys.exit(1)
-if promotion_audit_report_summary.get("total_failures") != 0:
+promotion_audit_report_total_failures = promotion_audit_report_summary.get("total_failures")
+if not isinstance(promotion_audit_report_total_failures, int) or isinstance(promotion_audit_report_total_failures, bool):
+    print("promotion_audit_report.summary.total_failures must be an integer", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_total_failures != 0:
     print("promotion_audit_report.summary.total_failures must be 0", file=sys.stderr)
     sys.exit(1)
 promotion_audit_report_failures = promotion_audit_report_payload.get("failures")
 if not isinstance(promotion_audit_report_failures, list):
     print("promotion_audit_report.failures must be a list", file=sys.stderr)
+    sys.exit(1)
+if promotion_audit_report_total_failures != len(promotion_audit_report_failures):
+    print("promotion_audit_report.summary.total_failures must match length of promotion_audit_report.failures", file=sys.stderr)
     sys.exit(1)
 if promotion_audit_report_failures:
     print("promotion_audit_report.failures must be empty when report passed=true", file=sys.stderr)
@@ -2351,15 +2591,6 @@ promotion_audit_report_generated_at_utc, promotion_audit_report_generated_at_dt 
     "promotion_audit_report.generated_at_utc",
     promotion_audit_report_payload.get("generated_at_utc"),
 )
-if promotion_audit_report_generated_at_dt < release_receipt_generated_at_dt:
-    print(
-        "promotion_audit_report.generated_at_utc must be >= release_receipt.generated_at_utc; got {0} < {1}".format(
-            promotion_audit_report_generated_at_utc,
-            release_receipt_generated_at_utc,
-        ),
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
 promotion_audit_report_inputs_evidence_file = promotion_audit_report_inputs.get("evidence_file")
 if not isinstance(promotion_audit_report_inputs_evidence_file, str) or not promotion_audit_report_inputs_evidence_file.strip():
@@ -2413,6 +2644,20 @@ if not isinstance(promotion_audit_report_inputs_policy_sha256, str) or not re.fu
     )
     sys.exit(1)
 bundle_policy_row = bundle_rows_by_name.get("promotion_policy")
+if bundle_policy_row is None:
+    print(
+        "bundle_manifest missing required entry: promotion_policy",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if bundle_policy_row["archive_path"] != "policy/promotion_rollout_policy.json":
+    print(
+        "bundle_manifest archive_path mismatch for promotion_policy: expected policy/promotion_rollout_policy.json, got {0}".format(
+            bundle_policy_row["archive_path"]
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 if bundle_policy_row is not None and promotion_audit_report_inputs_policy_sha256 != bundle_policy_row["sha256"]:
     print(
         "promotion_audit_report.inputs.policy_sha256 mismatch with promotion_policy bundle entry: expected {0}, got {1}".format(
@@ -2444,6 +2689,20 @@ if not isinstance(promotion_audit_report_inputs_workflow_sha256, str) or not re.
     )
     sys.exit(1)
 bundle_workflow_row = bundle_rows_by_name.get("promotion_workflow")
+if bundle_workflow_row is None:
+    print(
+        "bundle_manifest missing required entry: promotion_workflow",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if bundle_workflow_row["archive_path"] != "workflow/release_promotion.yml":
+    print(
+        "bundle_manifest archive_path mismatch for promotion_workflow: expected workflow/release_promotion.yml, got {0}".format(
+            bundle_workflow_row["archive_path"]
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 if bundle_workflow_row is not None and promotion_audit_report_inputs_workflow_sha256 != bundle_workflow_row["sha256"]:
     print(
         "promotion_audit_report.inputs.workflow_sha256 mismatch with promotion_workflow bundle entry: expected {0}, got {1}".format(
@@ -2484,8 +2743,22 @@ promotion_artifact_audit_report_summary = promotion_artifact_audit_report_payloa
 if not isinstance(promotion_artifact_audit_report_summary, dict):
     print("promotion_artifact_audit_report.summary must be an object", file=sys.stderr)
     sys.exit(1)
-if promotion_artifact_audit_report_summary.get("total_failures") != 0:
+promotion_artifact_audit_report_total_failures = promotion_artifact_audit_report_summary.get("total_failures")
+if not isinstance(promotion_artifact_audit_report_total_failures, int) or isinstance(promotion_artifact_audit_report_total_failures, bool):
+    print("promotion_artifact_audit_report.summary.total_failures must be an integer", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_total_failures != 0:
     print("promotion_artifact_audit_report.summary.total_failures must be 0", file=sys.stderr)
+    sys.exit(1)
+promotion_artifact_audit_report_failures = promotion_artifact_audit_report_payload.get("failures")
+if not isinstance(promotion_artifact_audit_report_failures, list):
+    print("promotion_artifact_audit_report.failures must be a list", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_total_failures != len(promotion_artifact_audit_report_failures):
+    print("promotion_artifact_audit_report.summary.total_failures must match length of promotion_artifact_audit_report.failures", file=sys.stderr)
+    sys.exit(1)
+if promotion_artifact_audit_report_failures:
+    print("promotion_artifact_audit_report.failures must be empty when report passed=true", file=sys.stderr)
     sys.exit(1)
 promotion_artifact_audit_report_generated_at_utc, promotion_artifact_audit_report_generated_at_dt = parse_required_iso8601_utc(
     "promotion_artifact_audit_report.generated_at_utc",
@@ -2500,6 +2773,20 @@ if promotion_artifact_audit_report_generated_at_dt < promotion_audit_report_gene
         file=sys.stderr,
     )
     sys.exit(1)
+if rotation_report_generated_at_dt > promotion_artifact_audit_report_generated_at_dt:
+    print(
+        "rotation_rehearsal_report.generated_at_utc must be <= promotion_artifact_audit_report.generated_at_utc; got {0} > {1}".format(
+            rotation_report_generated_at_utc,
+            promotion_artifact_audit_report_generated_at_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+require_timestamp_within_workflow_run_window(
+    "promotion_artifact_audit_report.generated_at_utc",
+    promotion_artifact_audit_report_generated_at_utc,
+    promotion_artifact_audit_report_generated_at_dt,
+)
 promotion_artifact_audit_report_release_dir = promotion_artifact_audit_report_payload.get("release_dir")
 if not isinstance(promotion_artifact_audit_report_release_dir, str) or not promotion_artifact_audit_report_release_dir.strip():
     print("promotion_artifact_audit_report.release_dir is required", file=sys.stderr)
@@ -2563,6 +2850,24 @@ if (
 if promotion_artifact_audit_report_workflow_file != promotion_artifact_audit_report_workflow_file.strip():
     print(
         "promotion_artifact_audit_report.promotion_workflow_file must not contain leading or trailing whitespace",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_policy_file != promotion_audit_report_inputs_policy_file:
+    print(
+        "promotion_artifact_audit_report.promotion_policy_file does not match promotion_audit_report.inputs.policy_file: expected {0}, got {1}".format(
+            promotion_audit_report_inputs_policy_file,
+            promotion_artifact_audit_report_policy_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_workflow_file != promotion_audit_report_inputs_workflow_file:
+    print(
+        "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_audit_report.inputs.workflow_file: expected {0}, got {1}".format(
+            promotion_audit_report_inputs_workflow_file,
+            promotion_artifact_audit_report_workflow_file,
+        ),
         file=sys.stderr,
     )
     sys.exit(1)
@@ -2701,6 +3006,11 @@ if release_approval_bundle_sha256 != actual_release_bundle_sha256:
 release_approval_approved_at_utc, release_approval_approved_at_dt = parse_required_iso8601_utc(
     "release_approval.approved_at_utc",
     release_approval_payload.get("approved_at_utc"),
+)
+require_timestamp_within_workflow_run_window(
+    "release_approval.approved_at_utc",
+    release_approval_approved_at_utc,
+    release_approval_approved_at_dt,
 )
 release_approval_approvers = release_approval_payload.get("approvers")
 if not isinstance(release_approval_approvers, list) or not release_approval_approvers:
@@ -2872,6 +3182,25 @@ if release_receipt_generated_at_dt < release_approval_approved_at_dt:
         file=sys.stderr,
     )
     sys.exit(1)
+require_timestamp_within_workflow_run_window(
+    "release_receipt.generated_at_utc",
+    release_receipt_generated_at_utc,
+    release_receipt_generated_at_dt,
+)
+if promotion_audit_report_generated_at_dt < release_receipt_generated_at_dt:
+    print(
+        "promotion_audit_report.generated_at_utc must be >= release_receipt.generated_at_utc; got {0} < {1}".format(
+            promotion_audit_report_generated_at_utc,
+            release_receipt_generated_at_utc,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+require_timestamp_within_workflow_run_window(
+    "promotion_audit_report.generated_at_utc",
+    promotion_audit_report_generated_at_utc,
+    promotion_audit_report_generated_at_dt,
+)
 release_receipt_context = release_receipt_payload.get("github_context")
 if not isinstance(release_receipt_context, dict):
     print("release_receipt.github_context must be a JSON object", file=sys.stderr)
@@ -2930,6 +3259,8 @@ required_run_receipt_entries = {
     "promotion_evidence": "promotion_evidence.json",
     "promotion_audit_report": "promotion_audit_report.json",
     "rotation_rehearsal_report": "rotation_rehearsal_report.json",
+    "promotion_policy": "promotion_rollout_policy.json",
+    "promotion_workflow": "release_promotion.yml",
     "promotion_artifact_audit_report": "promotion_artifact_audit_report.json",
 }
 
@@ -3032,7 +3363,13 @@ for binding_label, binding_value, artifact_name in report_binding_rows:
         )
         sys.exit(1)
 policy_row = run_receipt_rows_by_name.get("promotion_policy")
-if policy_row is not None and promotion_audit_report_inputs_policy_file != policy_row["path"]:
+if policy_row is None:
+    print(
+        "promotion_run_receipt.artifacts missing required entry: promotion_policy",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_audit_report_inputs_policy_file != policy_row["path"]:
     print(
         "promotion_audit_report.inputs.policy_file does not match promotion_run_receipt.artifacts[promotion_policy].path: expected {0}, got {1}".format(
             policy_row["path"],
@@ -3041,12 +3378,36 @@ if policy_row is not None and promotion_audit_report_inputs_policy_file != polic
         file=sys.stderr,
     )
     sys.exit(1)
+if promotion_artifact_audit_report_policy_file != policy_row["path"]:
+    print(
+        "promotion_artifact_audit_report.promotion_policy_file does not match promotion_run_receipt.artifacts[promotion_policy].path: expected {0}, got {1}".format(
+            policy_row["path"],
+            promotion_artifact_audit_report_policy_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 workflow_row = run_receipt_rows_by_name.get("promotion_workflow")
-if workflow_row is not None and promotion_audit_report_inputs_workflow_file != workflow_row["path"]:
+if workflow_row is None:
+    print(
+        "promotion_run_receipt.artifacts missing required entry: promotion_workflow",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_audit_report_inputs_workflow_file != workflow_row["path"]:
     print(
         "promotion_audit_report.inputs.workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}".format(
             workflow_row["path"],
             promotion_audit_report_inputs_workflow_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if promotion_artifact_audit_report_workflow_file != workflow_row["path"]:
+    print(
+        "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}".format(
+            workflow_row["path"],
+            promotion_artifact_audit_report_workflow_file,
         ),
         file=sys.stderr,
     )
@@ -3195,6 +3556,11 @@ if promotion_run_receipt_generated_at_dt < promotion_artifact_audit_report_gener
         file=sys.stderr,
     )
     sys.exit(1)
+require_timestamp_within_workflow_run_window(
+    "promotion_run_receipt.generated_at_utc",
+    promotion_run_receipt_generated_at_utc,
+    promotion_run_receipt_generated_at_dt,
+)
 
 run_receipt_context = run_receipt_payload.get("github_context")
 if not isinstance(run_receipt_context, dict):
@@ -3479,6 +3845,120 @@ if promotion_triggering_actor_login_verified:
 if promotion_runner_name_verified:
     _require_run_receipt_context_key("RUNNER_NAME", promotion_runner_name_verified)
 
+rotation_required_context_map = (
+    ("workflow_repository", "GITHUB_REPOSITORY"),
+    ("workflow_run_id", "GITHUB_RUN_ID"),
+    ("workflow_run_attempt", "GITHUB_RUN_ATTEMPT"),
+    ("workflow_github_actions", "GITHUB_ACTIONS"),
+    ("workflow_ci", "CI"),
+    ("workflow_runner_environment", "RUNNER_ENVIRONMENT"),
+    ("workflow_runner_os", "RUNNER_OS"),
+    ("workflow_runner_arch", "RUNNER_ARCH"),
+    ("workflow_retention_days", "GITHUB_RETENTION_DAYS"),
+    ("workflow_job", "GITHUB_JOB"),
+    ("workflow_actor_id", "GITHUB_ACTOR_ID"),
+    ("workflow_repository_id", "GITHUB_REPOSITORY_ID"),
+    ("workflow_repository_owner", "GITHUB_REPOSITORY_OWNER"),
+    ("workflow_repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
+    ("workflow_ref_protected", "GITHUB_REF_PROTECTED"),
+    ("workflow_name_sha", "GITHUB_WORKFLOW_SHA"),
+    ("workflow_server_url", "GITHUB_SERVER_URL"),
+    ("workflow_api_url", "GITHUB_API_URL"),
+    ("workflow_graphql_url", "GITHUB_GRAPHQL_URL"),
+)
+rotation_optional_context_map = (
+    ("workflow_sha", "GITHUB_SHA"),
+    ("workflow_run_number", "GITHUB_RUN_NUMBER"),
+    ("workflow_ref", "GITHUB_REF"),
+    ("workflow_ref_name", "GITHUB_REF_NAME"),
+    ("workflow_ref_type", "GITHUB_REF_TYPE"),
+    ("workflow_event", "GITHUB_EVENT_NAME"),
+    ("workflow_name", "GITHUB_WORKFLOW"),
+    ("workflow_name_ref", "GITHUB_WORKFLOW_REF"),
+    ("workflow_actor", "GITHUB_ACTOR"),
+    ("workflow_triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
+    ("workflow_runner_name", "RUNNER_NAME"),
+)
+
+for rotation_field, context_key in rotation_required_context_map:
+    expected_value = run_receipt_context.get(context_key)
+    if not isinstance(expected_value, str) or not expected_value:
+        print("promotion_run_receipt.github_context missing required key: {0}".format(context_key), file=sys.stderr)
+        sys.exit(1)
+    if expected_value != expected_value.strip():
+        print(
+            "promotion_run_receipt.github_context.{0} must not contain leading or trailing whitespace".format(
+                context_key
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    rotation_value = rotation_report_payload.get(rotation_field)
+    if not isinstance(rotation_value, str) or not rotation_value:
+        print("rotation_rehearsal_report.{0} is required".format(rotation_field), file=sys.stderr)
+        sys.exit(1)
+    if rotation_value != rotation_value.strip():
+        print(
+            "rotation_rehearsal_report.{0} must not contain leading or trailing whitespace".format(
+                rotation_field
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if rotation_value != expected_value:
+        print(
+            "rotation_rehearsal_report.{0} mismatch with promotion_run_receipt.github_context.{1}: expected {2}, got {3}".format(
+                rotation_field,
+                context_key,
+                expected_value,
+                rotation_value,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+for rotation_field, context_key in rotation_optional_context_map:
+    expected_value = run_receipt_context.get(context_key)
+    if not isinstance(expected_value, str) or not expected_value:
+        continue
+    if expected_value != expected_value.strip():
+        print(
+            "promotion_run_receipt.github_context.{0} must not contain leading or trailing whitespace".format(
+                context_key
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    rotation_value = rotation_report_payload.get(rotation_field)
+    if not isinstance(rotation_value, str) or not rotation_value:
+        print(
+            "rotation_rehearsal_report.{0} is required when promotion_run_receipt.github_context.{1} is present".format(
+                rotation_field,
+                context_key,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if rotation_value != rotation_value.strip():
+        print(
+            "rotation_rehearsal_report.{0} must not contain leading or trailing whitespace".format(
+                rotation_field
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if rotation_value != expected_value:
+        print(
+            "rotation_rehearsal_report.{0} mismatch with promotion_run_receipt.github_context.{1}: expected {2}, got {3}".format(
+                rotation_field,
+                context_key,
+                expected_value,
+                rotation_value,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 required_release_context_keys = (
     "GITHUB_REPOSITORY",
     "GITHUB_RUN_ID",
@@ -3639,6 +4119,12 @@ receipt = {
         "required_entries_verified": sorted(required_bundle_entries.keys()),
         "required_entry_count_verified": len(required_bundle_entries),
         "file_count_reported": _maybe_int(str(bundle_manifest_payload.get("file_count"))),
+        "archive_entries_verified": actual_bundle_archive_paths,
+        "archive_entry_count_verified": len(actual_bundle_archive_paths),
+        "archive_member_sha256": {
+            path: bundle_archive_member_sha256[path]
+            for path in actual_bundle_archive_paths
+        },
         "manifest_sha256": hashlib.sha256(bundle_manifest_bytes).hexdigest(),
     },
     "promotion_run_receipt_verification": {
@@ -3662,11 +4148,15 @@ receipt = {
     },
     "rotation_rehearsal": rotation_rehearsal == "true",
     "rotation_report_verification": {
+        "generated_at_utc": rotation_report_generated_at_utc,
         "requested": rotation_requested,
         "executed": rotation_executed,
         "old_key_rejected": rotation_old_key_rejected,
         "status": rotation_status,
+        "details": rotation_details,
         "workflow_retention_days": _maybe_int(rotation_workflow_retention_days),
+        "context_required_keys_verified": [context_key for _, context_key in rotation_required_context_map],
+        "context_optional_keys_verified_when_present": [context_key for _, context_key in rotation_optional_context_map],
     },
     "artifact_download_root": str(download_root),
     "artifacts": artifact_rows,

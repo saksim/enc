@@ -1850,6 +1850,201 @@ Current go-live gate note (2026-05-07):
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
 
+- As of 2026-05-23 (iteration 133), `ENC-P0-016` tightens promotion artifact-audit failure-list semantics during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `promotion_artifact_audit_report.json` proves coherent pass-state failure accounting:
+    - `promotion_artifact_audit_report.failures` must be present as a list,
+    - when `promotion_artifact_audit_report.passed=true`, `promotion_artifact_audit_report.failures` must be empty.
+  - this closes a residual replay ambiguity where `passed=true` and `summary.total_failures=0` could coexist with a malformed/non-empty failure payload and still be accepted by the capture gate.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 134), `ENC-P0-016` tightens promotion report summary-count coherence during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless both promotion reports prove typed and coherent failure-count semantics:
+    - `promotion_audit_report.summary.total_failures` must be integer-typed and equal `len(promotion_audit_report.failures)`.
+    - `promotion_artifact_audit_report.summary.total_failures` must be integer-typed and equal `len(promotion_artifact_audit_report.failures)`.
+  - this closes residual ambiguity where boolean/non-integer or inconsistent failure-count metadata could otherwise pass shallow `summary.total_failures=0` checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 135), `ENC-P0-016` tightens rotation-report provenance parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `rotation_rehearsal_report.json` is schema-valid and context/timeline-coherent with verified run metadata plus `promotion_run_receipt.github_context`:
+    - requires `rotation_rehearsal_report.schema=enc2sop-rotation-rehearsal/v1`.
+    - requires `rotation_rehearsal_report.generated_at_utc` as canonical ISO-8601 and enforces ordering:
+      - `rotation_rehearsal_report.generated_at_utc <= promotion_artifact_audit_report.generated_at_utc`.
+    - enforces required context-key parity:
+      - `workflow_repository`, `workflow_run_id`, `workflow_run_attempt`, `workflow_github_actions`, `workflow_ci`,
+      - `workflow_retention_days`, `workflow_job`, `workflow_actor_id`, `workflow_repository_id`,
+      - `workflow_repository_owner`, `workflow_repository_owner_id`, `workflow_ref_protected`,
+      - `workflow_name_sha`, `workflow_server_url`, `workflow_api_url`, `workflow_graphql_url`.
+    - enforces optional context-key parity when present in run-receipt context:
+      - `workflow_sha`, `workflow_run_number`, `workflow_ref`, `workflow_ref_name`, `workflow_ref_type`,
+      - `workflow_event`, `workflow_name`, `workflow_name_ref`, `workflow_actor`,
+      - `workflow_triggering_actor`, `workflow_runner_name`.
+  - promotion capture receipts now include stronger rotation verification metadata:
+    - `rotation_report_verification.generated_at_utc`,
+    - `rotation_report_verification.context_required_keys_verified`,
+    - `rotation_report_verification.context_optional_keys_verified_when_present`.
+  - this reduces residual replay ambiguity where rotation pass-state booleans and retention checks could pass while rotation-report workflow identity fields drifted from archived run-receipt context.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 136), `ENC-P0-016` tightens runner-platform provenance parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless required rotation-report context parity also includes runner-platform identity keys:
+    - `rotation_rehearsal_report.workflow_runner_environment` vs `promotion_run_receipt.github_context.RUNNER_ENVIRONMENT`,
+    - `rotation_rehearsal_report.workflow_runner_os` vs `promotion_run_receipt.github_context.RUNNER_OS`,
+    - `rotation_rehearsal_report.workflow_runner_arch` vs `promotion_run_receipt.github_context.RUNNER_ARCH`.
+  - this reduces residual replay ambiguity where rotation report checks could pass while runner platform metadata drifted from archived run-receipt context.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 137), `ENC-P0-016` tightens workflow-window timeline provenance during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless workflow run timing and archived artifact timelines are window-coherent:
+    - validates `workflow_run_timestamp_verification.started_at_detail` and `workflow_run_timestamp_verification.updated_at_detail` as canonical ISO-8601 and enforces `updated_at_detail >= started_at_detail`.
+    - enforces workflow-window bounds for all replay-critical artifact timestamps:
+      - `rotation_rehearsal_report.generated_at_utc`,
+      - `release_approval.approved_at_utc`,
+      - `release_receipt.generated_at_utc`,
+      - `promotion_audit_report.generated_at_utc`,
+      - `promotion_artifact_audit_report.generated_at_utc`,
+      - `promotion_run_receipt.generated_at_utc`.
+  - the capture script also corrects sequencing of the existing chronology invariant so `promotion_audit_report.generated_at_utc >= release_receipt.generated_at_utc` is evaluated only after `release_receipt.generated_at_utc` has been parsed.
+  - this reduces residual replay ambiguity where timeline data could satisfy inter-artifact relative ordering while drifting outside the authoritative run execution window.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 138), `ENC-P0-016` tightens rotation-report execution-state semantics during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `rotation_rehearsal_report.json` includes canonical execution-state metadata:
+    - `rotation_rehearsal_report.details` must be present, trimmed, and non-empty.
+    - capture receipts now archive `rotation_report_verification.details` for replay handoff.
+  - when rotation rehearsal is not required, capture now fail-closes on contradictory execution-state drift:
+    - `rotation_rehearsal_report.executed` must be `false`/absent,
+    - `rotation_rehearsal_report.old_key_rejected` must be `null`.
+  - this reduces residual replay ambiguity where `status=not-requested` could coexist with contradictory execution-state fields and still pass capture.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 139), `ENC-P0-016` tightens explicit non-rehearsal rotation-state encoding during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `rotation_rehearsal_report.status` is always present and canonical:
+    - `rotation_rehearsal_report.status` must be non-empty and trimmed in all modes.
+  - when rotation rehearsal is not required, capture now enforces explicit canonical state (not implicit/omitted):
+    - `rotation_rehearsal_report.requested` must be explicit `false`,
+    - `rotation_rehearsal_report.executed` must be explicit `false`,
+    - `rotation_rehearsal_report.old_key_rejected` must be `null`,
+    - `rotation_rehearsal_report.status` must be explicit `not-requested`.
+  - this reduces residual replay ambiguity where absent status/requested fields could still be interpreted as equivalent to non-rehearsal state.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 140), `ENC-P0-016` tightens artifact timestamp workflow-window provenance during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless promotion artifact metadata timelines are canonical and bounded by authoritative run-detail timing:
+    - requires `artifact_metadata.created_at` and `artifact_metadata.updated_at` as canonical ISO-8601 UTC timestamps.
+    - enforces artifact chronology invariant:
+      - `artifact_metadata.updated_at >= artifact_metadata.created_at`.
+    - enforces workflow-window bounds:
+      - `artifact_metadata.created_at >= workflow_run_timestamp_verification.started_at_detail`,
+      - `artifact_metadata.updated_at <= workflow_run_timestamp_verification.updated_at_detail`.
+  - this reduces residual replay ambiguity where report/receipt timestamps could satisfy run-window checks while downloaded artifact metadata drifted outside the same workflow execution window.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 141), `ENC-P0-016` tightens policy/workflow bundle-entry determinism during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `bundle_manifest.json` explicitly contains canonical promotion-input provenance entries:
+    - required `promotion_policy` bundle entry with `archive_path=policy/promotion_rollout_policy.json`,
+    - required `promotion_workflow` bundle entry with `archive_path=workflow/release_promotion.yml`.
+  - digest parity checks remain enforced between `promotion_audit_report.inputs.{policy_sha256,workflow_sha256}` and corresponding bundle-entry digests.
+  - this reduces residual replay ambiguity where promotion-input digest checks could pass while policy/workflow bundle-entry presence/path determinism remained implicit.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 142), `ENC-P0-016` tightens policy/workflow run-receipt provenance determinism during live promotion evidence capture:
+  - `enc2sop/promotion_artifacts.py` now emits and validates canonical policy/workflow lineage entries directly in `promotion_run_receipt.json`:
+    - run-receipt artifact inventory now requires `promotion_policy` and `promotion_workflow` rows.
+    - existing run-receipt binding checks now fail closed unless those rows are present and digest/path-coherent with the same `policy_path`/`workflow_path` inputs used by promotion audit and artifact audit.
+  - this reduces residual replay ambiguity where bundle-manifest and audit-input provenance checks could pass while run-receipt lineage omitted policy/workflow artifacts.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 143), `ENC-P0-016` tightens cross-report policy/workflow path parity during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless policy/workflow file-path lineage is coherent across all replay-critical reports:
+    - `promotion_artifact_audit_report.promotion_policy_file == promotion_audit_report.inputs.policy_file`.
+    - `promotion_artifact_audit_report.promotion_workflow_file == promotion_audit_report.inputs.workflow_file`.
+    - `promotion_artifact_audit_report.promotion_policy_file == promotion_run_receipt.artifacts[promotion_policy].path`.
+    - `promotion_artifact_audit_report.promotion_workflow_file == promotion_run_receipt.artifacts[promotion_workflow].path`.
+  - this reduces residual replay ambiguity where digest-level provenance checks could pass while artifact-audit report path fields drifted from audit-input and run-receipt canonical paths.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 144), `ENC-P0-016` tightens run-receipt required-entry determinism for policy/workflow provenance during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `promotion_run_receipt.artifacts` explicitly includes:
+    - `promotion_policy` with canonical filename `promotion_rollout_policy.json`,
+    - `promotion_workflow` with canonical filename `release_promotion.yml`.
+  - capture now emits explicit missing-entry diagnostics before downstream path-parity checks:
+    - `promotion_run_receipt.artifacts missing required entry: promotion_policy`,
+    - `promotion_run_receipt.artifacts missing required entry: promotion_workflow`.
+  - this reduces residual replay ambiguity where cross-report policy/workflow path checks could be side-stepped by omitting policy/workflow rows from run-receipt artifact inventory.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-23 (iteration 145), `ENC-P0-016` tightens bundle-manifest cardinality determinism during live promotion evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `bundle_manifest.json` proves coherent file-count metadata:
+    - `bundle_manifest.file_count` must be present and integer-typed.
+    - `bundle_manifest.file_count` must exactly match `len(bundle_manifest.files)`.
+  - this reduces residual replay ambiguity where bundle-entry digest/path checks could pass while bundle-manifest cardinality metadata drifted or was malformed.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-24 (iteration 146), `ENC-P0-016` tightens promotion artifact-bundle replay determinism during live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless `promotion_artifact_bundle.zip` contents exactly match the bundle manifest contract:
+    - ZIP member paths must be safe relative forward-slash paths with no traversal, symlinks, directories, or duplicate members.
+    - `bundle_manifest.files[*].archive_path` must be trimmed, relative, forward-slash-only, traversal-free, unique, and must not target `bundle_manifest.json`.
+    - `bundle_manifest.files[*].name` must exactly match the required promotion evidence artifact names, including `promotion_policy` and `promotion_workflow`.
+    - ZIP entries must exactly equal `bundle_manifest.files[*].archive_path` plus `bundle_manifest.json`; undeclared or missing bundle payloads are rejected.
+  - promotion capture receipts now include bundle archive-entry replay metadata:
+    - `bundle_manifest_verification.archive_entries_verified`,
+    - `bundle_manifest_verification.archive_entry_count_verified`.
+  - this reduces residual replay ambiguity where manifest digest/path checks could pass while the archive carried undeclared or missing payload entries.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-24 (iteration 147), `ENC-P0-016` tightens nested promotion-bundle digest replay during live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes unless every `bundle_manifest.files[*].sha256` digest matches:
+    - the corresponding member bytes inside `promotion_artifact_bundle.zip`,
+    - the separately uploaded/extracted artifact file for each required promotion evidence artifact.
+  - promotion capture receipts now include `bundle_manifest_verification.archive_member_sha256` for replay handoff.
+  - this reduces residual replay ambiguity where bundle names and archive paths matched while nested bundle member bytes drifted from separately uploaded evidence artifacts.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
 ## 9. Assessment Status
 
 Status: `[APPROVED BASELINE]`

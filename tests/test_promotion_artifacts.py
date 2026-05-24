@@ -187,6 +187,8 @@ class PromotionArtifactsTests(unittest.TestCase):
         evidence_path,
         promotion_report_path,
         rotation_report_path,
+        policy_path,
+        workflow_path,
         report_path,
         passed=True,
         rotation_pass_required=False,
@@ -199,6 +201,8 @@ class PromotionArtifactsTests(unittest.TestCase):
             ("promotion_evidence", evidence_path),
             ("promotion_audit_report", promotion_report_path),
             ("rotation_rehearsal_report", rotation_report_path),
+            ("promotion_policy", policy_path),
+            ("promotion_workflow", workflow_path),
             ("promotion_artifact_audit_report", report_path),
         ]
         artifacts = []
@@ -1679,6 +1683,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context=run_receipt_context,
                 ),
@@ -1884,6 +1890,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context=run_receipt_context,
                 ),
@@ -5230,6 +5238,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context=run_receipt_context,
                 ),
@@ -6024,6 +6034,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                 ),
                 ensure_ascii=False,
@@ -6134,6 +6146,8 @@ class PromotionArtifactsTests(unittest.TestCase):
             evidence_path=evidence_path,
             promotion_report_path=promotion_report,
             rotation_report_path=rotation_report,
+            policy_path=policy_path,
+            workflow_path=workflow_path,
             report_path=report_path,
         )
         payload["artifacts"][0]["sha256"] = "f" * 64
@@ -6305,6 +6319,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context=github_context,
                 ),
@@ -6474,6 +6490,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context={
                         "GITHUB_REPOSITORY": "acme/demo",
@@ -6734,6 +6752,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context=github_context,
                 ),
@@ -7199,6 +7219,8 @@ class PromotionArtifactsTests(unittest.TestCase):
                     evidence_path=evidence_path,
                     promotion_report_path=promotion_report,
                     rotation_report_path=rotation_report,
+                    policy_path=policy_path,
+                    workflow_path=workflow_path,
                     report_path=report_path,
                     github_context=dict(unprotected_context),
                 ),
@@ -10705,4 +10727,3 @@ class PromotionArtifactsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

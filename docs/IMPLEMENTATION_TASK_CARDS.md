@@ -3217,6 +3217,193 @@ Rationale:
       - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed retention diagnostics, `GITHUB_RETENTION_DAYS` run-receipt binding, and receipt metadata fields.
     - Verification:
       - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 133):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter fail-closed promotion artifact-audit report semantics for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `promotion_artifact_audit_report.json` failure-list semantics are internally coherent:
+      - `promotion_artifact_audit_report.failures` must exist as a JSON list.
+      - capture now rejects non-list `failures` payloads even when `passed=true` and `summary.total_failures=0`.
+      - capture now rejects non-empty `failures` lists when `passed=true`, matching existing strict semantics already enforced for `promotion_audit_report`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed `promotion_artifact_audit_report.failures` diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 134):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter summary/failure-count coherence semantics for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless both promotion audit reports enforce typed and coherent failure-count semantics:
+      - `promotion_audit_report.summary.total_failures` must be an integer (rejects boolean/non-integer ambiguity).
+      - `promotion_artifact_audit_report.summary.total_failures` must be an integer.
+      - both `summary.total_failures` values must exactly match the length of their corresponding `failures` list payload.
+      - existing pass-state requirements remain enforced (`passed=true`, `summary.total_failures=0`, and empty `failures` list).
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed typed/coherent `summary.total_failures` diagnostics for both report schemas.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 135):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter rotation-report provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `rotation_rehearsal_report.json` is context- and timeline-coherent with verified run metadata and run-receipt context:
+      - `rotation_rehearsal_report.schema` must be exactly `enc2sop-rotation-rehearsal/v1`.
+      - `rotation_rehearsal_report.generated_at_utc` is required ISO-8601 and must be `<= promotion_artifact_audit_report.generated_at_utc`.
+      - required rotation context fields must exactly match `promotion_run_receipt.github_context`:
+        - `workflow_repository`, `workflow_run_id`, `workflow_run_attempt`, `workflow_github_actions`, `workflow_ci`,
+        - `workflow_retention_days`, `workflow_job`, `workflow_actor_id`, `workflow_repository_id`,
+        - `workflow_repository_owner`, `workflow_repository_owner_id`, `workflow_ref_protected`,
+        - `workflow_name_sha`, `workflow_server_url`, `workflow_api_url`, `workflow_graphql_url`.
+      - optional rotation fields are now parity-checked whenever corresponding run-receipt keys are present:
+        - `workflow_sha`, `workflow_run_number`, `workflow_ref`, `workflow_ref_name`, `workflow_ref_type`,
+        - `workflow_event`, `workflow_name`, `workflow_name_ref`, `workflow_actor`,
+        - `workflow_triggering_actor`, `workflow_runner_name`.
+      - capture receipt `rotation_report_verification` now archives:
+        - `generated_at_utc`,
+        - `context_required_keys_verified`,
+        - `context_optional_keys_verified_when_present`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed rotation report schema/timestamp/context diagnostics and new capture-receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 136):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter runner-platform provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless rotation report runner-platform fields are parity-bound to run-receipt context:
+      - `rotation_rehearsal_report.workflow_runner_environment` must exactly match `promotion_run_receipt.github_context.RUNNER_ENVIRONMENT`.
+      - `rotation_rehearsal_report.workflow_runner_os` must exactly match `promotion_run_receipt.github_context.RUNNER_OS`.
+      - `rotation_rehearsal_report.workflow_runner_arch` must exactly match `promotion_run_receipt.github_context.RUNNER_ARCH`.
+    - This extends the required rotation context parity set and closes residual ambiguity where rotation report identity checks could pass while runner platform metadata drifted.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the runner-platform context mappings are present in the required parity set.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 137):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter workflow-window timeline provenance for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless archived promotion artifact timestamps are bounded by authoritative run timing from run details:
+      - validates `workflow_run_timestamp_verification.started_at_detail` and `workflow_run_timestamp_verification.updated_at_detail` as canonical ISO-8601 and enforces `updated_at_detail >= started_at_detail`.
+      - enforces `rotation_rehearsal_report.generated_at_utc` within the workflow run window.
+      - enforces `release_approval.approved_at_utc`, `release_receipt.generated_at_utc`, `promotion_audit_report.generated_at_utc`, `promotion_artifact_audit_report.generated_at_utc`, and `promotion_run_receipt.generated_at_utc` each remain within the same workflow run window.
+    - Fixed capture-script execution ordering so `promotion_audit_report.generated_at_utc >= release_receipt.generated_at_utc` is evaluated only after `release_receipt.generated_at_utc` is parsed.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts workflow-window fail-closed diagnostics and the release-receipt ordering diagnostic.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 138):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter rotation-report execution-state semantics for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `rotation_rehearsal_report.json` execution-state fields remain canonical and mode-coherent:
+      - `rotation_rehearsal_report.details` is now required, trimmed, and archived in `promotion_capture_receipt.json` (`rotation_report_verification.details`).
+      - when rotation rehearsal is **not** required, capture now rejects contradictory execution-state payloads:
+        - `rotation_rehearsal_report.executed` must be `false`/absent,
+        - `rotation_rehearsal_report.old_key_rejected` must be `null`.
+    - This closes a residual replay ambiguity where `status=not-requested` could coexist with contradictory execution-state fields and still pass evidence capture.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed `rotation_rehearsal_report.details`, non-rehearsal execution-state diagnostics, and receipt `rotation_report_verification.details` field.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 139):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter explicit rotation state encoding for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless non-rehearsal rotation report state is explicitly canonical (no implicit/omitted fields):
+      - `rotation_rehearsal_report.status` is now required and must be trimmed in all modes.
+      - when rotation rehearsal is **not** required, capture now enforces:
+        - `rotation_rehearsal_report.requested` must be explicit `false` (not null/absent),
+        - `rotation_rehearsal_report.executed` must be explicit `false`,
+        - `rotation_rehearsal_report.old_key_rejected` must remain `null`,
+        - `rotation_rehearsal_report.status` must be explicit `not-requested`.
+    - This closes a residual replay ambiguity where omitted status/requested fields could still be interpreted as "not requested" and accepted.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts required `rotation_rehearsal_report.status` diagnostics and explicit non-rehearsal `requested=false` semantics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 140):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter artifact timestamp provenance within the authoritative workflow-run execution window for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless artifact metadata timestamps are canonical and window-coherent with run details:
+      - `artifact_metadata.created_at` and `artifact_metadata.updated_at` are now parsed as required canonical ISO-8601 UTC timestamps.
+      - capture now rejects malformed artifact chronology where `artifact_metadata.updated_at < artifact_metadata.created_at`.
+      - capture now enforces workflow-window bounds:
+        - `artifact_metadata.created_at >= workflow_run_timestamp_verification.started_at_detail`,
+        - `artifact_metadata.updated_at <= workflow_run_timestamp_verification.updated_at_detail`.
+    - This closes residual replay ambiguity where run-scoped report/receipt timestamps could pass window checks while downloaded artifact metadata timestamps drifted outside the same authoritative run execution window.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts artifact timestamp chronology diagnostic plus artifact-window timestamp binding markers.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 141):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter policy/workflow bundle-entry determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `bundle_manifest.json` explicitly includes canonical policy/workflow entries declared by promotion audit inputs:
+      - `promotion_policy` entry is now required and must use `archive_path=policy/promotion_rollout_policy.json`.
+      - `promotion_workflow` entry is now required and must use `archive_path=workflow/release_promotion.yml`.
+      - existing digest parity checks remain enforced against `promotion_audit_report.inputs.{policy_sha256,workflow_sha256}`.
+    - This closes residual replay ambiguity where promotion-input digest checks could pass without explicit policy/workflow bundle entry presence/path determinism.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts required bundle-entry diagnostics and canonical archive-path mismatch diagnostics for `promotion_policy` and `promotion_workflow`.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 142):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter policy/workflow run-receipt provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `enc2sop/promotion_artifacts.py` to emit and require canonical policy/workflow lineage entries in `promotion_run_receipt.json`:
+      - run-receipt artifact inventory now always includes:
+        - `promotion_policy`
+        - `promotion_workflow`
+      - existing run-receipt binding validation now fail-closes unless those entries are present and digest/path-coherent with the same `policy_path` / `workflow_path` inputs used by promotion audit and artifact audit.
+    - This closes a residual replay ambiguity where bundle-manifest and audit-input policy/workflow provenance could be correct, but run-receipt lineage could still omit policy/workflow rows and pass local checks.
+    - Updated focused fixture coverage in `tests/test_promotion_artifacts.py` so existing existing-run-receipt scenarios include canonical policy/workflow artifact rows.
+    - Verification:
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_release_promotion_workflow.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 143):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter cross-report policy/workflow path parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless policy/workflow provenance paths are fully coherent across promotion audit report, promotion artifact-audit report, and run receipt:
+      - `promotion_artifact_audit_report.promotion_policy_file` must exactly match `promotion_audit_report.inputs.policy_file`.
+      - `promotion_artifact_audit_report.promotion_workflow_file` must exactly match `promotion_audit_report.inputs.workflow_file`.
+      - `promotion_artifact_audit_report.promotion_policy_file` must exactly match `promotion_run_receipt.artifacts[promotion_policy].path`.
+      - `promotion_artifact_audit_report.promotion_workflow_file` must exactly match `promotion_run_receipt.artifacts[promotion_workflow].path`.
+    - This closes a residual replay ambiguity where policy/workflow digest lineage could pass while artifact-audit report path fields drifted from the same canonical provenance paths.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed diagnostics for cross-report policy/workflow path mismatch.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 144):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter required-entry determinism for policy/workflow provenance inside `promotion_run_receipt.artifacts` during replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless run-receipt artifact inventory includes canonical policy/workflow entries:
+      - `promotion_run_receipt.artifacts` now requires `promotion_policy` with filename `promotion_rollout_policy.json`.
+      - `promotion_run_receipt.artifacts` now requires `promotion_workflow` with filename `release_promotion.yml`.
+      - capture now emits explicit fail-closed diagnostics when either entry is missing, before downstream path-parity checks.
+    - This closes a residual replay ambiguity where cross-report policy/workflow path parity checks could be bypassed by omitting policy/workflow rows from the run-receipt artifact inventory.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts required-entry diagnostics for missing `promotion_policy` and `promotion_workflow` in `promotion_run_receipt.artifacts`.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 145):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter bundle-manifest cardinality determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `bundle_manifest.json` explicitly proves coherent file-count metadata:
+      - `bundle_manifest.file_count` must be present and integer-typed.
+      - `bundle_manifest.file_count` must exactly match `len(bundle_manifest.files)`.
+    - This closes a residual replay ambiguity where required-entry and digest/path checks could pass while bundle-manifest cardinality metadata drifted or was malformed.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts `bundle_manifest.file_count` type/coherence fail-closed diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-24, iteration 146):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter promotion artifact-bundle replay determinism for live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `promotion_artifact_bundle.zip` and `bundle_manifest.json` are exactly aligned:
+      - bundle ZIP entries must be safe relative forward-slash paths, with no traversal, symlinks, directories, or duplicate member paths.
+      - `bundle_manifest.files[*].archive_path` must be trimmed, relative, forward-slash-only, traversal-free, unique, and must not target `bundle_manifest.json`.
+      - `bundle_manifest.files[*].name` must exactly match the required promotion evidence artifact names, including `promotion_policy` and `promotion_workflow`.
+      - ZIP member paths must exactly equal `bundle_manifest.files[*].archive_path` plus `bundle_manifest.json`; missing or undeclared payload entries are rejected.
+    - Capture receipts now archive `bundle_manifest_verification.archive_entries_verified` and `archive_entry_count_verified` for replay handoff.
+    - This closes residual replay ambiguity where manifest row digest/path checks could pass while the bundle ZIP carried undeclared or missing payload entries.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new bundle ZIP/member-name fail-closed diagnostics and receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-24, iteration 147):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter nested bundle digest replay determinism for live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless every `bundle_manifest.files[*].sha256` digest is coherent with both:
+      - the corresponding member bytes inside `promotion_artifact_bundle.zip`,
+      - the separately uploaded/extracted promotion artifact file for each required evidence artifact.
+    - Capture receipts now archive `bundle_manifest_verification.archive_member_sha256` so replay auditors can compare nested bundle bytes without recomputing the ZIP.
+    - This closes residual replay ambiguity where bundle names and archive paths matched, but nested ZIP member bytes could differ from separately uploaded evidence artifacts.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new nested bundle digest diagnostics and receipt metadata.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - embedded Python heredoc compile check for `scripts/github_release_promotion_evidence.sh` => `compiled_python_heredocs=11`
+      - `git diff --check` => clean
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.

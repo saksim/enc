@@ -158,19 +158,72 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("Artifact archive member path traversal detected: {0}", payload)
         self.assertIn("Artifact archive contains symlink entry: {0}", payload)
         self.assertIn("promotion_artifact_bundle.zip is missing bundle_manifest.json", payload)
+        self.assertIn("promotion_artifact_bundle.zip member path must use forward slashes: {0}", payload)
+        self.assertIn("promotion_artifact_bundle.zip member path is not relative: {0}", payload)
+        self.assertIn("promotion_artifact_bundle.zip member path traversal detected: {0}", payload)
+        self.assertIn("promotion_artifact_bundle.zip contains symlink entry: {0}", payload)
+        self.assertIn("promotion_artifact_bundle.zip contains duplicate member path: {0}", payload)
+        self.assertIn(
+            "promotion_artifact_bundle.zip entries must exactly match bundle_manifest.files archive_path values plus bundle_manifest.json; missing={0}; extra={1}",
+            payload,
+        )
         self.assertIn("bundle_manifest schema mismatch: expected enc2sop-promotion-artifact-bundle/v1, got {0}", payload)
+        self.assertIn("bundle_manifest.file_count must be an integer", payload)
+        self.assertIn(
+            "bundle_manifest.file_count must match length of bundle_manifest.files: expected {0}, got {1}",
+            payload,
+        )
         self.assertIn("bundle_manifest missing required entry: {0}", payload)
+        self.assertIn("bundle_manifest missing required entry: promotion_policy", payload)
+        self.assertIn("bundle_manifest missing required entry: promotion_workflow", payload)
+        self.assertIn(
+            "bundle_manifest.files names must exactly match required promotion evidence entries; missing={0}; extra={1}",
+            payload,
+        )
+        self.assertIn("bundle_manifest.files[{0}].archive_path must not contain leading or trailing whitespace", payload)
+        self.assertIn("bundle_manifest.files[{0}].archive_path must be a relative forward-slash path", payload)
+        self.assertIn("bundle_manifest.files[{0}].archive_path contains traversal or empty path segment", payload)
+        self.assertIn("bundle_manifest.files[{0}].archive_path must not target bundle_manifest.json", payload)
+        self.assertIn("bundle_manifest.files duplicate archive_path: {0}", payload)
+        self.assertIn(
+            "bundle_manifest.files[{0}].sha256 mismatch with promotion_artifact_bundle.zip member {1}: expected {2}, got {3}",
+            payload,
+        )
         self.assertIn("bundle_manifest sha256 mismatch for {0}: expected {1}, got {2}", payload)
+        self.assertIn(
+            "promotion_artifact_bundle.zip member digest mismatch for {0}: expected {1}, got {2}",
+            payload,
+        )
+        self.assertIn(
+            "bundle_manifest archive_path mismatch for promotion_policy: expected policy/promotion_rollout_policy.json, got {0}",
+            payload,
+        )
+        self.assertIn(
+            "bundle_manifest archive_path mismatch for promotion_workflow: expected workflow/release_promotion.yml, got {0}",
+            payload,
+        )
         self.assertIn(
             "promotion_artifact_audit_report schema mismatch: expected enc2sop-promotion-artifact-audit/v1, got {0}",
             payload,
         )
         self.assertIn("promotion_artifact_audit_report.passed must be true", payload)
+        self.assertIn("promotion_artifact_audit_report.summary.total_failures must be an integer", payload)
         self.assertIn("promotion_artifact_audit_report.summary.total_failures must be 0", payload)
+        self.assertIn("promotion_artifact_audit_report.failures must be a list", payload)
+        self.assertIn(
+            "promotion_artifact_audit_report.summary.total_failures must match length of promotion_artifact_audit_report.failures",
+            payload,
+        )
+        self.assertIn("promotion_artifact_audit_report.failures must be empty when report passed=true", payload)
         self.assertIn("promotion_audit_report schema mismatch: expected enc2sop-promotion-audit-report/v1, got {0}", payload)
         self.assertIn("promotion_audit_report.passed must be true", payload)
+        self.assertIn("promotion_audit_report.summary.total_failures must be an integer", payload)
         self.assertIn("promotion_audit_report.summary.total_failures must be 0", payload)
         self.assertIn("promotion_audit_report.failures must be a list", payload)
+        self.assertIn(
+            "promotion_audit_report.summary.total_failures must match length of promotion_audit_report.failures",
+            payload,
+        )
         self.assertIn("promotion_audit_report.failures must be empty when report passed=true", payload)
         self.assertIn("promotion_audit_report.inputs is required", payload)
         self.assertIn("promotion_audit_report.inputs.evidence_file is required", payload)
@@ -197,6 +250,14 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("promotion_artifact_audit_report.promotion_policy_file must not contain leading or trailing whitespace", payload)
         self.assertIn("promotion_artifact_audit_report.promotion_workflow_file is required", payload)
         self.assertIn("promotion_artifact_audit_report.promotion_workflow_file must not contain leading or trailing whitespace", payload)
+        self.assertIn(
+            "promotion_artifact_audit_report.promotion_policy_file does not match promotion_audit_report.inputs.policy_file: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_audit_report.inputs.workflow_file: expected {0}, got {1}",
+            payload,
+        )
         self.assertIn("promotion_artifact_audit_report.promotion_run_receipt_file is required", payload)
         self.assertIn("promotion_artifact_audit_report.promotion_run_receipt_file must not contain leading or trailing whitespace", payload)
         self.assertIn("promotion_artifact_audit_report.release_approval_key_id_expected is required", payload)
@@ -211,6 +272,22 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "promotion_audit_report.inputs.workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_artifact_audit_report.promotion_policy_file does not match promotion_run_receipt.artifacts[promotion_policy].path: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_run_receipt.artifacts missing required entry: promotion_policy",
+            payload,
+        )
+        self.assertIn(
+            "promotion_run_receipt.artifacts missing required entry: promotion_workflow",
             payload,
         )
         self.assertIn(
@@ -480,6 +557,28 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("run created timestamp mismatch between summary and run details for run_id={0}: {1} vs {2}", payload)
         self.assertIn("run started timestamp mismatch between summary and run details for run_id={0}: {1} vs {2}", payload)
         self.assertIn("run updated timestamp mismatch between summary and run details for run_id={0}: {1} vs {2}", payload)
+        self.assertIn(
+            "workflow_run_timestamp_verification.updated_at_detail must be >= workflow_run_timestamp_verification.started_at_detail; got {0} < {1}",
+            payload,
+        )
+        self.assertIn(
+            "{0} must be >= workflow_run_timestamp_verification.started_at_detail; got {1} < {2}",
+            payload,
+        )
+        self.assertIn(
+            "{0} must be <= workflow_run_timestamp_verification.updated_at_detail; got {1} > {2}",
+            payload,
+        )
+        self.assertIn(
+            "artifact_metadata.updated_at must be >= artifact_metadata.created_at; got {0} < {1}",
+            payload,
+        )
+        self.assertIn("\"artifact_metadata.created_at\",", payload)
+        self.assertIn("\"artifact_metadata.updated_at\",", payload)
+        self.assertIn(
+            "promotion_audit_report.generated_at_utc must be >= release_receipt.generated_at_utc; got {0} < {1}",
+            payload,
+        )
         self.assertIn("{0} is missing for artifact {1} (run_id={2})", payload)
         self.assertIn("artifact updated_at precedes created_at for {0} (run_id={1}): {2} < {3}", payload)
         self.assertIn("artifact expires_at precedes updated_at for {0} (run_id={1}): {2} < {3}", payload)
@@ -503,6 +602,9 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("entry_count_verified", payload)
         self.assertIn("bundle_manifest_verification", payload)
         self.assertIn("required_entries_verified", payload)
+        self.assertIn("archive_entries_verified", payload)
+        self.assertIn("archive_entry_count_verified", payload)
+        self.assertIn("archive_member_sha256", payload)
         self.assertIn("manifest_sha256", payload)
         self.assertIn("promotion_run_receipt_verification", payload)
         self.assertIn("artifact_entries_verified", payload)
@@ -549,7 +651,11 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("optional_keys_verified_when_present", payload)
         self.assertIn("rotation_rehearsal", payload)
         self.assertIn("rotation_report_verification", payload)
+        self.assertIn("generated_at_utc", payload)
+        self.assertIn("details", payload)
         self.assertIn("workflow_retention_days", payload)
+        self.assertIn("context_required_keys_verified", payload)
+        self.assertIn("context_optional_keys_verified_when_present", payload)
         self.assertIn("promotion_job_verification", payload)
         self.assertIn("required_step_count_verified", payload)
         self.assertIn("rotation_step_conclusion", payload)
@@ -568,11 +674,39 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("rotation_rehearsal_report.requested must be true when rotation rehearsal is required", payload)
         self.assertIn("rotation_rehearsal_report.executed must be true when rotation rehearsal is required", payload)
         self.assertIn("rotation_rehearsal_report.old_key_rejected must be true when rotation rehearsal is required", payload)
+        self.assertIn("rotation_rehearsal_report.details is required", payload)
+        self.assertIn("rotation_rehearsal_report.details must not contain leading or trailing whitespace", payload)
+        self.assertIn("rotation_rehearsal_report.status is required", payload)
+        self.assertIn("rotation_rehearsal_report.status must not contain leading or trailing whitespace", payload)
+        self.assertIn(
+            "rotation_rehearsal_report schema mismatch: expected enc2sop-rotation-rehearsal/v1, got {0}",
+            payload,
+        )
+        self.assertIn("rotation_report_generated_at_utc, rotation_report_generated_at_dt = parse_required_iso8601_utc(", payload)
+        self.assertIn("\"rotation_rehearsal_report.generated_at_utc\",", payload)
+        self.assertIn(
+            "rotation_rehearsal_report.generated_at_utc must be <= promotion_artifact_audit_report.generated_at_utc; got {0} > {1}",
+            payload,
+        )
         self.assertIn("rotation_workflow_retention_days = parse_required_positive_integer(", payload)
         self.assertIn("\"rotation_rehearsal_report.workflow_retention_days\",", payload)
         self.assertIn("rotation_rehearsal_report.workflow_retention_days mismatch with run retention_days: expected {0}, got {1}", payload)
-        self.assertIn("rotation_rehearsal_report.status must be not-requested when rotation rehearsal is not required; got {0}", payload)
+        self.assertIn("rotation_rehearsal_report.{0} must not contain leading or trailing whitespace", payload)
+        self.assertIn(
+            "rotation_rehearsal_report.{0} mismatch with promotion_run_receipt.github_context.{1}: expected {2}, got {3}",
+            payload,
+        )
+        self.assertIn(
+            "rotation_rehearsal_report.{0} is required when promotion_run_receipt.github_context.{1} is present",
+            payload,
+        )
+        self.assertIn("(\"workflow_runner_environment\", \"RUNNER_ENVIRONMENT\")", payload)
+        self.assertIn("(\"workflow_runner_os\", \"RUNNER_OS\")", payload)
+        self.assertIn("(\"workflow_runner_arch\", \"RUNNER_ARCH\")", payload)
         self.assertIn("rotation_rehearsal_report.requested must be false when rotation rehearsal is not required", payload)
+        self.assertIn("rotation_rehearsal_report.executed must be false when rotation rehearsal is not required", payload)
+        self.assertIn("rotation_rehearsal_report.old_key_rejected must be null when rotation rehearsal is not required", payload)
+        self.assertIn("rotation_rehearsal_report.status must be not-requested when rotation rehearsal is not required; got {0}", payload)
         self.assertIn("promotion_capture_receipt.json", payload)
         self.assertIn("\"release_bundle.json\"", payload)
         self.assertIn("\"release_approval.json\"", payload)
