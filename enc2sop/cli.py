@@ -256,6 +256,7 @@ def _run_transport(args) -> int:
             print("  {0}".format(row))
         print("usage: soenc transport <plugin-subcommand> [args]")
         print("example: soenc transport export -i artifact.bin -o ./pkg")
+        print("example: soenc transport prepare-capture-corpus -o ./capture_kit --classification lab")
         return 0
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
@@ -571,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     transport_parser = subparsers.add_parser(
         "transport",
-        help="Optional airgap transport plugin commands (export/recover/verify/analyze/ocr).",
+        help="Optional airgap transport plugin commands (export/recover/verify/analyze/ocr/certify).",
     )
     transport_parser.add_argument(
         "forwarded",

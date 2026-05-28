@@ -93,7 +93,101 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("gh workflow run", payload)
         self.assertIn("return_run_details", payload)
         self.assertIn("repos/${repo}/actions/workflows/${workflow_encoded}/dispatches", payload)
+        self.assertNotRegex(payload, r"\|\s*python\s+-[^\n]*<<'PY'")
+        self.assertIn('workflow_probe_parsed="$(python - "$workflow_probe_output" <<\'PY\'', payload)
+        self.assertIn('python - "$dispatch_epoch" "$runs_json" <<\'PY\'', payload)
+        self.assertIn('promotion_jobs_json_path="${OUTPUT_ROOT}/run-${run_id}-attempt-${run_attempt}/promotion_jobs.json"', payload)
+        self.assertIn('payload_path = Path(sys.argv[11])', payload)
+        self.assertIn('artifact_metadata_json_path="${OUTPUT_ROOT}/run-${run_id}-attempt-${run_attempt}/artifact_metadata.json"', payload)
+        self.assertIn('payload_path = Path(sys.argv[4])', payload)
         self.assertIn("Workflow dispatch API with run details failed; falling back to gh workflow run...", payload)
+        self.assertIn("Dispatch response run id candidates are inconsistent", payload)
+        self.assertIn("Dispatch response workflow_id is not numeric:", payload)
+        self.assertIn("dispatch_run_url_api", payload)
+        self.assertIn("dispatch_run_html_url", payload)
+        self.assertIn("dispatch_workflow_id_api", payload)
+        self.assertIn("Dispatch response workflow_id is not numeric for run_id=${run_id}: ${dispatch_workflow_id_api}", payload)
+        self.assertIn(
+            "Dispatch response workflow_id mismatch for run_id=${run_id}: expected ${resolved_workflow_definition_id}, got ${dispatch_workflow_id_api}",
+            payload,
+        )
+        self.assertIn("Dispatch response run_url must not contain whitespace for run_id=${run_id}: ${dispatch_run_url_api}", payload)
+        self.assertIn(
+            "Dispatch response run_url does not contain a canonical /actions/runs/<id> segment: {0}",
+            payload,
+        )
+        self.assertIn(
+            "Dispatch response html_url does not contain a canonical /actions/runs/<id> segment: {0}",
+            payload,
+        )
+        self.assertIn("Dispatch response run_url run_id mismatch: expected ${run_id}, got ${dispatch_run_id_from_url}", payload)
+        self.assertIn("Dispatch response html_url run_id mismatch: expected ${run_id}, got ${dispatch_html_run_id}", payload)
+        self.assertIn(
+            "Dispatch response run_id is required and must be numeric when run_id_resolution_mode=dispatch-api.",
+            payload,
+        )
+        self.assertIn(
+            "Dispatch response run_id mismatch with resolved workflow_run_id: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "Dispatch response workflow_id is required and must be numeric when run_id_resolution_mode=dispatch-api.",
+            payload,
+        )
+        self.assertIn(
+            "Dispatch response workflow_id mismatch with workflow definition id: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("Dispatch response run_url must not contain leading or trailing whitespace.", payload)
+        self.assertIn("Dispatch response run_url is not canonical: {0}", payload)
+        self.assertIn(
+            "Dispatch response run_url run_id mismatch with resolved workflow_run_id: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("Dispatch response html_url must not contain leading or trailing whitespace.", payload)
+        self.assertIn("Dispatch response html_url is not canonical: {0}", payload)
+        self.assertIn(
+            "Dispatch response html_url run_id mismatch with resolved workflow_run_id: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("dispatch_url_identity_verification", payload)
+        self.assertIn("dispatch_run_url_host_verified", payload)
+        self.assertIn("dispatch_html_url_host_verified", payload)
+        self.assertIn("dispatch_run_url_attempt_verified", payload)
+        self.assertIn("dispatch_html_url_attempt_verified", payload)
+        self.assertIn("{0} must use https scheme.", payload)
+        self.assertIn("{0} must not include query or fragment components.", payload)
+        self.assertIn("{0} host mismatch with resolved run url host: expected {1}, got {2}", payload)
+        self.assertIn("{0} path is not canonical: {1}", payload)
+        self.assertIn("{0} repository path mismatch: expected {1}, got {2}", payload)
+        self.assertIn("{0} run_id path mismatch: expected {1}, got {2}", payload)
+        self.assertIn("{0} attempt path mismatch: expected {1}, got {2}", payload)
+        self.assertIn("dispatch response URL host mismatch between run_url and html_url: {0} vs {1}", payload)
+        self.assertIn("Checking GitHub CLI authentication and repository API access...", payload)
+        self.assertIn("gh auth status reported non-zero; continuing with repository API probe for ${repo}.", payload)
+        self.assertIn("repo_probe_output=\"$(gh api \"repos/${repo}\" --jq '.full_name' 2>&1)\"", payload)
+        self.assertIn("GitHub repository API probe failed for ${repo}.", payload)
+        self.assertIn("Provide a token with repository and Actions API access via GH_TOKEN/GITHUB_TOKEN or gh auth login.", payload)
+        self.assertIn("GitHub repository API probe passed for ${repo_probe_output}", payload)
+        self.assertIn("GitHub repository API probe mismatch: expected ${repo}, got ${repo_probe_output}", payload)
+        self.assertIn("Invalid repo slug: ${value} (expected owner/repo)", payload)
+        self.assertIn("require_repo_slug \"$REPO\"", payload)
+        self.assertIn("Resolving workflow definition identity for ${workflow_file} on ${repo}...", payload)
+        self.assertIn("gh api \"repos/${repo}/actions/workflows/${workflow_encoded}\" 2>&1", payload)
+        self.assertIn("Unable to resolve workflow definition for ${workflow_file} on ${repo}.", payload)
+        self.assertIn("Resolved workflow id is not numeric for ${workflow_file} on ${repo}: ${workflow_id}", payload)
+        self.assertIn("Resolved workflow path is invalid for ${workflow_file} on ${repo}: ${workflow_path}", payload)
+        self.assertIn("Resolved workflow path is outside .github/workflows for ${workflow_file} on ${repo}: ${workflow_path}", payload)
+        self.assertIn("Resolved workflow definition path mismatch for ${workflow_file}: expected ${expected_workflow_path}, got ${workflow_path}", payload)
+        self.assertIn("Resolved workflow state is not active for ${workflow_file} on ${repo}: ${workflow_state}", payload)
+        self.assertIn("Resolved workflow name is invalid for ${workflow_file} on ${repo}: ${workflow_name}", payload)
+        self.assertIn("Resolved workflow definition id=${workflow_id} path=${workflow_path} state=${workflow_state} name=${workflow_name}", payload)
+        self.assertIn("run workflow_id is missing in run details for run_id=${run_id}", payload)
+        self.assertIn("run workflow_id is not numeric in run details for run_id=${run_id}: ${run_workflow_id_api}", payload)
+        self.assertIn("run workflow_id mismatch for run_id=${run_id}: expected ${resolved_workflow_definition_id}, got ${run_workflow_id_api}", payload)
+        self.assertIn("Resolved run workflow_id is not numeric.", payload)
+        self.assertIn("Resolved workflow definition id is not numeric.", payload)
+        self.assertIn("Resolved run workflow_id mismatch with workflow definition id: expected {0}, got {1}", payload)
         self.assertIn("gh run view", payload)
         self.assertIn("--json attempt,status,conclusion,url,updatedAt,event,headBranch,workflowName,headSha,number,createdAt,startedAt", payload)
         self.assertIn("actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100", payload)
@@ -151,6 +245,16 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("gh api \"repos/${REPO}/actions/runs/${run_id}/artifacts?per_page=100&name=${artifact_name}\"", payload)
         self.assertIn("gh api \"repos/${REPO}/actions/artifacts/${artifact_id}/zip\" --method GET --header \"Accept: application/zip\" --output \"$artifact_zip_path\"", payload)
         self.assertIn("--artifact-index-wait-seconds <int>", payload)
+        self.assertIn("--preflight-only", payload)
+        self.assertIn("--preflight-only cannot be combined with --run-id.", payload)
+        self.assertIn("write_promotion_preflight_receipt()", payload)
+        self.assertIn("promotion_preflight_receipt.json", payload)
+        self.assertIn("enc2sop-promotion-preflight/v1", payload)
+        self.assertIn('"repository_api_verified": True', payload)
+        self.assertIn('"dispatch_executed": False', payload)
+        self.assertIn("Promotion evidence preflight passed.", payload)
+        self.assertIn("preflight_receipt=${preflight_receipt_path}", payload)
+        self.assertIn("rerun without --preflight-only to dispatch or capture the protected-branch promotion run", payload)
         self.assertIn("Timed out waiting for artifact metadata indexing for ${artifact_name}.", payload)
         self.assertIn("Artifact metadata not yet indexed for ${artifact_name}; retrying in ${POLL_INTERVAL_SECONDS}s...", payload)
         self.assertIn("Artifact archive digest mismatch for {0}: expected {1}, got {2}", payload)
@@ -502,7 +606,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("Artifact {0} archive_download_url host is missing.", payload)
         self.assertIn("Artifact {0} archive_download_url must not include query or fragment components.", payload)
         self.assertIn("Artifact {0} archive_download_url path mismatch: expected {1}, got {2}", payload)
-        self.assertIn("artifact archive_download_url host mismatch for run_id=${run_id}: expected ${run_url_host_verified}, got ${artifact_archive_download_url_host}", payload)
+        self.assertIn("artifact archive_download_url host mismatch for run_id=${run_id}: expected API host ${expected_artifact_api_host}, got ${artifact_archive_download_url_host}", payload)
         self.assertIn("run event mismatch between summary and run details for run_id=${run_id}", payload)
         self.assertIn("run status is missing in run details for run_id=${run_id}", payload)
         self.assertIn("run status is not completed in run details for run_id=${run_id}", payload)
@@ -573,6 +677,41 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
             "artifact_metadata.updated_at must be >= artifact_metadata.created_at; got {0} < {1}",
             payload,
         )
+        self.assertIn("artifact_metadata.workflow_run_id", payload)
+        self.assertIn("artifact_metadata.workflow_run_id mismatch with workflow_run_id: expected {0}, got {1}", payload)
+        self.assertIn("artifact_metadata.size_in_bytes", payload)
+        self.assertIn("artifact_archive_verification.size_in_bytes_verified", payload)
+        self.assertIn(
+            "artifact_archive_verification.size_in_bytes_verified mismatch with artifact_metadata.size_in_bytes: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("artifact_metadata.digest must be a canonical sha256:<64-char lowercase hex> value", payload)
+        self.assertIn(
+            "artifact_archive_verification.digest_verified must be a canonical sha256:<64-char lowercase hex> value",
+            payload,
+        )
+        self.assertIn(
+            "artifact_archive_verification.digest_verified mismatch with artifact_metadata.digest: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("artifact_archive_verification.entry_count_verified", payload)
+        self.assertIn("artifact_metadata.archive_download_url_host is required", payload)
+        self.assertIn("artifact_metadata.archive_download_url_host must not contain leading or trailing whitespace", payload)
+        self.assertIn(
+            "artifact_metadata.archive_download_url_host mismatch with expected API host: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("artifact_metadata.workflow_head_branch must not contain leading or trailing whitespace", payload)
+        self.assertIn(
+            "artifact_metadata.workflow_head_branch mismatch with workflow_head_branch: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn("artifact_metadata.workflow_head_sha must not contain leading or trailing whitespace", payload)
+        self.assertIn("artifact_metadata.workflow_head_sha must be a 40-char lowercase hex digest", payload)
+        self.assertIn(
+            "artifact_metadata.workflow_head_sha mismatch with workflow_head_sha: expected {0}, got {1}",
+            payload,
+        )
         self.assertIn("\"artifact_metadata.created_at\",", payload)
         self.assertIn("\"artifact_metadata.updated_at\",", payload)
         self.assertIn(
@@ -633,6 +772,19 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("started_at_detail", payload)
         self.assertIn("updated_at_detail", payload)
         self.assertIn("workflow_context_verification", payload)
+        self.assertIn("dispatch_response_verification", payload)
+        self.assertIn("\"dispatch_response_verification\": {", payload)
+        self.assertIn("\"run_id\": _maybe_int(dispatch_run_id)", payload)
+        self.assertIn("\"workflow_id\": _maybe_int(dispatch_workflow_id)", payload)
+        self.assertIn("\"run_url\": dispatch_run_url or None", payload)
+        self.assertIn("\"html_url\": dispatch_run_html_url or None", payload)
+        self.assertIn("\"run_url_host\": dispatch_run_url_host or None", payload)
+        self.assertIn("\"html_url_host\": dispatch_html_url_host or None", payload)
+        self.assertIn("\"run_url_attempt\": _maybe_int(dispatch_run_url_attempt)", payload)
+        self.assertIn("\"html_url_attempt\": _maybe_int(dispatch_html_url_attempt)", payload)
+        self.assertIn("workflow_definition_verification", payload)
+        self.assertIn("\"workflow_definition_verification\": {", payload)
+        self.assertIn("\"run_workflow_id\": _maybe_int(workflow_run_workflow_id)", payload)
         self.assertIn("repository_owner", payload)
         self.assertIn("repository_id", payload)
         self.assertIn("repository_owner_id", payload)

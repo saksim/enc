@@ -3,6 +3,7 @@ from unittest import mock
 
 import qrcode_helper
 from enc2sop.transport import (
+    certify,
     cli,
     layout,
     ocr_adapters,
@@ -48,6 +49,653 @@ class TransportModuleExtractionTests(unittest.TestCase):
         self.assertEqual(parser.prog, cli.build_parser().prog)
         self.assertIs(qrcode_helper._save_json, cli.save_json)
         self.assertIs(qrcode_helper._save_missing_chunks, cli.save_missing_chunks)
+        command_names = sorted(parser._subparsers._group_actions[0].choices.keys())
+        self.assertIn("certify", command_names)
+        self.assertIn("prepare-capture-corpus", command_names)
+        self.assertIn("ingest-capture-corpus", command_names)
+        self.assertIn("attach-capture-corpus", command_names)
+        self.assertIn("validate-capture-corpus", command_names)
+        self.assertIn("certify-capture-evidence", command_names)
+        self.assertIn("archive-evidence", command_names)
+        self.assertIn("verify-evidence-archive", command_names)
+        self.assertIn("replay-evidence-archive", command_names)
+        self.assertIn("certification-status", command_names)
+        prepare_parser = parser._subparsers._group_actions[0].choices["prepare-capture-corpus"]
+        prepare_option_names = {
+            option
+            for action in prepare_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--include-raw-capture-dirs", prepare_option_names)
+        self.assertIn("--perspective-correction-method", prepare_option_names)
+        self.assertIn("--ocr-only-backend", prepare_option_names)
+        attach_parser = parser._subparsers._group_actions[0].choices["attach-capture-corpus"]
+        attach_option_names = {
+            option
+            for action in attach_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--require-raw-captures", attach_option_names)
+        ingest_parser = parser._subparsers._group_actions[0].choices["ingest-capture-corpus"]
+        ingest_option_names = {
+            option
+            for action in ingest_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--capture-root", ingest_option_names)
+        self.assertIn("--raw-capture-root", ingest_option_names)
+        self.assertIn("--capture-metadata-manifest-file", ingest_option_names)
+        self.assertIn("--allow-unmatched-labels", ingest_option_names)
+        self.assertIn("--require-raw-captures", ingest_option_names)
+        correct_parser = parser._subparsers._group_actions[0].choices[
+            "correct-capture-perspective"
+        ]
+        correct_option_names = {
+            option
+            for action in correct_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--capture-corpus-file", correct_option_names)
+        self.assertIn("--method", correct_option_names)
+        self.assertIn("--mode", correct_option_names)
+        self.assertIn("--require-raw-captures", correct_option_names)
+        self.assertIn("--require-distinct-from-raw", correct_option_names)
+        mode_action = [
+            action
+            for action in correct_parser._actions
+            if "--mode" in getattr(action, "option_strings", [])
+        ][0]
+        self.assertIn("four-point", mode_action.choices)
+        validate_parser = parser._subparsers._group_actions[0].choices["validate-capture-corpus"]
+        validate_option_names = {
+            option
+            for action in validate_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--capture-corpus-file", validate_option_names)
+        self.assertIn("--require-capture-attachment-report", validate_option_names)
+        self.assertIn("--require-capture-provenance", validate_option_names)
+        self.assertIn("--require-physical-print-scan", validate_option_names)
+        self.assertIn(
+            "--require-real-camera-perspective-correction",
+            validate_option_names,
+        )
+        self.assertIn("--require-ocr-only-backend", validate_option_names)
+        certify_parser = parser._subparsers._group_actions[0].choices["certify"]
+        option_names = {
+            option
+            for action in certify_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--require-real-camera-perspective-correction", option_names)
+        self.assertIn("--capture-attachment-report-file", option_names)
+        self.assertIn("--require-capture-attachment-report", option_names)
+        self.assertIn("--require-capture-provenance", option_names)
+        pipeline_parser = parser._subparsers._group_actions[0].choices["certify-capture-evidence"]
+        pipeline_option_names = {
+            option
+            for action in pipeline_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--capture-root", pipeline_option_names)
+        self.assertIn("--raw-capture-root", pipeline_option_names)
+        self.assertIn("--capture-metadata", pipeline_option_names)
+        self.assertIn("--capture-metadata-manifest-file", pipeline_option_names)
+        self.assertIn("--allow-unmatched-labels", pipeline_option_names)
+        self.assertIn("--ingestion-report-file", pipeline_option_names)
+        self.assertIn("--require-capture-provenance", pipeline_option_names)
+        self.assertIn("--replay-output-dir", pipeline_option_names)
+        self.assertIn("--replay-report-file", pipeline_option_names)
+        self.assertIn("--replay-summary-file", pipeline_option_names)
+        self.assertIn("--chunk-chars", pipeline_option_names)
+        self.assertIn("--lines-per-page", pipeline_option_names)
+        self.assertIn("--line-crc-mode", pipeline_option_names)
+        archive_parser = parser._subparsers._group_actions[0].choices["archive-evidence"]
+        archive_option_names = {
+            option
+            for action in archive_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--require-successful-report", archive_option_names)
+        self.assertIn("--require-capture-attachment-report", archive_option_names)
+        self.assertIn("--require-profile-certified", archive_option_names)
+        self.assertIn("--require-physical-print-scan", archive_option_names)
+        self.assertIn(
+            "--require-real-camera-perspective-correction",
+            archive_option_names,
+        )
+        self.assertIn("--require-ocr-only-backend", archive_option_names)
+        verify_archive_parser = parser._subparsers._group_actions[0].choices[
+            "verify-evidence-archive"
+        ]
+        verify_archive_option_names = {
+            option
+            for action in verify_archive_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--archive-file", verify_archive_option_names)
+        self.assertIn("--require-successful-report", verify_archive_option_names)
+        self.assertIn("--require-profile-certified", verify_archive_option_names)
+        self.assertIn("--require-capture-attachment-report", verify_archive_option_names)
+        self.assertIn("--require-physical-print-scan", verify_archive_option_names)
+        self.assertIn(
+            "--require-real-camera-perspective-correction",
+            verify_archive_option_names,
+        )
+        self.assertIn("--require-ocr-only-backend", verify_archive_option_names)
+        replay_archive_parser = parser._subparsers._group_actions[0].choices[
+            "replay-evidence-archive"
+        ]
+        replay_archive_option_names = {
+            option
+            for action in replay_archive_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--archive-file", replay_archive_option_names)
+        self.assertIn("--replay-report-file", replay_archive_option_names)
+        self.assertIn("--require-successful-report", replay_archive_option_names)
+        self.assertIn("--require-profile-certified", replay_archive_option_names)
+        self.assertIn("--require-capture-attachment-report", replay_archive_option_names)
+        self.assertIn("--require-physical-print-scan", replay_archive_option_names)
+        self.assertIn(
+            "--require-real-camera-perspective-correction",
+            replay_archive_option_names,
+        )
+        self.assertIn("--require-ocr-only-backend", replay_archive_option_names)
+        certification_status_parser = parser._subparsers._group_actions[0].choices[
+            "certification-status"
+        ]
+        certification_status_option_names = {
+            option
+            for action in certification_status_parser._actions
+            for option in getattr(action, "option_strings", [])
+        }
+        self.assertIn("--require-certified-claim", certification_status_option_names)
+
+    def test_qrcode_helper_certify_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.REPORT_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "certify_transport_reliability",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.certify_reliability(
+                output_dir="out",
+                payload_sizes=[32],
+                iterations_per_size=1,
+                seed=7,
+                backend="sidecar",
+                redundancy_copies=2,
+                parity_group_size=4,
+                profile="reliable-airgap-v1",
+                allow_unsafe_profile=False,
+                distortion_suite="generated-page-basic-v1",
+                capture_corpus_file="captures.json",
+                include_generated_corpus=False,
+                require_real_camera_perspective_correction=True,
+                capture_attachment_report_file="attachment.json",
+                require_capture_attachment_report=True,
+                require_capture_provenance=True,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertIs(mocked.call_args.kwargs["transport"], transport)
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "out")
+        self.assertEqual(mocked.call_args.kwargs["payload_sizes"], [32])
+        self.assertEqual(mocked.call_args.kwargs["profile"], "reliable-airgap-v1")
+        self.assertFalse(mocked.call_args.kwargs["allow_unsafe_profile"])
+        self.assertEqual(mocked.call_args.kwargs["distortion_suite"], "generated-page-basic-v1")
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "captures.json")
+        self.assertFalse(mocked.call_args.kwargs["include_generated_corpus"])
+        self.assertTrue(mocked.call_args.kwargs["require_real_camera_perspective_correction"])
+        self.assertEqual(mocked.call_args.kwargs["capture_attachment_report_file"], "attachment.json")
+        self.assertTrue(mocked.call_args.kwargs["require_capture_attachment_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_capture_provenance"])
+
+    def test_qrcode_helper_prepare_capture_corpus_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.CAPTURE_KIT_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "prepare_capture_corpus_kit",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.prepare_capture_corpus_kit(
+                output_dir="kit",
+                classification="lab",
+                payload_sizes=[64],
+                iterations_per_size=1,
+                seed=20260526,
+                redundancy_copies=2,
+                parity_group_size=4,
+                include_raw_capture_dirs=True,
+                perspective_correction_method="unit-test homography",
+                capture_metadata={"scanner": "fixture"},
+                ocr_only_backend="tesseract",
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertIs(mocked.call_args.kwargs["transport"], transport)
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "kit")
+        self.assertEqual(mocked.call_args.kwargs["classification"], "lab")
+        self.assertEqual(mocked.call_args.kwargs["payload_sizes"], [64])
+        self.assertEqual(mocked.call_args.kwargs["seed"], 20260526)
+        self.assertTrue(mocked.call_args.kwargs["include_raw_capture_dirs"])
+        self.assertEqual(
+            mocked.call_args.kwargs["perspective_correction_method"],
+            "unit-test homography",
+        )
+        self.assertEqual(mocked.call_args.kwargs["capture_metadata"], {"scanner": "fixture"})
+        self.assertEqual(mocked.call_args.kwargs["ocr_only_backend"], "tesseract")
+
+    def test_qrcode_helper_attach_capture_corpus_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.CAPTURE_ATTACHMENT_REPORT_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "attach_capture_corpus",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.attach_capture_corpus(
+                capture_corpus_file="capture_corpus.json",
+                output_dir="attach",
+                report_file="report.json",
+                kit_manifest_file="capture_kit_manifest.json",
+                require_captures=True,
+                require_distinct_capture_images=True,
+                require_raw_captures=True,
+                update_corpus=False,
+                update_kit_manifest=False,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "capture_corpus.json")
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "attach")
+        self.assertEqual(mocked.call_args.kwargs["report_file"], "report.json")
+        self.assertTrue(mocked.call_args.kwargs["require_captures"])
+        self.assertTrue(mocked.call_args.kwargs["require_distinct_capture_images"])
+        self.assertTrue(mocked.call_args.kwargs["require_raw_captures"])
+        self.assertFalse(mocked.call_args.kwargs["update_corpus"])
+        self.assertFalse(mocked.call_args.kwargs["update_kit_manifest"])
+
+    def test_qrcode_helper_ingest_capture_corpus_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {
+            "success": True,
+            "schema": certify.CAPTURE_CORPUS_INGESTION_REPORT_SCHEMA,
+        }
+        with mock.patch.object(
+            certify,
+            "ingest_capture_corpus",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.ingest_capture_corpus(
+                capture_corpus_file="capture_corpus.json",
+                capture_root="external_scans",
+                output_dir="ingest",
+                report_file="ingest.json",
+                kit_manifest_file="capture_kit_manifest.json",
+                raw_capture_root="raw_photos",
+                classification="real",
+                capture_medium="camera-photo",
+                capture_metadata={"device": "unit-test-camera"},
+                require_captures=True,
+                require_raw_captures=True,
+                require_all_case_labels=False,
+                update_corpus=False,
+                update_kit_manifest=False,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "capture_corpus.json")
+        self.assertEqual(mocked.call_args.kwargs["capture_root"], "external_scans")
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "ingest")
+        self.assertEqual(mocked.call_args.kwargs["raw_capture_root"], "raw_photos")
+        self.assertEqual(mocked.call_args.kwargs["classification"], "real")
+        self.assertEqual(mocked.call_args.kwargs["capture_medium"], "camera-photo")
+        self.assertEqual(
+            mocked.call_args.kwargs["capture_metadata"],
+            {"device": "unit-test-camera"},
+        )
+        self.assertTrue(mocked.call_args.kwargs["require_captures"])
+        self.assertTrue(mocked.call_args.kwargs["require_raw_captures"])
+        self.assertFalse(mocked.call_args.kwargs["require_all_case_labels"])
+        self.assertFalse(mocked.call_args.kwargs["update_corpus"])
+        self.assertFalse(mocked.call_args.kwargs["update_kit_manifest"])
+
+    def test_qrcode_helper_correct_capture_perspective_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {
+            "success": True,
+            "schema": certify.CAPTURE_PERSPECTIVE_CORRECTION_REPORT_SCHEMA,
+        }
+        with mock.patch.object(
+            certify,
+            "correct_capture_perspective",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.correct_capture_perspective(
+                capture_corpus_file="capture_corpus.json",
+                output_dir="corrected",
+                report_file="correction.json",
+                kit_manifest_file="capture_kit_manifest.json",
+                method="unit-test correction",
+                mode="normalize",
+                require_raw_captures=True,
+                require_distinct_from_raw=True,
+                update_corpus=False,
+                update_kit_manifest=False,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "capture_corpus.json")
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "corrected")
+        self.assertEqual(mocked.call_args.kwargs["report_file"], "correction.json")
+        self.assertEqual(
+            mocked.call_args.kwargs["kit_manifest_file"],
+            "capture_kit_manifest.json",
+        )
+        self.assertEqual(mocked.call_args.kwargs["method"], "unit-test correction")
+        self.assertEqual(mocked.call_args.kwargs["mode"], "normalize")
+        self.assertTrue(mocked.call_args.kwargs["require_raw_captures"])
+        self.assertTrue(mocked.call_args.kwargs["require_distinct_from_raw"])
+        self.assertFalse(mocked.call_args.kwargs["update_corpus"])
+        self.assertFalse(mocked.call_args.kwargs["update_kit_manifest"])
+
+    def test_qrcode_helper_validate_capture_corpus_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.CAPTURE_VALIDATION_REPORT_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "validate_capture_corpus",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.validate_capture_corpus(
+                capture_corpus_file="capture_corpus.json",
+                output_file="validate.json",
+                profile="reliable-airgap-v1",
+                backend="sidecar",
+                require_captures=True,
+                require_distinct_capture_images=True,
+                require_raw_captures=True,
+                capture_attachment_report_file="attachment.json",
+                require_capture_attachment_report=True,
+                require_capture_provenance=True,
+                capture_required_classification="real",
+                require_physical_print_scan=True,
+                require_real_camera_perspective_correction=True,
+                require_ocr_only_backend=True,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "capture_corpus.json")
+        self.assertEqual(mocked.call_args.kwargs["output_file"], "validate.json")
+        self.assertEqual(mocked.call_args.kwargs["profile"], "reliable-airgap-v1")
+        self.assertEqual(mocked.call_args.kwargs["backend"], "sidecar")
+        self.assertTrue(mocked.call_args.kwargs["require_captures"])
+        self.assertTrue(mocked.call_args.kwargs["require_distinct_capture_images"])
+        self.assertTrue(mocked.call_args.kwargs["require_raw_captures"])
+        self.assertEqual(
+            mocked.call_args.kwargs["capture_attachment_report_file"],
+            "attachment.json",
+        )
+        self.assertTrue(mocked.call_args.kwargs["require_capture_attachment_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_capture_provenance"])
+        self.assertEqual(mocked.call_args.kwargs["capture_required_classification"], "real")
+        self.assertTrue(mocked.call_args.kwargs["require_physical_print_scan"])
+        self.assertTrue(
+            mocked.call_args.kwargs["require_real_camera_perspective_correction"]
+        )
+        self.assertTrue(mocked.call_args.kwargs["require_ocr_only_backend"])
+
+    def test_qrcode_helper_archive_transport_evidence_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.CAPTURE_EVIDENCE_ARCHIVE_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "archive_transport_evidence",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.archive_transport_evidence(
+                report_file="transport_reliability_report.json",
+                output_dir="archive",
+                capture_corpus_file="capture_corpus.json",
+                capture_attachment_report_file="attachment.json",
+                archive_file="bundle.zip",
+                manifest_file="bundle_manifest.json",
+                require_successful_report=True,
+                require_capture_attachment_report=True,
+                require_physical_print_scan=True,
+                require_real_camera_perspective_correction=True,
+                require_ocr_only_backend=True,
+                require_profile_certified=True,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.kwargs["report_file"], "transport_reliability_report.json")
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "archive")
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "capture_corpus.json")
+        self.assertEqual(
+            mocked.call_args.kwargs["capture_attachment_report_file"],
+            "attachment.json",
+        )
+        self.assertEqual(mocked.call_args.kwargs["archive_file"], "bundle.zip")
+        self.assertEqual(mocked.call_args.kwargs["manifest_file"], "bundle_manifest.json")
+        self.assertTrue(mocked.call_args.kwargs["require_successful_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_capture_attachment_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_physical_print_scan"])
+        self.assertTrue(
+            mocked.call_args.kwargs["require_real_camera_perspective_correction"]
+        )
+        self.assertTrue(mocked.call_args.kwargs["require_ocr_only_backend"])
+        self.assertTrue(mocked.call_args.kwargs["require_profile_certified"])
+
+    def test_qrcode_helper_verify_transport_evidence_archive_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {
+            "success": True,
+            "schema": certify.CAPTURE_EVIDENCE_ARCHIVE_VERIFICATION_SCHEMA,
+        }
+        with mock.patch.object(
+            certify,
+            "verify_transport_evidence_archive",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.verify_transport_evidence_archive(
+                archive_file="transport_capture_evidence_archive.zip",
+                manifest_file="manifest.json",
+                output_file="verify.json",
+                require_successful_report=True,
+                require_capture_attachment_report=True,
+                require_physical_print_scan=True,
+                require_real_camera_perspective_correction=True,
+                require_ocr_only_backend=True,
+                require_profile_certified=True,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(
+            mocked.call_args.kwargs["archive_file"],
+            "transport_capture_evidence_archive.zip",
+        )
+        self.assertEqual(mocked.call_args.kwargs["manifest_file"], "manifest.json")
+        self.assertEqual(mocked.call_args.kwargs["output_file"], "verify.json")
+        self.assertTrue(mocked.call_args.kwargs["require_successful_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_capture_attachment_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_physical_print_scan"])
+        self.assertTrue(
+            mocked.call_args.kwargs["require_real_camera_perspective_correction"]
+        )
+        self.assertTrue(mocked.call_args.kwargs["require_ocr_only_backend"])
+        self.assertTrue(mocked.call_args.kwargs["require_profile_certified"])
+
+    def test_qrcode_helper_replay_transport_evidence_archive_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {
+            "success": True,
+            "schema": certify.CAPTURE_EVIDENCE_ARCHIVE_REPLAY_SCHEMA,
+        }
+        with mock.patch.object(
+            certify,
+            "replay_transport_evidence_archive",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.replay_transport_evidence_archive(
+                archive_file="transport_capture_evidence_archive.zip",
+                output_dir="replay",
+                manifest_file="manifest.json",
+                replay_report_file="replay_report.json",
+                output_file="summary.json",
+                require_successful_report=True,
+                require_capture_attachment_report=True,
+                require_physical_print_scan=True,
+                require_real_camera_perspective_correction=True,
+                require_ocr_only_backend=True,
+                require_profile_certified=True,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertIs(mocked.call_args.kwargs["transport"], transport)
+        self.assertEqual(
+            mocked.call_args.kwargs["archive_file"],
+            "transport_capture_evidence_archive.zip",
+        )
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "replay")
+        self.assertEqual(mocked.call_args.kwargs["manifest_file"], "manifest.json")
+        self.assertEqual(mocked.call_args.kwargs["replay_report_file"], "replay_report.json")
+        self.assertEqual(mocked.call_args.kwargs["output_file"], "summary.json")
+        self.assertTrue(mocked.call_args.kwargs["require_successful_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_capture_attachment_report"])
+        self.assertTrue(mocked.call_args.kwargs["require_physical_print_scan"])
+        self.assertTrue(
+            mocked.call_args.kwargs["require_real_camera_perspective_correction"]
+        )
+        self.assertTrue(mocked.call_args.kwargs["require_ocr_only_backend"])
+        self.assertTrue(mocked.call_args.kwargs["require_profile_certified"])
+
+    def test_qrcode_helper_certification_status_entrypoint_delegates_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.CERTIFICATION_STATUS_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "summarize_transport_certification_status",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.summarize_transport_certification_status(
+                report_file="transport_reliability_report.json",
+                verification_file=None,
+                archive_file=None,
+                manifest_file="manifest.json",
+                output_file="status.json",
+                verify_archive=True,
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(
+            mocked.call_args.kwargs["report_file"],
+            "transport_reliability_report.json",
+        )
+        self.assertIsNone(mocked.call_args.kwargs["verification_file"])
+        self.assertIsNone(mocked.call_args.kwargs["archive_file"])
+        self.assertEqual(mocked.call_args.kwargs["manifest_file"], "manifest.json")
+        self.assertEqual(mocked.call_args.kwargs["output_file"], "status.json")
+        self.assertTrue(mocked.call_args.kwargs["verify_archive"])
+        self.assertIsNone(mocked.call_args.kwargs["required_certified_claims"])
+
+    def test_qrcode_helper_certification_status_entrypoint_delegates_claim_gate(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {"success": True, "schema": certify.CERTIFICATION_STATUS_SCHEMA}
+        with mock.patch.object(
+            certify,
+            "summarize_transport_certification_status",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.summarize_transport_certification_status(
+                report_file="transport_reliability_report.json",
+                required_certified_claims=["physical-print-scan"],
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertEqual(
+            mocked.call_args.kwargs["required_certified_claims"],
+            ["physical-print-scan"],
+        )
+
+    def test_qrcode_helper_certify_capture_evidence_pipeline_delegates_replay_options(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        sentinel = {
+            "success": True,
+            "schema": certify.CAPTURE_CERTIFICATION_PIPELINE_SCHEMA,
+        }
+        with mock.patch.object(
+            certify,
+            "certify_capture_evidence_pipeline",
+            autospec=True,
+            return_value=sentinel,
+        ) as mocked:
+            result = transport.certify_capture_evidence_pipeline(
+                capture_corpus_file="capture_corpus.json",
+                output_dir="pipeline",
+                capture_root="external_scans",
+                raw_capture_root="raw_photos",
+                capture_medium="print-scan",
+                capture_metadata={"scanner": "delegate-flatbed"},
+                require_all_case_labels=False,
+                require_physical_print_scan=True,
+                require_capture_provenance=True,
+                ingestion_report_file="ingest.json",
+                replay_output_dir="evidence_replay",
+                replay_report_file="replay_report.json",
+                replay_summary_file="replay_summary.json",
+                required_certified_claims=["physical-print-scan"],
+            )
+
+        self.assertIs(result, sentinel)
+        mocked.assert_called_once()
+        self.assertIs(mocked.call_args.kwargs["transport"], transport)
+        self.assertEqual(mocked.call_args.kwargs["capture_corpus_file"], "capture_corpus.json")
+        self.assertEqual(mocked.call_args.kwargs["output_dir"], "pipeline")
+        self.assertEqual(mocked.call_args.kwargs["capture_root"], "external_scans")
+        self.assertEqual(mocked.call_args.kwargs["raw_capture_root"], "raw_photos")
+        self.assertEqual(mocked.call_args.kwargs["capture_medium"], "print-scan")
+        self.assertEqual(
+            mocked.call_args.kwargs["capture_metadata"],
+            {"scanner": "delegate-flatbed"},
+        )
+        self.assertFalse(mocked.call_args.kwargs["require_all_case_labels"])
+        self.assertTrue(mocked.call_args.kwargs["require_physical_print_scan"])
+        self.assertTrue(mocked.call_args.kwargs["require_capture_provenance"])
+        self.assertEqual(mocked.call_args.kwargs["ingestion_report_file"], "ingest.json")
+        self.assertEqual(mocked.call_args.kwargs["replay_output_dir"], "evidence_replay")
+        self.assertEqual(mocked.call_args.kwargs["replay_report_file"], "replay_report.json")
+        self.assertEqual(mocked.call_args.kwargs["replay_summary_file"], "replay_summary.json")
+        self.assertEqual(
+            mocked.call_args.kwargs["required_certified_claims"],
+            ["physical-print-scan"],
+        )
 
     def test_qrcode_helper_render_font_loader_uses_transport_render_module(self) -> None:
         transport = qrcode_helper.AirgapTransportLayer()
@@ -790,6 +1438,85 @@ class TransportModuleExtractionTests(unittest.TestCase):
             band=band,
             payload_len=8,
         )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for sidecar distortion decode")
+    def test_sidecar_payload_decode_survives_resize_and_affine_skew(self) -> None:
+        payload = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[:24]
+        bits = protocol.safe_payload_to_bits(payload)
+        cols = protocol.SIDECAR_BITS_PER_ROW
+        rows = 3
+        left = 80
+        top = 120
+        cell = protocol.SIDECAR_CELL_SIZE
+        gap = protocol.SIDECAR_CELL_GAP
+        width = 520
+        height = 280
+        image = qrcode_helper.Image.new("RGB", (width, height), "white")
+        draw = qrcode_helper.ImageDraw.Draw(image)
+        for bit_index, bit in enumerate(bits):
+            if bit != "1":
+                continue
+            row = bit_index // cols
+            col = bit_index % cols
+            cell_left = left + col * (cell + gap)
+            cell_top = top + row * (cell + gap)
+            draw.rectangle(
+                (
+                    cell_left,
+                    cell_top,
+                    cell_left + cell - 1,
+                    cell_top + cell - 1,
+                ),
+                fill="black",
+            )
+
+        distorted = image.resize(
+            (int(round(width * 0.9)), int(round(height * 0.9))),
+            qrcode_helper.RESAMPLE_LANCZOS,
+        )
+        distorted = distorted.transform(
+            distorted.size,
+            qrcode_helper.Image.AFFINE,
+            (1.0, -0.015, 20.0, 0.01, 1.0, -15.0),
+            resample=qrcode_helper.Image.BICUBIC,
+            fillcolor="white",
+        )
+        page_layout = {"page_width": width, "page_height": height}
+        line_meta = {
+            "binary_box": [
+                left,
+                top,
+                left + cols * cell + (cols - 1) * gap,
+                top + rows * cell + (rows - 1) * gap,
+            ],
+            "binary_cell": cell,
+            "binary_cols": cols,
+            "binary_gap": gap,
+            "binary_rows": rows,
+            "bit_count": len(bits),
+            "chunk_index": 0,
+            "expected_crc": protocol.crc16_hex("C00000|{}".format(payload)),
+            "payload_len": len(payload),
+        }
+
+        result = ocr_runtime.decode_sidecar_payload(
+            transport=qrcode_helper.AirgapTransportLayer(),
+            image=distorted,
+            page_layout=page_layout,
+            line_meta=line_meta,
+        )
+
+        self.assertEqual(result, payload)
+
+    def test_qrcode_helper_ocr_runtime_page_sidecar_helpers_delegate_to_transport_module(self) -> None:
+        transport = qrcode_helper.AirgapTransportLayer()
+        image = object()
+        page_layout = {"lines": [{"kind": "data"}]}
+        band = {"top": 1, "bottom": 9}
+        entries = [{"page": 1, "line": 1, "chunk_index": 0}]
+        manifest = {"chunk_lengths": [8]}
+        path = qrcode_helper.Path("case_0001.png")
+        reader = object()
 
         with mock.patch.object(
             ocr_runtime,

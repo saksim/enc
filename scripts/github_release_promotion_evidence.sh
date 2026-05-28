@@ -14,6 +14,7 @@ APPROVER=""
 RUN_ID=""
 RUN_ATTEMPT=""
 OUTPUT_ROOT=".tmp_ci/live_promotion"
+PREFLIGHT_ONLY="false"
 POLL_INTERVAL_SECONDS=10
 TIMEOUT_SECONDS=5400
 ARTIFACT_INDEX_WAIT_SECONDS=180
@@ -36,6 +37,7 @@ Options:
   --run-id <id>                      Capture evidence from an existing workflow run id (skip dispatch).
   --run-attempt <int>                Expected attempt number for --run-id (optional strict check).
   --output-root <dir>                Local evidence output root (default: .tmp_ci/live_promotion).
+  --preflight-only                   Validate repo/workflow identity, write promotion_preflight_receipt.json, and exit before dispatch.
   --poll-interval-seconds <int>      Run-state poll interval (default: 10).
   --timeout-seconds <int>            Max wait for run completion (default: 5400).
   --artifact-index-wait-seconds <int>
@@ -74,6 +76,140 @@ require_positive_integer() {
     echo "Invalid ${label}: ${value} (expected positive integer)" >&2
     exit 1
   fi
+}
+
+expected_api_host_for_run_host() {
+  local run_host="$1"
+  if [[ -z "$run_host" ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  local normalized="${run_host,,}"
+  if [[ "$normalized" == "github.com" ]]; then
+    printf '%s\n' "api.github.com"
+    return 0
+  fi
+  printf '%s\n' "$normalized"
+}
+
+require_repo_slug() {
+  local value="$1"
+  if [[ -z "$value" || "$value" != "${value//[[:space:]]/}" ]]; then
+    echo "Invalid repo slug: ${value} (expected owner/repo without whitespace)" >&2
+    exit 1
+  fi
+  if [[ "$value" != */* || "$value" == */ || "$value" == /* || "$value" == */*/* ]]; then
+    echo "Invalid repo slug: ${value} (expected owner/repo)" >&2
+    exit 1
+  fi
+}
+
+verify_github_cli_repo_access() {
+  local repo="$1"
+  local auth_status_output=""
+  local auth_status_code=0
+  local repo_probe_output=""
+  local repo_probe_status=0
+  echo "Checking GitHub CLI authentication and repository API access..."
+  set +e
+  auth_status_output="$(gh auth status 2>&1)"
+  auth_status_code=$?
+  set -e
+  if [[ "$auth_status_code" -ne 0 ]]; then
+    echo "gh auth status reported non-zero; continuing with repository API probe for ${repo}."
+  fi
+  set +e
+  repo_probe_output="$(gh api "repos/${repo}" --jq '.full_name' 2>&1)"
+  repo_probe_status=$?
+  set -e
+  if [[ "$repo_probe_status" -ne 0 ]]; then
+    echo "GitHub repository API probe failed for ${repo}." >&2
+    if [[ -n "$auth_status_output" ]]; then
+      printf '%s\n' "$auth_status_output" >&2
+    fi
+    printf '%s\n' "$repo_probe_output" >&2
+    echo "Provide a token with repository and Actions API access via GH_TOKEN/GITHUB_TOKEN or gh auth login." >&2
+    exit 1
+  fi
+  if [[ -z "$repo_probe_output" || "$repo_probe_output" != "${repo_probe_output//[[:space:]]/}" ]]; then
+    echo "GitHub repository API probe returned invalid repository identity for ${repo}." >&2
+    exit 1
+  fi
+  if [[ "${repo_probe_output,,}" != "${repo,,}" ]]; then
+    echo "GitHub repository API probe mismatch: expected ${repo}, got ${repo_probe_output}" >&2
+    exit 1
+  fi
+  echo "GitHub repository API probe passed for ${repo_probe_output}"
+}
+
+resolve_workflow_definition_identity() {
+  local repo="$1"
+  local workflow_file="$2"
+  local expected_workflow_path="$3"
+  local workflow_encoded=""
+  local workflow_probe_output=""
+  local workflow_probe_status=0
+  local workflow_probe_parsed=""
+  local workflow_id=""
+  local workflow_path=""
+  local workflow_state=""
+  local workflow_name=""
+  workflow_encoded="$(urlencode_path_segment "$workflow_file")"
+  echo "Resolving workflow definition identity for ${workflow_file} on ${repo}..." >&2
+  set +e
+  workflow_probe_output="$(gh api "repos/${repo}/actions/workflows/${workflow_encoded}" 2>&1)"
+  workflow_probe_status=$?
+  set -e
+  if [[ "$workflow_probe_status" -ne 0 ]]; then
+    echo "Unable to resolve workflow definition for ${workflow_file} on ${repo}." >&2
+    printf '%s\n' "$workflow_probe_output" >&2
+    exit 1
+  fi
+  workflow_probe_parsed="$(python - "$workflow_probe_output" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+print(payload.get("id", ""))
+print(payload.get("path", ""))
+print(payload.get("state", ""))
+print(payload.get("name", ""))
+PY
+)"
+  workflow_id="$(printf '%s\n' "$workflow_probe_parsed" | sed -n '1p')"
+  workflow_path="$(printf '%s\n' "$workflow_probe_parsed" | sed -n '2p')"
+  workflow_state="$(printf '%s\n' "$workflow_probe_parsed" | sed -n '3p')"
+  workflow_name="$(printf '%s\n' "$workflow_probe_parsed" | sed -n '4p')"
+
+  if [[ ! "$workflow_id" =~ ^[0-9]+$ ]]; then
+    echo "Resolved workflow id is not numeric for ${workflow_file} on ${repo}: ${workflow_id}" >&2
+    exit 1
+  fi
+  if [[ -z "$workflow_path" || "$workflow_path" != "${workflow_path//[[:space:]]/}" ]]; then
+    echo "Resolved workflow path is invalid for ${workflow_file} on ${repo}: ${workflow_path}" >&2
+    exit 1
+  fi
+  if [[ "$workflow_path" != .github/workflows/* ]]; then
+    echo "Resolved workflow path is outside .github/workflows for ${workflow_file} on ${repo}: ${workflow_path}" >&2
+    exit 1
+  fi
+  if [[ -n "$expected_workflow_path" && "$workflow_path" != "$expected_workflow_path" ]]; then
+    echo "Resolved workflow definition path mismatch for ${workflow_file}: expected ${expected_workflow_path}, got ${workflow_path}" >&2
+    exit 1
+  fi
+  if [[ "$workflow_state" != "active" ]]; then
+    echo "Resolved workflow state is not active for ${workflow_file} on ${repo}: ${workflow_state}" >&2
+    exit 1
+  fi
+  if [[ -z "$workflow_name" || "$workflow_name" =~ ^[[:space:]] || "$workflow_name" =~ [[:space:]]$ ]]; then
+    echo "Resolved workflow name is invalid for ${workflow_file} on ${repo}: ${workflow_name}" >&2
+    exit 1
+  fi
+
+  echo "Resolved workflow definition id=${workflow_id} path=${workflow_path} state=${workflow_state} name=${workflow_name}" >&2
+  printf '%s\n' "$workflow_id"
+  printf '%s\n' "$workflow_path"
+  printf '%s\n' "$workflow_state"
+  printf '%s\n' "$workflow_name"
 }
 
 normalize_branch_ref_name() {
@@ -121,30 +257,97 @@ extract_run_id_from_dispatch_response_json() {
 text=sys.stdin.read()
 if not text.strip():
     print("")
+    print("")
+    print("")
+    print("")
     raise SystemExit(0)
 try:
     payload=json.loads(text)
 except Exception:
     print("")
+    print("")
+    print("")
+    print("")
     raise SystemExit(0)
+workflow_run = payload.get("workflow_run")
+if not isinstance(workflow_run, dict):
+    workflow_run = {}
+run_url = payload.get("run_url")
+if not isinstance(run_url, str):
+    run_url = ""
+if not run_url:
+    run_url = payload.get("url")
+if not isinstance(run_url, str):
+    run_url = ""
+if not run_url:
+    workflow_run_url = workflow_run.get("url")
+    if isinstance(workflow_run_url, str):
+        run_url = workflow_run_url
+html_url = payload.get("html_url")
+if not isinstance(html_url, str):
+    html_url = ""
+if not html_url:
+    workflow_url = payload.get("workflow_url")
+    if isinstance(workflow_url, str):
+        html_url = workflow_url
+if not html_url:
+    workflow_run_html_url = workflow_run.get("html_url")
+    if isinstance(workflow_run_html_url, str):
+        html_url = workflow_run_html_url
+workflow_id_value = payload.get("workflow_id")
+if workflow_id_value is None:
+    workflow_id_value = workflow_run.get("workflow_id")
+workflow_id_text = str(workflow_id_value) if workflow_id_value is not None else ""
+if workflow_id_text and not workflow_id_text.isdigit():
+    print("Dispatch response workflow_id is not numeric: {0}".format(workflow_id_text), file=sys.stderr)
+    raise SystemExit(1)
+
 candidates=[]
-def add_candidate(value):
+candidate_sources={}
+def add_candidate(value, source):
     value_text=str(value) if value is not None else ""
     if value_text.isdigit():
         candidates.append(value_text)
-add_candidate(payload.get("workflow_run_id"))
-add_candidate(payload.get("run_id"))
-workflow_run=payload.get("workflow_run")
+        candidate_sources.setdefault(value_text, set()).add(source)
+
+add_candidate(payload.get("workflow_run_id"), "workflow_run_id")
+add_candidate(payload.get("run_id"), "run_id")
 if isinstance(workflow_run, dict):
-    add_candidate(workflow_run.get("id"))
-for key in ("run_url", "html_url", "url"):
+    add_candidate(workflow_run.get("id"), "workflow_run.id")
+for key in ("run_url", "html_url", "url", "workflow_url"):
     value=payload.get(key)
     if not isinstance(value,str):
         continue
     matches=re.findall(r"/actions/runs/([0-9]+)", value)
     if matches:
-        candidates.append(matches[-1])
-print(candidates[0] if candidates else "")
+        add_candidate(matches[-1], key)
+for key in ("url", "html_url"):
+    value=workflow_run.get(key)
+    if not isinstance(value,str):
+        continue
+    matches=re.findall(r"/actions/runs/([0-9]+)", value)
+    if matches:
+        add_candidate(matches[-1], "workflow_run.{0}".format(key))
+
+candidate_unique = sorted(set(candidates))
+if len(candidate_unique) > 1:
+    details = []
+    for candidate_id in candidate_unique:
+        sources = sorted(candidate_sources.get(candidate_id, []))
+        details.append("{0}<-{1}".format(candidate_id, "|".join(sources)))
+    print(
+        "Dispatch response run id candidates are inconsistent: {0}".format(
+            ", ".join(details)
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+run_id = candidate_unique[0] if candidate_unique else ""
+print(run_id)
+print(run_url if isinstance(run_url, str) else "")
+print(html_url if isinstance(html_url, str) else "")
+print(workflow_id_text)
 '
 }
 
@@ -204,6 +407,76 @@ dispatch_workflow_with_run_details() {
     --input -
 }
 
+write_promotion_preflight_receipt() {
+  local receipt_path="$1"
+  local repo="$2"
+  local workflow_file="$3"
+  local ref="$4"
+  local expected_workflow_path="$5"
+  local workflow_id="$6"
+  local workflow_path="$7"
+  local workflow_state="$8"
+  local workflow_name="$9"
+  local rotation_rehearsal="${10}"
+  local skip_collect="${11}"
+  python - \
+    "$receipt_path" \
+    "$repo" \
+    "$workflow_file" \
+    "$ref" \
+    "$expected_workflow_path" \
+    "$workflow_id" \
+    "$workflow_path" \
+    "$workflow_state" \
+    "$workflow_name" \
+    "$rotation_rehearsal" \
+    "$skip_collect" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    receipt_path,
+    repo,
+    workflow_file,
+    workflow_dispatch_ref,
+    expected_workflow_path,
+    workflow_id,
+    workflow_path,
+    workflow_state,
+    workflow_name,
+    rotation_rehearsal,
+    skip_collect,
+) = sys.argv[1:12]
+
+payload = {
+    "schema": "enc2sop-promotion-preflight/v1",
+    "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "github_repository": repo,
+    "workflow_file": workflow_file,
+    "workflow_dispatch_ref": workflow_dispatch_ref,
+    "repository_api_verified": True,
+    "preflight_only": True,
+    "dispatch_executed": False,
+    "rotation_rehearsal_requested": rotation_rehearsal == "true",
+    "skip_promotion_collect_requested": skip_collect == "true",
+    "workflow_definition_verification": {
+        "id": int(workflow_id),
+        "path": workflow_path,
+        "expected_path": expected_workflow_path or workflow_path,
+        "state": workflow_state,
+        "name": workflow_name,
+    },
+    "next_step": "rerun without --preflight-only to dispatch or capture the protected-branch promotion run",
+}
+path = Path(receipt_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+print(str(path))
+PY
+}
+
 resolve_run_id_from_recent_runs() {
   local repo="$1"
   local workflow_file="$2"
@@ -221,13 +494,13 @@ resolve_run_id_from_recent_runs() {
     --branch "$ref_name" \
     --limit 20 \
     --json databaseId,createdAt,event,headBranch,url)"
-  printf '%s\n' "$runs_json" | python - "$dispatch_epoch" <<'PY'
+  python - "$dispatch_epoch" "$runs_json" <<'PY'
 import datetime
 import json
 import sys
 
 dispatch_epoch = float(sys.argv[1])
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[2])
 
 def parse_epoch(value: str) -> float:
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
@@ -303,6 +576,10 @@ while [[ $# -gt 0 ]]; do
       OUTPUT_ROOT="$2"
       shift 2
       ;;
+    --preflight-only)
+      PREFLIGHT_ONLY="true"
+      shift
+      ;;
     --poll-interval-seconds)
       POLL_INTERVAL_SECONDS="$2"
       shift 2
@@ -338,6 +615,7 @@ fi
 
 require_boolean_token "$ROTATION_REHEARSAL" "rotation-rehearsal"
 require_boolean_token "$SKIP_PROMOTION_COLLECT" "skip-promotion-collect"
+require_boolean_token "$PREFLIGHT_ONLY" "preflight-only"
 require_positive_integer "$POLL_INTERVAL_SECONDS" "poll-interval-seconds"
 require_positive_integer "$TIMEOUT_SECONDS" "timeout-seconds"
 require_positive_integer "$ARTIFACT_INDEX_WAIT_SECONDS" "artifact-index-wait-seconds"
@@ -351,6 +629,10 @@ if [[ -z "$RUN_ID" && -n "$RUN_ATTEMPT" ]]; then
   echo "--run-attempt requires --run-id." >&2
   exit 1
 fi
+if [[ "$PREFLIGHT_ONLY" == "true" && -n "$RUN_ID" ]]; then
+  echo "--preflight-only cannot be combined with --run-id." >&2
+  exit 1
+fi
 
 if [[ -z "$REPO" ]]; then
   REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
@@ -359,19 +641,48 @@ if [[ -z "$REPO" ]]; then
   echo "Unable to resolve repository slug. Provide --repo <owner/repo>." >&2
   exit 1
 fi
+require_repo_slug "$REPO"
 
 expected_workflow_path="$(resolve_expected_workflow_path "$WORKFLOW_FILE")"
 expected_branch_ref="$(normalize_branch_ref_name "$REF")"
 
-echo "Checking GitHub CLI authentication..."
-gh auth status >/dev/null
+verify_github_cli_repo_access "$REPO"
+resolved_workflow_definition="$(resolve_workflow_definition_identity "$REPO" "$WORKFLOW_FILE" "$expected_workflow_path")"
+resolved_workflow_definition_id="$(printf '%s\n' "$resolved_workflow_definition" | sed -n '1p')"
+resolved_workflow_definition_path="$(printf '%s\n' "$resolved_workflow_definition" | sed -n '2p')"
+resolved_workflow_definition_state="$(printf '%s\n' "$resolved_workflow_definition" | sed -n '3p')"
+resolved_workflow_definition_name="$(printf '%s\n' "$resolved_workflow_definition" | sed -n '4p')"
+if [[ -z "$expected_workflow_path" ]]; then
+  expected_workflow_path="$resolved_workflow_definition_path"
+fi
 
 mkdir -p "$OUTPUT_ROOT"
+if [[ "$PREFLIGHT_ONLY" == "true" ]]; then
+  preflight_receipt_path="${OUTPUT_ROOT}/promotion_preflight_receipt.json"
+  write_promotion_preflight_receipt \
+    "$preflight_receipt_path" \
+    "$REPO" \
+    "$WORKFLOW_FILE" \
+    "$REF" \
+    "$expected_workflow_path" \
+    "$resolved_workflow_definition_id" \
+    "$resolved_workflow_definition_path" \
+    "$resolved_workflow_definition_state" \
+    "$resolved_workflow_definition_name" \
+    "$ROTATION_REHEARSAL" \
+    "$SKIP_PROMOTION_COLLECT"
+  echo "Promotion evidence preflight passed."
+  echo "preflight_receipt=${preflight_receipt_path}"
+  exit 0
+fi
 dispatch_epoch="$(date -u +%s)"
 dispatch_utc=""
 capture_mode="dispatch"
 run_id=""
 run_id_resolution_mode="provided"
+dispatch_run_url_api=""
+dispatch_run_html_url=""
+dispatch_workflow_id_api=""
 if [[ -n "$RUN_ID" ]]; then
   capture_mode="existing-run"
   run_id="$RUN_ID"
@@ -417,7 +728,11 @@ else
     if [[ -n "$dispatch_output" ]]; then
       printf '%s\n' "$dispatch_output"
     fi
-    run_id="$(extract_run_id_from_dispatch_response_json "$dispatch_output")"
+    dispatch_response_parsed="$(extract_run_id_from_dispatch_response_json "$dispatch_output")"
+    run_id="$(printf '%s\n' "$dispatch_response_parsed" | sed -n '1p')"
+    dispatch_run_url_api="$(printf '%s\n' "$dispatch_response_parsed" | sed -n '2p')"
+    dispatch_run_html_url="$(printf '%s\n' "$dispatch_response_parsed" | sed -n '3p')"
+    dispatch_workflow_id_api="$(printf '%s\n' "$dispatch_response_parsed" | sed -n '4p')"
     if [[ -n "$run_id" ]]; then
       run_id_resolution_mode="dispatch-api"
     fi
@@ -543,6 +858,7 @@ print(triggering_actor.get("login","") if isinstance(triggering_actor, dict) els
 print(payload.get("id",""))
 print(repository.get("full_name","") if isinstance(repository, dict) else "")
 print(repository_owner.get("login","") if isinstance(repository_owner, dict) else "")
+print(payload.get("workflow_id",""))
 ')"
 run_event_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '1p')"
 run_head_branch_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '2p')"
@@ -565,6 +881,20 @@ run_triggering_actor_login_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '1
 run_id_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '19p')"
 run_repository_full_name_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '20p')"
 run_repository_owner_login_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '21p')"
+run_workflow_id_api="$(printf '%s\n' "$run_detail_parsed" | sed -n '22p')"
+
+if [[ -n "$dispatch_workflow_id_api" ]]; then
+  if [[ ! "$dispatch_workflow_id_api" =~ ^[0-9]+$ ]]; then
+    echo "Dispatch response workflow_id is not numeric for run_id=${run_id}: ${dispatch_workflow_id_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  if [[ "$dispatch_workflow_id_api" != "$resolved_workflow_definition_id" ]]; then
+    echo "Dispatch response workflow_id mismatch for run_id=${run_id}: expected ${resolved_workflow_definition_id}, got ${dispatch_workflow_id_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+fi
 
 if [[ -z "$run_workflow_path_ref" || "$run_workflow_path_ref" != *@* ]]; then
   echo "Unable to resolve workflow path@ref identity for run_id=${run_id}." >&2
@@ -577,6 +907,21 @@ run_workflow_ref="${run_workflow_path_ref#*@}"
 
 if [[ -n "$expected_workflow_path" && "$run_workflow_path" != "$expected_workflow_path" ]]; then
   echo "workflow path mismatch for run_id=${run_id}: expected ${expected_workflow_path}, got ${run_workflow_path}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ -z "$run_workflow_id_api" ]]; then
+  echo "run workflow_id is missing in run details for run_id=${run_id}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ ! "$run_workflow_id_api" =~ ^[0-9]+$ ]]; then
+  echo "run workflow_id is not numeric in run details for run_id=${run_id}: ${run_workflow_id_api}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_workflow_id_api" != "$resolved_workflow_definition_id" ]]; then
+  echo "run workflow_id mismatch for run_id=${run_id}: expected ${resolved_workflow_definition_id}, got ${run_workflow_id_api}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
@@ -729,6 +1074,74 @@ if [[ -n "$run_url" && -n "$run_html_url_api" && "$run_url" != "$run_html_url_ap
   exit 1
 fi
 
+if [[ -n "$dispatch_run_url_api" ]]; then
+  if [[ "$dispatch_run_url_api" != "${dispatch_run_url_api//[[:space:]]/}" ]]; then
+    echo "Dispatch response run_url must not contain whitespace for run_id=${run_id}: ${dispatch_run_url_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  dispatch_run_id_from_url="$(python - "$run_id" "$dispatch_run_url_api" <<'PY'
+import re
+import sys
+
+run_id = sys.argv[1]
+run_url = sys.argv[2].strip()
+if not run_url:
+    print("")
+    raise SystemExit(0)
+match = re.search(r"/actions/runs/([0-9]+)", run_url)
+if not match:
+    print(
+        "Dispatch response run_url does not contain a canonical /actions/runs/<id> segment: {0}".format(
+            run_url
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(match.group(1))
+PY
+)"
+  if [[ -n "$dispatch_run_id_from_url" && "$dispatch_run_id_from_url" != "$run_id" ]]; then
+    echo "Dispatch response run_url run_id mismatch: expected ${run_id}, got ${dispatch_run_id_from_url}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$dispatch_run_html_url" ]]; then
+  if [[ "$dispatch_run_html_url" != "${dispatch_run_html_url//[[:space:]]/}" ]]; then
+    echo "Dispatch response html_url must not contain whitespace for run_id=${run_id}: ${dispatch_run_html_url}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  dispatch_html_run_id="$(python - "$run_id" "$dispatch_run_html_url" <<'PY'
+import re
+import sys
+
+run_id = sys.argv[1]
+run_url = sys.argv[2].strip()
+if not run_url:
+    print("")
+    raise SystemExit(0)
+match = re.search(r"/actions/runs/([0-9]+)", run_url)
+if not match:
+    print(
+        "Dispatch response html_url does not contain a canonical /actions/runs/<id> segment: {0}".format(
+            run_url
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(match.group(1))
+PY
+)"
+  if [[ -n "$dispatch_html_run_id" && "$dispatch_html_run_id" != "$run_id" ]]; then
+    echo "Dispatch response html_url run_id mismatch: expected ${run_id}, got ${dispatch_html_run_id}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+fi
+
 run_url_identity_verification="$(python - "$run_id" "$run_attempt" "$REPO" "$run_url" "$run_html_url_api" <<'PY'
 import re
 import sys
@@ -825,6 +1238,108 @@ run_url_host_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n
 run_url_attempt_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '2p')"
 run_html_url_host_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '3p')"
 run_html_url_attempt_verified="$(printf '%s\n' "$run_url_identity_verification" | sed -n '4p')"
+
+dispatch_url_identity_verification="$(python - "$run_id" "$run_attempt" "$REPO" "$run_url_host_verified" "$dispatch_run_url_api" "$dispatch_run_html_url" <<'PY'
+import re
+import sys
+from urllib.parse import urlsplit
+
+run_id = sys.argv[1]
+run_attempt = sys.argv[2]
+repo = sys.argv[3]
+expected_host = sys.argv[4]
+dispatch_run_url = sys.argv[5]
+dispatch_html_url = sys.argv[6]
+
+def _verify_optional_dispatch_url(label: str, value: str) -> tuple[str, str]:
+    if not value:
+        return "", ""
+    if value != value.strip():
+        print("{0} must not contain leading or trailing whitespace.".format(label), file=sys.stderr)
+        sys.exit(1)
+    parts = urlsplit(value)
+    if parts.scheme != "https":
+        print("{0} must use https scheme.".format(label), file=sys.stderr)
+        sys.exit(1)
+    if not parts.netloc:
+        print("{0} host is missing.".format(label), file=sys.stderr)
+        sys.exit(1)
+    if parts.query or parts.fragment:
+        print("{0} must not include query or fragment components.".format(label), file=sys.stderr)
+        sys.exit(1)
+    if expected_host and parts.netloc.lower() != expected_host.lower():
+        print(
+            "{0} host mismatch with resolved run url host: expected {1}, got {2}".format(
+                label,
+                expected_host,
+                parts.netloc,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    match = re.fullmatch(
+        r"/(?P<repo>[^/\s]+/[^/\s]+)/actions/runs/(?P<run_id>[0-9]+)(?:/attempts/(?P<attempt>[0-9]+))?/?",
+        parts.path,
+    )
+    if match is None:
+        print("{0} path is not canonical: {1}".format(label, value), file=sys.stderr)
+        sys.exit(1)
+    path_repo = match.group("repo")
+    if path_repo != repo:
+        print(
+            "{0} repository path mismatch: expected {1}, got {2}".format(
+                label,
+                repo,
+                path_repo,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    path_run_id = match.group("run_id")
+    if path_run_id != run_id:
+        print(
+            "{0} run_id path mismatch: expected {1}, got {2}".format(
+                label,
+                run_id,
+                path_run_id,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    attempt = match.group("attempt") or ""
+    if attempt and run_attempt and attempt != run_attempt:
+        print(
+            "{0} attempt path mismatch: expected {1}, got {2}".format(
+                label,
+                run_attempt,
+                attempt,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return parts.netloc, attempt
+
+run_url_host, run_url_attempt = _verify_optional_dispatch_url("dispatch response run_url", dispatch_run_url)
+html_url_host, html_url_attempt = _verify_optional_dispatch_url("dispatch response html_url", dispatch_html_url)
+if run_url_host and html_url_host and run_url_host.lower() != html_url_host.lower():
+    print(
+        "dispatch response URL host mismatch between run_url and html_url: {0} vs {1}".format(
+            run_url_host,
+            html_url_host,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(run_url_host)
+print(run_url_attempt)
+print(html_url_host)
+print(html_url_attempt)
+PY
+)"
+dispatch_run_url_host_verified="$(printf '%s\n' "$dispatch_url_identity_verification" | sed -n '1p')"
+dispatch_run_url_attempt_verified="$(printf '%s\n' "$dispatch_url_identity_verification" | sed -n '2p')"
+dispatch_html_url_host_verified="$(printf '%s\n' "$dispatch_url_identity_verification" | sed -n '3p')"
+dispatch_html_url_attempt_verified="$(printf '%s\n' "$dispatch_url_identity_verification" | sed -n '4p')"
 
 if [[ -n "$run_head_branch" && -n "$run_head_branch_api" && "$run_head_branch" != "$run_head_branch_api" ]]; then
   echo "head_branch mismatch between summary and run details for run_id=${run_id}: ${run_head_branch} vs ${run_head_branch_api}" >&2
@@ -1115,12 +1630,17 @@ if [[ ! "$run_actor_id_api" =~ ^[0-9]+$ ]]; then
 fi
 
 echo "Verifying promotion gate job and step outcomes for run attempt ${run_attempt}"
-promotion_job_verification_parsed="$(gh api "repos/${REPO}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100" | python - "$ROTATION_REHEARSAL" "$run_actor_login_api" "$run_triggering_actor_login_api" "$run_id" "$run_attempt" "$run_head_sha_api" "$run_head_branch_api" "$REPO" "$run_url_host_verified" "$run_workflow_name" <<'PY'
+promotion_jobs_json="$(gh api "repos/${REPO}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100")"
+promotion_jobs_json_path="${OUTPUT_ROOT}/run-${run_id}-attempt-${run_attempt}/promotion_jobs.json"
+mkdir -p "$(dirname "$promotion_jobs_json_path")"
+printf '%s\n' "$promotion_jobs_json" > "$promotion_jobs_json_path"
+promotion_job_verification_parsed="$(python - "$ROTATION_REHEARSAL" "$run_actor_login_api" "$run_triggering_actor_login_api" "$run_id" "$run_attempt" "$run_head_sha_api" "$run_head_branch_api" "$REPO" "$run_url_host_verified" "$run_workflow_name" "$promotion_jobs_json_path" <<'PY'
 import json
 import re
 import sys
 from urllib.parse import urlsplit
 from datetime import datetime
+from pathlib import Path
 
 rotation_rehearsal = sys.argv[1]
 run_actor_login = sys.argv[2]
@@ -1132,7 +1652,8 @@ expected_head_branch = sys.argv[7]
 expected_repo = sys.argv[8]
 expected_run_url_host = sys.argv[9]
 expected_workflow_name = sys.argv[10]
-payload = json.load(sys.stdin)
+payload_path = Path(sys.argv[11])
+payload = json.loads(payload_path.read_text(encoding="utf-8"))
 job_rows = payload.get("jobs")
 if not isinstance(job_rows, list):
     print("Workflow jobs payload is invalid for promotion-gate verification.", file=sys.stderr)
@@ -1563,22 +2084,36 @@ promotion_triggering_actor_login_verified="$(printf '%s\n' "$promotion_job_verif
 promotion_actor_parity_checked="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '19p')"
 promotion_triggering_actor_parity_checked="$(printf '%s\n' "$promotion_job_verification_parsed" | sed -n '20p')"
 
+dispatch_run_id_verified=""
+if [[ "$run_id_resolution_mode" == "dispatch-api" ]]; then
+  dispatch_run_id_verified="$run_id"
+fi
+dispatch_workflow_id_verified=""
+if [[ "$run_id_resolution_mode" == "dispatch-api" ]]; then
+  dispatch_workflow_id_verified="$dispatch_workflow_id_api"
+fi
+
 artifact_name="soenc-promotion-${run_id}-attempt-${run_attempt}"
 artifact_metadata_deadline_epoch="$(( $(date -u +%s) + ARTIFACT_INDEX_WAIT_SECONDS ))"
 artifact_metadata_parsed=""
 while :; do
 artifact_metadata_json="$(gh api "repos/${REPO}/actions/runs/${run_id}/artifacts?per_page=100&name=${artifact_name}")"
+artifact_metadata_json_path="${OUTPUT_ROOT}/run-${run_id}-attempt-${run_attempt}/artifact_metadata.json"
+mkdir -p "$(dirname "$artifact_metadata_json_path")"
+printf '%s\n' "$artifact_metadata_json" > "$artifact_metadata_json_path"
 set +e
-artifact_metadata_parsed="$(printf '%s\n' "$artifact_metadata_json" | python - "$artifact_name" "$run_id" "$REPO" <<'PY' 2>&1
+  artifact_metadata_parsed="$(python - "$artifact_name" "$run_id" "$REPO" "$artifact_metadata_json_path" <<'PY' 2>&1
 import json
 import re
 import sys
 from urllib.parse import urlsplit
+from pathlib import Path
 
 artifact_name = sys.argv[1]
 expected_run_id = sys.argv[2]
 expected_repo = sys.argv[3]
-payload = json.load(sys.stdin)
+payload_path = Path(sys.argv[4])
+payload = json.loads(payload_path.read_text(encoding="utf-8"))
 artifact_rows = payload.get("artifacts")
 if not isinstance(artifact_rows, list):
     print("Artifact list payload is invalid for run metadata verification.", file=sys.stderr)
@@ -1789,8 +2324,9 @@ if [[ -n "$run_head_sha_api" && -n "$artifact_workflow_head_sha" && "$run_head_s
   echo "run_url=${run_url}" >&2
   exit 1
 fi
-if [[ -n "$run_url_host_verified" && -n "$artifact_archive_download_url_host" && "$run_url_host_verified" != "$artifact_archive_download_url_host" ]]; then
-  echo "artifact archive_download_url host mismatch for run_id=${run_id}: expected ${run_url_host_verified}, got ${artifact_archive_download_url_host}" >&2
+expected_artifact_api_host="$(expected_api_host_for_run_host "$run_url_host_verified")"
+if [[ -n "$expected_artifact_api_host" && -n "$artifact_archive_download_url_host" && "${expected_artifact_api_host,,}" != "${artifact_archive_download_url_host,,}" ]]; then
+  echo "artifact archive_download_url host mismatch for run_id=${run_id}: expected API host ${expected_artifact_api_host}, got ${artifact_archive_download_url_host}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
@@ -1916,6 +2452,14 @@ python - \
   "$artifact_name" \
   "$ROTATION_REHEARSAL" \
   "$dispatch_utc" \
+  "$dispatch_run_id_verified" \
+  "$dispatch_workflow_id_verified" \
+  "$dispatch_run_url_api" \
+  "$dispatch_run_html_url" \
+  "$dispatch_run_url_host_verified" \
+  "$dispatch_html_url_host_verified" \
+  "$dispatch_run_url_attempt_verified" \
+  "$dispatch_html_url_attempt_verified" \
   "$capture_mode" \
   "$run_id_resolution_mode" \
   "$run_event_api" \
@@ -1935,6 +2479,7 @@ python - \
   "$run_updated_at_detail_verified" \
   "$WORKFLOW_JOB_ID" \
   "$run_head_sha_api" \
+  "$run_workflow_id_api" \
   "$run_number_api" \
   "$run_retention_days_api" \
   "$run_repository_id_api" \
@@ -1974,7 +2519,11 @@ python - \
   "$promotion_actor_login_verified" \
   "$promotion_triggering_actor_login_verified" \
   "$promotion_actor_parity_checked" \
-  "$promotion_triggering_actor_parity_checked" <<'PY'
+  "$promotion_triggering_actor_parity_checked" \
+  "$resolved_workflow_definition_id" \
+  "$resolved_workflow_definition_path" \
+  "$resolved_workflow_definition_state" \
+  "$resolved_workflow_definition_name" <<'PY'
 import hashlib
 import json
 import re
@@ -1984,76 +2533,94 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-download_root = Path(sys.argv[1]).resolve()
-receipt_path = Path(sys.argv[2]).resolve()
-repo = sys.argv[3]
-ref = sys.argv[4]
-workflow_file = sys.argv[5]
-run_id = sys.argv[6]
-run_attempt = sys.argv[7]
-run_url = sys.argv[8]
-artifact_name = sys.argv[9]
-rotation_rehearsal = sys.argv[10]
-dispatch_utc = sys.argv[11]
-capture_mode = sys.argv[12]
-run_id_resolution_mode = sys.argv[13]
-workflow_event = sys.argv[14]
-workflow_head_branch = sys.argv[15]
-workflow_path = sys.argv[16]
-workflow_path_ref = sys.argv[17]
-workflow_html_url = sys.argv[18]
-workflow_run_url_host = sys.argv[19]
-workflow_run_url_attempt = sys.argv[20]
-workflow_run_html_url_host = sys.argv[21]
-workflow_run_html_url_attempt = sys.argv[22]
-workflow_created_at = sys.argv[23]
-workflow_started_at = sys.argv[24]
-workflow_updated_at = sys.argv[25]
-workflow_created_at_detail = sys.argv[26]
-workflow_started_at_detail = sys.argv[27]
-workflow_updated_at_detail = sys.argv[28]
-workflow_job_id = sys.argv[29]
-workflow_head_sha = sys.argv[30]
-workflow_run_number = sys.argv[31]
-workflow_retention_days = sys.argv[32]
-workflow_repository_id = sys.argv[33]
-workflow_repository_owner_id = sys.argv[34]
-workflow_actor_id = sys.argv[35]
-artifact_id = sys.argv[36]
-artifact_digest = sys.argv[37]
-artifact_size_in_bytes = sys.argv[38]
-artifact_created_at = sys.argv[39]
-artifact_updated_at = sys.argv[40]
-artifact_expires_at = sys.argv[41]
-artifact_archive_download_url = sys.argv[42]
-artifact_archive_download_url_host = sys.argv[43]
-artifact_workflow_run_id = sys.argv[44]
-artifact_workflow_head_branch = sys.argv[45]
-artifact_workflow_head_sha = sys.argv[46]
-artifact_archive_path = sys.argv[47]
-artifact_archive_digest_verified = sys.argv[48]
-artifact_archive_size_bytes = sys.argv[49]
-artifact_archive_entry_count = sys.argv[50]
-promotion_job_id = sys.argv[51]
-promotion_job_html_url = sys.argv[52]
-promotion_job_html_url_host_verified = sys.argv[53]
-promotion_job_html_url_path_verified = sys.argv[54]
-promotion_job_html_url_attempt_verified = sys.argv[55]
-promotion_job_status_verified = sys.argv[56]
-promotion_job_conclusion_verified = sys.argv[57]
-promotion_job_started_at = sys.argv[58]
-promotion_job_completed_at = sys.argv[59]
-promotion_required_step_count_verified = sys.argv[60]
-promotion_rotation_step_name = sys.argv[61]
-promotion_rotation_step_conclusion_verified = sys.argv[62]
-promotion_runner_name_verified = sys.argv[63]
-promotion_runner_group_name_verified = sys.argv[64]
-promotion_runner_labels_verified = sys.argv[65]
-promotion_workflow_name_verified = sys.argv[66]
-promotion_actor_login_verified = sys.argv[67]
-promotion_triggering_actor_login_verified = sys.argv[68]
-promotion_actor_parity_checked = sys.argv[69]
-promotion_triggering_actor_parity_checked = sys.argv[70]
+(
+    download_root_arg,
+    receipt_path_arg,
+    repo,
+    ref,
+    workflow_file,
+    run_id,
+    run_attempt,
+    run_url,
+    artifact_name,
+    rotation_rehearsal,
+    dispatch_utc,
+    dispatch_run_id,
+    dispatch_workflow_id,
+    dispatch_run_url,
+    dispatch_run_html_url,
+    dispatch_run_url_host,
+    dispatch_run_html_url_host,
+    dispatch_run_url_attempt,
+    dispatch_run_html_url_attempt,
+    capture_mode,
+    run_id_resolution_mode,
+    workflow_event,
+    workflow_head_branch,
+    workflow_path,
+    workflow_path_ref,
+    workflow_html_url,
+    workflow_run_url_host,
+    workflow_run_url_attempt,
+    workflow_run_html_url_host,
+    workflow_run_html_url_attempt,
+    workflow_created_at,
+    workflow_started_at,
+    workflow_updated_at,
+    workflow_created_at_detail,
+    workflow_started_at_detail,
+    workflow_updated_at_detail,
+    workflow_job_id,
+    workflow_head_sha,
+    workflow_run_workflow_id,
+    workflow_run_number,
+    workflow_retention_days,
+    workflow_repository_id,
+    workflow_repository_owner_id,
+    workflow_actor_id,
+    artifact_id,
+    artifact_digest,
+    artifact_size_in_bytes,
+    artifact_created_at,
+    artifact_updated_at,
+    artifact_expires_at,
+    artifact_archive_download_url,
+    artifact_archive_download_url_host,
+    artifact_workflow_run_id,
+    artifact_workflow_head_branch,
+    artifact_workflow_head_sha,
+    artifact_archive_path,
+    artifact_archive_digest_verified,
+    artifact_archive_size_bytes,
+    artifact_archive_entry_count,
+    promotion_job_id,
+    promotion_job_html_url,
+    promotion_job_html_url_host_verified,
+    promotion_job_html_url_path_verified,
+    promotion_job_html_url_attempt_verified,
+    promotion_job_status_verified,
+    promotion_job_conclusion_verified,
+    promotion_job_started_at,
+    promotion_job_completed_at,
+    promotion_required_step_count_verified,
+    promotion_rotation_step_name,
+    promotion_rotation_step_conclusion_verified,
+    promotion_runner_name_verified,
+    promotion_runner_group_name_verified,
+    promotion_runner_labels_verified,
+    promotion_workflow_name_verified,
+    promotion_actor_login_verified,
+    promotion_triggering_actor_login_verified,
+    promotion_actor_parity_checked,
+    promotion_triggering_actor_parity_checked,
+    workflow_definition_id,
+    workflow_definition_path,
+    workflow_definition_state,
+    workflow_definition_name,
+) = sys.argv[1:]
+
+download_root = Path(download_root_arg).resolve()
+receipt_path = Path(receipt_path_arg).resolve()
 
 required_files = [
     "release_bundle.json",
@@ -2191,6 +2758,119 @@ def parse_required_positive_integer(label: str, value: object) -> str:
         print("{0} must be a positive integer".format(label), file=sys.stderr)
         sys.exit(1)
     return value
+
+artifact_workflow_run_id_text = parse_required_positive_integer(
+    "artifact_metadata.workflow_run_id",
+    artifact_workflow_run_id,
+)
+if artifact_workflow_run_id_text != run_id:
+    print(
+        "artifact_metadata.workflow_run_id mismatch with workflow_run_id: expected {0}, got {1}".format(
+            run_id,
+            artifact_workflow_run_id_text,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+artifact_size_in_bytes_text = parse_required_positive_integer(
+    "artifact_metadata.size_in_bytes",
+    artifact_size_in_bytes,
+)
+artifact_archive_size_bytes_text = parse_required_positive_integer(
+    "artifact_archive_verification.size_in_bytes_verified",
+    artifact_archive_size_bytes,
+)
+if artifact_archive_size_bytes_text != artifact_size_in_bytes_text:
+    print(
+        "artifact_archive_verification.size_in_bytes_verified mismatch with artifact_metadata.size_in_bytes: expected {0}, got {1}".format(
+            artifact_size_in_bytes_text,
+            artifact_archive_size_bytes_text,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if not isinstance(artifact_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
+    print("artifact_metadata.digest must be a canonical sha256:<64-char lowercase hex> value", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(artifact_archive_digest_verified, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_archive_digest_verified):
+    print(
+        "artifact_archive_verification.digest_verified must be a canonical sha256:<64-char lowercase hex> value",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if artifact_archive_digest_verified != artifact_digest:
+    print(
+        "artifact_archive_verification.digest_verified mismatch with artifact_metadata.digest: expected {0}, got {1}".format(
+            artifact_digest,
+            artifact_archive_digest_verified,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+parse_required_positive_integer(
+    "artifact_archive_verification.entry_count_verified",
+    artifact_archive_entry_count,
+)
+
+if not isinstance(artifact_archive_download_url_host, str) or not artifact_archive_download_url_host.strip():
+    print("artifact_metadata.archive_download_url_host is required", file=sys.stderr)
+    sys.exit(1)
+if artifact_archive_download_url_host != artifact_archive_download_url_host.strip():
+    print("artifact_metadata.archive_download_url_host must not contain leading or trailing whitespace", file=sys.stderr)
+    sys.exit(1)
+
+def expected_artifact_api_host_for_run_host(host: str) -> str:
+    normalized = (host or "").strip().lower()
+    if not normalized:
+        return ""
+    if normalized == "github.com":
+        return "api.github.com"
+    return normalized
+
+expected_artifact_api_host = expected_artifact_api_host_for_run_host(workflow_run_url_host)
+if expected_artifact_api_host and artifact_archive_download_url_host.lower() != expected_artifact_api_host:
+    print(
+        "artifact_metadata.archive_download_url_host mismatch with expected API host: expected {0}, got {1}".format(
+            expected_artifact_api_host,
+            artifact_archive_download_url_host,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if artifact_workflow_head_branch:
+    if artifact_workflow_head_branch != artifact_workflow_head_branch.strip():
+        print("artifact_metadata.workflow_head_branch must not contain leading or trailing whitespace", file=sys.stderr)
+        sys.exit(1)
+    if workflow_head_branch and artifact_workflow_head_branch != workflow_head_branch:
+        print(
+            "artifact_metadata.workflow_head_branch mismatch with workflow_head_branch: expected {0}, got {1}".format(
+                workflow_head_branch,
+                artifact_workflow_head_branch,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+if artifact_workflow_head_sha:
+    if artifact_workflow_head_sha != artifact_workflow_head_sha.strip():
+        print("artifact_metadata.workflow_head_sha must not contain leading or trailing whitespace", file=sys.stderr)
+        sys.exit(1)
+    if not re.fullmatch(r"[0-9a-f]{40}", artifact_workflow_head_sha):
+        print("artifact_metadata.workflow_head_sha must be a 40-char lowercase hex digest", file=sys.stderr)
+        sys.exit(1)
+    if workflow_head_sha and artifact_workflow_head_sha != workflow_head_sha:
+        print(
+            "artifact_metadata.workflow_head_sha mismatch with workflow_head_sha: expected {0}, got {1}".format(
+                workflow_head_sha,
+                artifact_workflow_head_sha,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 artifact_rows = []
 for name in required_files:
@@ -3751,6 +4431,84 @@ if workflow_retention_days:
         print("Resolved run retention_days must be positive.", file=sys.stderr)
         sys.exit(1)
     _require_run_receipt_context_key("GITHUB_RETENTION_DAYS", workflow_retention_days)
+if workflow_run_workflow_id:
+    if not workflow_run_workflow_id.isdigit():
+        print("Resolved run workflow_id is not numeric.", file=sys.stderr)
+        sys.exit(1)
+    if not workflow_definition_id.isdigit():
+        print("Resolved workflow definition id is not numeric.", file=sys.stderr)
+        sys.exit(1)
+    if workflow_run_workflow_id != workflow_definition_id:
+        print(
+            "Resolved run workflow_id mismatch with workflow definition id: expected {0}, got {1}".format(
+                workflow_definition_id,
+                workflow_run_workflow_id,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+if run_id_resolution_mode == "dispatch-api":
+    if not dispatch_run_id or not dispatch_run_id.isdigit():
+        print("Dispatch response run_id is required and must be numeric when run_id_resolution_mode=dispatch-api.", file=sys.stderr)
+        sys.exit(1)
+    if dispatch_run_id != run_id:
+        print(
+            "Dispatch response run_id mismatch with resolved workflow_run_id: expected {0}, got {1}".format(
+                run_id,
+                dispatch_run_id,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not dispatch_workflow_id or not dispatch_workflow_id.isdigit():
+        print("Dispatch response workflow_id is required and must be numeric when run_id_resolution_mode=dispatch-api.", file=sys.stderr)
+        sys.exit(1)
+    if not workflow_definition_id.isdigit():
+        print("Resolved workflow definition id is not numeric.", file=sys.stderr)
+        sys.exit(1)
+    if dispatch_workflow_id != workflow_definition_id:
+        print(
+            "Dispatch response workflow_id mismatch with workflow definition id: expected {0}, got {1}".format(
+                workflow_definition_id,
+                dispatch_workflow_id,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if dispatch_run_url:
+        if dispatch_run_url != dispatch_run_url.strip():
+            print("Dispatch response run_url must not contain leading or trailing whitespace.", file=sys.stderr)
+            sys.exit(1)
+        match = re.search(r"/actions/runs/([0-9]+)", dispatch_run_url)
+        if match is None:
+            print("Dispatch response run_url is not canonical: {0}".format(dispatch_run_url), file=sys.stderr)
+            sys.exit(1)
+        if match.group(1) != run_id:
+            print(
+                "Dispatch response run_url run_id mismatch with resolved workflow_run_id: expected {0}, got {1}".format(
+                    run_id,
+                    match.group(1),
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if dispatch_run_html_url:
+        if dispatch_run_html_url != dispatch_run_html_url.strip():
+            print("Dispatch response html_url must not contain leading or trailing whitespace.", file=sys.stderr)
+            sys.exit(1)
+        match = re.search(r"/actions/runs/([0-9]+)", dispatch_run_html_url)
+        if match is None:
+            print("Dispatch response html_url is not canonical: {0}".format(dispatch_run_html_url), file=sys.stderr)
+            sys.exit(1)
+        if match.group(1) != run_id:
+            print(
+                "Dispatch response html_url run_id mismatch with resolved workflow_run_id: expected {0}, got {1}".format(
+                    run_id,
+                    match.group(1),
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
 if workflow_head_branch:
     if workflow_head_branch != workflow_head_branch.strip():
         print("Resolved run head_branch must not contain leading or trailing whitespace.", file=sys.stderr)
@@ -4033,6 +4791,16 @@ receipt = {
     "workflow_run_id": run_id,
     "workflow_run_attempt": run_attempt,
     "workflow_run_id_resolution_mode": run_id_resolution_mode,
+    "dispatch_response_verification": {
+        "run_id": _maybe_int(dispatch_run_id),
+        "workflow_id": _maybe_int(dispatch_workflow_id),
+        "run_url": dispatch_run_url or None,
+        "html_url": dispatch_run_html_url or None,
+        "run_url_host": dispatch_run_url_host or None,
+        "html_url_host": dispatch_html_url_host or None,
+        "run_url_attempt": _maybe_int(dispatch_run_url_attempt),
+        "html_url_attempt": _maybe_int(dispatch_html_url_attempt),
+    },
     "workflow_run_number": _maybe_int(workflow_run_number),
     "workflow_run_url": run_url,
     "workflow_run_html_url": workflow_html_url or run_url,
@@ -4063,6 +4831,13 @@ receipt = {
         "server_url": expected_server_url or None,
         "api_url": expected_api_url or None,
         "graphql_url": expected_graphql_url or None,
+    },
+    "workflow_definition_verification": {
+        "id": _maybe_int(workflow_definition_id),
+        "path": workflow_definition_path or None,
+        "state": workflow_definition_state or None,
+        "name": workflow_definition_name or None,
+        "run_workflow_id": _maybe_int(workflow_run_workflow_id),
     },
     "release_context_verification": {
         "contexts_verified": [label for label, _ in release_context_rows],

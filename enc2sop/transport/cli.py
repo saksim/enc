@@ -5,6 +5,10 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
+
+_UNSET = object()
+
+from . import certify as _transport_certify
 from . import protocol
 
 
@@ -36,6 +40,19 @@ def save_missing_chunks(path: str, records: List[Dict[str, int]]) -> str:
         lines.append(",".join(row))
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(out)
+
+
+def parse_metadata_items(items: Optional[List[str]]) -> Dict[str, object]:
+    metadata: Dict[str, object] = {}
+    for raw in items or []:
+        if "=" not in str(raw):
+            raise ValueError("metadata items must use KEY=VALUE format: {}".format(raw))
+        key, value = str(raw).split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("metadata item key must be non-empty")
+        metadata[key] = value.strip()
+    return metadata
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -267,6 +284,1137 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_recover_images.add_argument("--max-list", type=int, default=200, help="max list size in analyze")
 
+    p_certify = sub.add_parser(
+        "certify", help="generate replayable transport reliability evidence"
+    )
+    p_certify.add_argument("-o", "--output-dir", required=True, help="certification output directory")
+    p_certify.add_argument(
+        "--report-file",
+        default=None,
+        help="optional report path; defaults to <output-dir>/transport_reliability_report.json",
+    )
+    p_certify.add_argument(
+        "--payload-size",
+        dest="payload_sizes",
+        action="append",
+        type=int,
+        default=None,
+        help="payload size in bytes; repeat to build a deterministic corpus",
+    )
+    p_certify.add_argument("--iterations-per-size", type=int, default=1)
+    p_certify.add_argument("--seed", type=int, default=1729)
+    p_certify.add_argument(
+        "--profile",
+        choices=["digital-sidecar-v1", "reliable-airgap-v1", "ocr-only-backend-v1"],
+        default=None,
+        help="certification profile; reliable-airgap-v1 enforces production transport guardrails",
+    )
+    p_certify.add_argument(
+        "--allow-unsafe-profile",
+        action="store_true",
+        help="run despite production profile violations; report is not production-certified",
+    )
+    p_certify.add_argument(
+        "--allow-ocr-fallback",
+        action="store_true",
+        help="explicitly allow non-sidecar OCR fallback under reliable-airgap-v1",
+    )
+    p_certify.add_argument(
+        "--profile-redundancy-threshold-bytes",
+        type=int,
+        default=1,
+        help="payload-size threshold at which reliable-airgap-v1 requires redundancy or parity",
+    )
+    p_certify.add_argument(
+        "--distortion-suite",
+        choices=["none", "generated-page-basic-v1", "generated-page-stress-v1"],
+        default="none",
+        help="deterministic generated-page distortion suite for replayable reliability evidence",
+    )
+    p_certify.add_argument(
+        "--distortion-required-success-rate",
+        type=float,
+        default=None,
+        help="per-distortion success-rate gate; defaults to --require-success-rate",
+    )
+    p_certify.add_argument(
+        "--capture-corpus-file",
+        default=None,
+        help=(
+            "operator-supplied capture corpus manifest "
+            "(schema enc2sop-transport-capture-corpus/v1)"
+        ),
+    )
+    p_certify.add_argument(
+        "--capture-corpus-only",
+        action="store_true",
+        help="run only the supplied capture corpus; skip generated payload/export cases",
+    )
+    p_certify.add_argument(
+        "--capture-required-classification",
+        choices=["real", "lab", "synthetic", "stress-only"],
+        default=None,
+        help="require at least one supplied capture case with this classification",
+    )
+    p_certify.add_argument(
+        "--capture-required-success-rate",
+        type=float,
+        default=None,
+        help="per-capture-classification success-rate gate; defaults to --require-success-rate",
+    )
+    p_certify.add_argument(
+        "--require-distinct-capture-images",
+        action="store_true",
+        help=(
+            "fail supplied capture cases whose image SHA256 values match declared "
+            "reference generated pages"
+        ),
+    )
+    p_certify.add_argument(
+        "--require-real-camera-perspective-correction",
+        action="store_true",
+        help=(
+            "fail supplied capture cases unless they provide real-camera perspective "
+            "correction evidence: corpus classification real, raw_image_paths, "
+            "reference_image_paths, corrected image_path outputs, and "
+            "perspective_correction metadata"
+        ),
+    )
+    p_certify.add_argument(
+        "--require-physical-print-scan",
+        action="store_true",
+        help=(
+            "fail supplied capture cases unless they provide physical print-scan "
+            "evidence: capture_medium=print-scan, lab/real classification, "
+            "reference_image_paths, byte-distinct scan images, and printer/scanner/dpi metadata"
+        ),
+    )
+    p_certify.add_argument(
+        "--capture-attachment-report-file",
+        default=None,
+        help=(
+            "optional transport_capture_attachment_report.json from attach-capture-corpus; "
+            "defaults to the corpus last_capture_attachment report when present"
+        ),
+    )
+    p_certify.add_argument(
+        "--require-capture-attachment-report",
+        action="store_true",
+        help=(
+            "fail supplied capture cases unless the current capture/raw/reference image "
+            "SHA256 values match the attachment report"
+        ),
+    )
+    p_certify.add_argument(
+        "--require-capture-provenance",
+        action="store_true",
+        help=(
+            "fail supplied lab/real capture cases unless capture_metadata records "
+            "session, operator, timestamp, and capture device provenance"
+        ),
+    )
+    p_certify.add_argument(
+        "--require-ocr-only-backend",
+        action="store_true",
+        help=(
+            "require backend-specific OCR-only evidence; must use backend "
+            "tesseract/easyocr/external and pages without binary sidecar"
+        ),
+    )
+    p_certify.add_argument(
+        "--ocr-only-required-success-rate",
+        type=float,
+        default=None,
+        help="per-OCR-backend success-rate gate; defaults to --require-success-rate",
+    )
+    p_certify.add_argument(
+        "--backend",
+        choices=["sidecar", "auto", "tesseract", "easyocr", "external"],
+        default="sidecar",
+    )
+    p_certify.add_argument("--max-compressed-kib", type=int, default=64)
+    p_certify.add_argument("--chunk-chars", type=int, default=40)
+    p_certify.add_argument("--lines-per-page", type=int, default=20)
+    p_certify.add_argument("--font-size", type=int, default=44)
+    p_certify.add_argument("--font-max-size", type=int, default=132)
+    p_certify.add_argument(
+        "--font-fit-mode",
+        choices=["target", "fit", "fixed"],
+        default="target",
+    )
+    p_certify.add_argument("--fixed-font-size", action="store_true")
+    p_certify.add_argument(
+        "--metadata-level",
+        choices=["compact", "none"],
+        default="compact",
+    )
+    p_certify.add_argument(
+        "--line-separator",
+        choices=list(protocol.SUPPORTED_FIELD_SEPARATORS),
+        default="|",
+    )
+    p_certify.add_argument(
+        "--line-index-mode",
+        choices=["full", "chunk", "off"],
+        default="full",
+    )
+    p_certify.add_argument(
+        "--line-crc-mode",
+        choices=["on", "off"],
+        default="on",
+    )
+    p_certify.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        help="disable sidecar rendering; rejected by reliable-airgap-v1 unless unsafe override is used",
+    )
+    p_certify.add_argument("--redundancy-copies", type=int, default=2)
+    p_certify.add_argument("--no-interleave", action="store_true")
+    p_certify.add_argument("--parity-group-size", type=int, default=4)
+    p_certify.add_argument("--filename-prefix", default="case")
+    p_certify.add_argument("--require-success-rate", type=float, default=1.0)
+    p_certify.add_argument("--lang", default="eng", help="ocr language")
+    p_certify.add_argument("--psm", type=int, default=6, help="tesseract psm mode")
+    p_certify.add_argument(
+        "--ocr-provider-cmd",
+        default=None,
+        help=(
+            "external OCR command template used by backend=external/auto; placeholders: "
+            "{image_path} {image_name} {page_no} {lang} {psm} {manifest_path}"
+        ),
+    )
+    p_certify.add_argument(
+        "--ocr-provider-timeout-sec",
+        type=int,
+        default=120,
+        help="timeout seconds for one external OCR command call",
+    )
+    p_certify.add_argument("--strict-payload-chars", action="store_true")
+    p_certify.add_argument("--max-list", type=int, default=200, help="max list size in analyze")
+
+    p_prepare_capture = sub.add_parser(
+        "prepare-capture-corpus",
+        help="stage printable pages and a capture corpus manifest for physical/lab certification",
+    )
+    p_prepare_capture.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="capture kit output directory",
+    )
+    p_prepare_capture.add_argument(
+        "--classification",
+        choices=["real", "lab", "synthetic", "stress-only"],
+        default="lab",
+        help="declared corpus classification for the operator-supplied captures",
+    )
+    p_prepare_capture.add_argument(
+        "--capture-medium",
+        choices=["unspecified", "camera-photo", "print-scan", "mixed"],
+        default="unspecified",
+        help="declared physical medium for the staged capture cases",
+    )
+    p_prepare_capture.add_argument(
+        "--include-raw-capture-dirs",
+        action="store_true",
+        help=(
+            "stage sibling captures/*__raw directories plus raw_image_paths and "
+            "perspective_correction metadata for real camera perspective evidence"
+        ),
+    )
+    p_prepare_capture.add_argument(
+        "--perspective-correction-method",
+        default=None,
+        help=(
+            "method text to write into staged perspective_correction metadata when "
+            "--include-raw-capture-dirs is used"
+        ),
+    )
+    p_prepare_capture.add_argument(
+        "--payload-size",
+        dest="payload_sizes",
+        action="append",
+        type=int,
+        default=None,
+        help="payload size in bytes; repeat to stage multiple capture cases",
+    )
+    p_prepare_capture.add_argument("--iterations-per-size", type=int, default=1)
+    p_prepare_capture.add_argument("--seed", type=int, default=1729)
+    p_prepare_capture.add_argument(
+        "--profile",
+        choices=["reliable-airgap-v1", "ocr-only-backend-v1"],
+        default="reliable-airgap-v1",
+        help=(
+            "capture kit profile; reliable-airgap-v1 is the production airgap profile, "
+            "ocr-only-backend-v1 is non-production backend-specific OCR evidence"
+        ),
+    )
+    p_prepare_capture.add_argument(
+        "--ocr-only-backend",
+        choices=["tesseract", "easyocr", "external"],
+        default=None,
+        help=(
+            "stage sidecar-free pages for backend-specific OCR-only measurement; "
+            "does not certify generic OCR fallback or reliable-airgap-v1 readiness"
+        ),
+    )
+    p_prepare_capture.add_argument(
+        "--profile-redundancy-threshold-bytes",
+        type=int,
+        default=1,
+        help="payload-size threshold at which reliable-airgap-v1 requires redundancy or parity",
+    )
+    p_prepare_capture.add_argument(
+        "--corpus-file",
+        default=None,
+        help="optional corpus manifest path relative to output-dir; defaults to capture_corpus.json",
+    )
+    p_prepare_capture.add_argument(
+        "--kit-manifest-file",
+        default=None,
+        help="optional kit manifest path relative to output-dir; defaults to capture_kit_manifest.json",
+    )
+    p_prepare_capture.add_argument(
+        "--case-label-prefix",
+        default="capture-case",
+        help="prefix for generated capture case labels",
+    )
+    p_prepare_capture.add_argument(
+        "--capture-metadata",
+        action="append",
+        default=None,
+        help="default capture metadata item in KEY=VALUE form; repeat as needed",
+    )
+    p_prepare_capture.add_argument("--max-compressed-kib", type=int, default=64)
+    p_prepare_capture.add_argument("--chunk-chars", type=int, default=40)
+    p_prepare_capture.add_argument("--lines-per-page", type=int, default=20)
+    p_prepare_capture.add_argument("--font-size", type=int, default=44)
+    p_prepare_capture.add_argument("--font-max-size", type=int, default=132)
+    p_prepare_capture.add_argument(
+        "--font-fit-mode",
+        choices=["target", "fit", "fixed"],
+        default="target",
+    )
+    p_prepare_capture.add_argument("--fixed-font-size", action="store_true")
+    p_prepare_capture.add_argument(
+        "--metadata-level",
+        choices=["compact"],
+        default="compact",
+        help="reliable-airgap-v1 capture kits require compact metadata",
+    )
+    p_prepare_capture.add_argument(
+        "--line-separator",
+        choices=list(protocol.SUPPORTED_FIELD_SEPARATORS),
+        default="|",
+    )
+    p_prepare_capture.add_argument(
+        "--line-index-mode",
+        choices=["full", "chunk"],
+        default="full",
+        help="reliable-airgap-v1 capture kits require line indexing",
+    )
+    p_prepare_capture.add_argument(
+        "--line-crc-mode",
+        choices=["on"],
+        default="on",
+        help="reliable-airgap-v1 capture kits require line CRC",
+    )
+    p_prepare_capture.add_argument("--redundancy-copies", type=int, default=2)
+    p_prepare_capture.add_argument("--no-interleave", action="store_true")
+    p_prepare_capture.add_argument("--parity-group-size", type=int, default=4)
+    p_prepare_capture.add_argument("--filename-prefix", default="capture")
+
+    p_attach_capture = sub.add_parser(
+        "attach-capture-corpus",
+        help="bind operator photos/scans currently present in a prepared capture corpus",
+    )
+    p_attach_capture.add_argument(
+        "--capture-corpus-file",
+        required=True,
+        help="capture corpus manifest to refresh",
+    )
+    p_attach_capture.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="directory for transport_capture_attachment_report.json; defaults beside corpus",
+    )
+    p_attach_capture.add_argument(
+        "--report-file",
+        default=None,
+        help="optional attachment report path",
+    )
+    p_attach_capture.add_argument(
+        "--kit-manifest-file",
+        default=None,
+        help="optional capture_kit_manifest.json path to refresh",
+    )
+    p_attach_capture.add_argument(
+        "--require-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one attached capture image",
+    )
+    p_attach_capture.add_argument(
+        "--require-raw-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one raw camera image attached",
+    )
+    p_attach_capture.add_argument(
+        "--require-distinct-capture-images",
+        action="store_true",
+        help="fail closed when attached capture images are missing references or match generated pages",
+    )
+    p_attach_capture.add_argument(
+        "--no-update-corpus",
+        action="store_true",
+        help="write only the attachment report; do not refresh capture_corpus.json",
+    )
+    p_attach_capture.add_argument(
+        "--no-update-kit-manifest",
+        action="store_true",
+        help="do not refresh capture_kit_manifest.json summary fields",
+    )
+
+    p_ingest_capture = sub.add_parser(
+        "ingest-capture-corpus",
+        help="map external real/lab capture folders into a prepared capture corpus",
+    )
+    p_ingest_capture.add_argument(
+        "--capture-corpus-file",
+        required=True,
+        help="prepared capture_corpus.json to update",
+    )
+    p_ingest_capture.add_argument(
+        "--capture-root",
+        required=True,
+        help="directory containing one subdirectory per capture case label",
+    )
+    p_ingest_capture.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="directory for transport_capture_corpus_ingestion_report.json; defaults beside corpus",
+    )
+    p_ingest_capture.add_argument(
+        "--report-file",
+        default=None,
+        help="optional ingestion report path",
+    )
+    p_ingest_capture.add_argument(
+        "--kit-manifest-file",
+        default=None,
+        help="optional capture_kit_manifest.json path to refresh",
+    )
+    p_ingest_capture.add_argument(
+        "--raw-capture-root",
+        default=None,
+        help="optional directory containing raw-photo subdirectories by case label",
+    )
+    p_ingest_capture.add_argument(
+        "--classification",
+        choices=["real", "lab", "synthetic", "stress-only"],
+        default=None,
+        help="override corpus classification recorded for ingestion",
+    )
+    p_ingest_capture.add_argument(
+        "--capture-medium",
+        choices=["unspecified", "camera-photo", "print-scan", "mixed"],
+        default=None,
+        help="capture medium to record on the corpus/cases",
+    )
+    p_ingest_capture.add_argument(
+        "--capture-metadata",
+        action="append",
+        default=None,
+        help="case metadata KEY=VALUE to merge into each ingested case; repeatable",
+    )
+    p_ingest_capture.add_argument(
+        "--capture-metadata-manifest-file",
+        default=None,
+        help=(
+            "optional enc2sop-transport-capture-metadata-manifest/v1 JSON with "
+            "defaults and per-case provenance metadata"
+        ),
+    )
+    p_ingest_capture.add_argument(
+        "--require-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one ingested capture image",
+    )
+    p_ingest_capture.add_argument(
+        "--require-raw-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one ingested raw camera image",
+    )
+    p_ingest_capture.add_argument(
+        "--allow-unmatched-labels",
+        action="store_true",
+        help="do not fail when capture-root has extra case-label entries",
+    )
+    p_ingest_capture.add_argument(
+        "--no-update-corpus",
+        action="store_true",
+        help="write only the ingestion report; do not refresh capture_corpus.json",
+    )
+    p_ingest_capture.add_argument(
+        "--no-update-kit-manifest",
+        action="store_true",
+        help="do not refresh capture_kit_manifest.json summary fields",
+    )
+
+    p_correct_capture = sub.add_parser(
+        "correct-capture-perspective",
+        help="materialize corrected camera capture images from raw-photo directories",
+    )
+    p_correct_capture.add_argument(
+        "--capture-corpus-file",
+        required=True,
+        help="capture_corpus.json containing raw_image_paths for camera cases",
+    )
+    p_correct_capture.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help=(
+            "directory for corrected images and "
+            "transport_capture_perspective_correction_report.json; defaults beside corpus"
+        ),
+    )
+    p_correct_capture.add_argument(
+        "--report-file",
+        default=None,
+        help="optional perspective-correction report path",
+    )
+    p_correct_capture.add_argument(
+        "--kit-manifest-file",
+        default=None,
+        help="optional capture_kit_manifest.json path to refresh",
+    )
+    p_correct_capture.add_argument(
+        "--method",
+        default="operator-supplied perspective correction",
+        help="method label recorded in corpus perspective_correction metadata",
+    )
+    p_correct_capture.add_argument(
+        "--mode",
+        choices=_transport_certify.SUPPORTED_PERSPECTIVE_CORRECTION_MODES,
+        default="copy",
+        help=(
+            "local deterministic correction mode; copy preserves bytes, normalize applies "
+            "EXIF transpose, four-point uses per-case perspective_correction.source_corners"
+        ),
+    )
+    p_correct_capture.add_argument(
+        "--require-raw-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one raw camera image",
+    )
+    p_correct_capture.add_argument(
+        "--require-distinct-from-raw",
+        action="store_true",
+        help="fail closed unless corrected images differ byte-for-byte from raw inputs",
+    )
+    p_correct_capture.add_argument(
+        "--no-update-corpus",
+        action="store_true",
+        help="write only the correction report; do not refresh capture_corpus.json",
+    )
+    p_correct_capture.add_argument(
+        "--no-update-kit-manifest",
+        action="store_true",
+        help="do not refresh capture_kit_manifest.json summary fields",
+    )
+
+    p_validate_capture = sub.add_parser(
+        "validate-capture-corpus",
+        help="preflight operator capture corpus readiness before recovery certification",
+    )
+    p_validate_capture.add_argument(
+        "--capture-corpus-file",
+        required=True,
+        help="capture_corpus.json to validate",
+    )
+    p_validate_capture.add_argument(
+        "--output-file",
+        default=None,
+        help="optional path for the validation report JSON",
+    )
+    p_validate_capture.add_argument(
+        "--profile",
+        choices=["reliable-airgap-v1", "digital-sidecar-v1", "ocr-only-backend-v1"],
+        default="reliable-airgap-v1",
+        help="profile gates to validate against",
+    )
+    p_validate_capture.add_argument(
+        "--backend",
+        choices=["sidecar", "auto", "tesseract", "easyocr", "external"],
+        default="sidecar",
+        help="backend intended for the later certification run",
+    )
+    p_validate_capture.add_argument(
+        "--allow-ocr-fallback",
+        action="store_true",
+        help="allow non-sidecar backend profile validation under explicit experimental fallback",
+    )
+    p_validate_capture.add_argument(
+        "--profile-redundancy-threshold-bytes",
+        type=int,
+        default=1,
+        help="payload-size threshold at which reliable-airgap-v1 requires redundancy or parity",
+    )
+    p_validate_capture.add_argument(
+        "--require-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one attached capture image",
+    )
+    p_validate_capture.add_argument(
+        "--require-raw-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one raw camera image attached",
+    )
+    p_validate_capture.add_argument(
+        "--require-distinct-capture-images",
+        action="store_true",
+        help="fail closed when attached capture images are missing references or match generated pages",
+    )
+    p_validate_capture.add_argument(
+        "--capture-attachment-report-file",
+        default=None,
+        help="optional transport_capture_attachment_report.json to validate lineage against",
+    )
+    p_validate_capture.add_argument(
+        "--require-capture-attachment-report",
+        action="store_true",
+        help="fail closed unless attachment-report lineage matches the current corpus files",
+    )
+    p_validate_capture.add_argument(
+        "--require-capture-provenance",
+        action="store_true",
+        help="fail closed unless lab/real cases include operator/session/device provenance metadata",
+    )
+    p_validate_capture.add_argument(
+        "--capture-required-classification",
+        choices=["real", "lab", "synthetic", "stress-only"],
+        default=None,
+        help="fail closed unless at least one capture case has this classification",
+    )
+    p_validate_capture.add_argument(
+        "--require-physical-print-scan",
+        action="store_true",
+        help="fail closed unless physical print-scan evidence fields are present",
+    )
+    p_validate_capture.add_argument(
+        "--require-real-camera-perspective-correction",
+        action="store_true",
+        help="fail closed unless real camera raw/corrected perspective evidence fields are present",
+    )
+    p_validate_capture.add_argument(
+        "--require-ocr-only-backend",
+        action="store_true",
+        help="fail closed unless the corpus is sidecar-free and backend is OCR-only",
+    )
+
+    p_certify_capture_evidence = sub.add_parser(
+        "certify-capture-evidence",
+        help=(
+            "run attach, validate, certify, archive, verify, replay, and "
+            "certification-status for an operator capture corpus"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-corpus-file",
+        required=True,
+        help="capture_corpus.json containing attached or attachable operator captures",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-root",
+        default=None,
+        help=(
+            "optional external capture folder tree to ingest before attachment; "
+            "expects one subdirectory per case label"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--raw-capture-root",
+        default=None,
+        help="optional external raw-photo folder tree to ingest before attachment",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-medium",
+        choices=["unspecified", "camera-photo", "print-scan", "mixed"],
+        default=None,
+        help="capture medium recorded during optional ingestion",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-metadata",
+        action="append",
+        default=None,
+        help="ingestion metadata KEY=VALUE to merge into each ingested case; repeatable",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-metadata-manifest-file",
+        default=None,
+        help=(
+            "optional enc2sop-transport-capture-metadata-manifest/v1 JSON to apply "
+            "during capture-root ingestion"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--allow-unmatched-labels",
+        action="store_true",
+        help="during optional ingestion, do not fail on extra capture-root case-label entries",
+    )
+    p_certify_capture_evidence.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="directory for all pipeline reports and archive artifacts",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--profile",
+        choices=["reliable-airgap-v1", "digital-sidecar-v1", "ocr-only-backend-v1"],
+        default="reliable-airgap-v1",
+        help="profile used for validation and certification",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--backend",
+        choices=["sidecar", "auto", "tesseract", "easyocr", "external"],
+        default="sidecar",
+        help="backend used for the certification recovery run",
+    )
+    p_certify_capture_evidence.add_argument("--allow-ocr-fallback", action="store_true")
+    p_certify_capture_evidence.add_argument("--allow-unsafe-profile", action="store_true")
+    p_certify_capture_evidence.add_argument(
+        "--profile-redundancy-threshold-bytes",
+        type=int,
+        default=1,
+    )
+    p_certify_capture_evidence.add_argument("--redundancy-copies", type=int, default=2)
+    p_certify_capture_evidence.add_argument("--no-interleave", action="store_true")
+    p_certify_capture_evidence.add_argument("--parity-group-size", type=int, default=4)
+    p_certify_capture_evidence.add_argument("--max-compressed-kib", type=int, default=64)
+    p_certify_capture_evidence.add_argument("--chunk-chars", type=int, default=40)
+    p_certify_capture_evidence.add_argument("--lines-per-page", type=int, default=20)
+    p_certify_capture_evidence.add_argument("--font-size", type=int, default=44)
+    p_certify_capture_evidence.add_argument("--font-max-size", type=int, default=132)
+    p_certify_capture_evidence.add_argument(
+        "--font-fit-mode",
+        choices=["target", "fit", "fixed"],
+        default="target",
+    )
+    p_certify_capture_evidence.add_argument("--fixed-font-size", action="store_true")
+    p_certify_capture_evidence.add_argument(
+        "--metadata-level",
+        choices=["compact", "none"],
+        default="compact",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--line-separator",
+        choices=list(protocol.SUPPORTED_FIELD_SEPARATORS),
+        default="|",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--line-index-mode",
+        choices=["full", "chunk", "off"],
+        default="full",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--line-crc-mode",
+        choices=["on", "off"],
+        default="on",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        help=(
+            "disable sidecar rendering for generated recovery context; reliable-airgap-v1 "
+            "still requires sidecar evidence unless an unsafe or OCR-only profile is used"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one attached capture image",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--allow-missing-captures",
+        action="store_true",
+        help="do not require every case to have an attached capture image",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-raw-captures",
+        action="store_true",
+        help="fail closed unless every case has at least one raw camera image",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-distinct-capture-images",
+        action="store_true",
+        help="fail closed when capture images match generated reference pages",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--allow-reference-identical-captures",
+        action="store_true",
+        help="do not require captures to be byte-distinct from generated reference pages",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-attachment-report-file",
+        default=None,
+        help="optional attachment report output path",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-capture-attachment-report",
+        action="store_true",
+        help="require certification to match the attachment report lineage",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--allow-missing-capture-attachment-report",
+        action="store_true",
+        help="do not require attachment-report lineage during certification/archive/status",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-capture-provenance",
+        action="store_true",
+        help="require operator/session/timestamp/device provenance in capture_metadata",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-required-classification",
+        choices=["real", "lab", "synthetic", "stress-only"],
+        default=None,
+        help="fail closed unless the corpus includes this classification",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-required-success-rate",
+        type=float,
+        default=None,
+        help="per-capture-classification success-rate gate; defaults to --require-success-rate",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-success-rate",
+        type=float,
+        default=1.0,
+        help="overall transport recovery success-rate gate",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-physical-print-scan",
+        action="store_true",
+        help="require physical print-scan evidence and claim gate",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-real-camera-perspective-correction",
+        action="store_true",
+        help="require real camera raw/corrected perspective evidence and claim gate",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-ocr-only-backend",
+        action="store_true",
+        help="require backend-specific OCR-only evidence and claim gate",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--ocr-only-required-success-rate",
+        type=float,
+        default=None,
+        help="per-OCR-backend success-rate gate; defaults to --require-success-rate",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-profile-certified",
+        action="store_const",
+        const=True,
+        default=_UNSET,
+        help="require archive/verification profile_certified=true",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--no-require-profile-certified",
+        dest="require_profile_certified",
+        action="store_const",
+        const=False,
+        help="do not require profile_certified=true in archive/verification",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-certified-claim",
+        dest="required_certified_claims",
+        action="append",
+        choices=_transport_certify.TRANSPORT_CERTIFICATION_CLAIMS,
+        default=None,
+        help="extra certification-status claim gate to require; repeatable",
+    )
+    p_certify_capture_evidence.add_argument("--lang", default="eng")
+    p_certify_capture_evidence.add_argument("--psm", type=int, default=6)
+    p_certify_capture_evidence.add_argument("--ocr-provider-cmd", default=None)
+    p_certify_capture_evidence.add_argument("--ocr-provider-timeout-sec", type=int, default=120)
+    p_certify_capture_evidence.add_argument("--strict-payload-chars", action="store_true")
+    p_certify_capture_evidence.add_argument("--max-list", type=int, default=200)
+    p_certify_capture_evidence.add_argument(
+        "--kit-manifest-file",
+        default=None,
+        help="optional capture_kit_manifest.json path to refresh during attachment",
+    )
+    p_certify_capture_evidence.add_argument("--ingestion-report-file", default=None)
+    p_certify_capture_evidence.add_argument("--validation-report-file", default=None)
+    p_certify_capture_evidence.add_argument("--certification-report-file", default=None)
+    p_certify_capture_evidence.add_argument("--archive-file", default=None)
+    p_certify_capture_evidence.add_argument("--archive-manifest-file", default=None)
+    p_certify_capture_evidence.add_argument("--verification-report-file", default=None)
+    p_certify_capture_evidence.add_argument(
+        "--replay-output-dir",
+        default=None,
+        help="optional directory for extracted archive files and replay reports",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--replay-report-file",
+        default=None,
+        help="optional path/name for the rerun transport reliability report",
+    )
+    p_certify_capture_evidence.add_argument(
+        "--replay-summary-file",
+        default=None,
+        help="optional path/name for the replay summary report JSON",
+    )
+    p_certify_capture_evidence.add_argument("--status-report-file", default=None)
+    p_certify_capture_evidence.add_argument("--pipeline-report-file", default=None)
+
+    p_archive_evidence = sub.add_parser(
+        "archive-evidence",
+        help="package a transport certification report and referenced capture artifacts for replay",
+    )
+    p_archive_evidence.add_argument(
+        "--report-file",
+        required=True,
+        help="transport_reliability_report.json to archive",
+    )
+    p_archive_evidence.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="directory for the evidence archive ZIP and manifest",
+    )
+    p_archive_evidence.add_argument(
+        "--capture-corpus-file",
+        default=None,
+        help="optional capture_corpus.json; defaults to the path recorded in the report",
+    )
+    p_archive_evidence.add_argument(
+        "--capture-attachment-report-file",
+        default=None,
+        help=(
+            "optional transport_capture_attachment_report.json; defaults to the path "
+            "recorded in the report when present"
+        ),
+    )
+    p_archive_evidence.add_argument(
+        "--archive-file",
+        default=None,
+        help="optional ZIP path/name; defaults to transport_capture_evidence_archive.zip",
+    )
+    p_archive_evidence.add_argument(
+        "--manifest-file",
+        default=None,
+        help=(
+            "optional archive manifest path/name; defaults to "
+            "transport_capture_evidence_archive_manifest.json"
+        ),
+    )
+    p_archive_evidence.add_argument(
+        "--require-successful-report",
+        action="store_true",
+        help="fail closed unless the input transport report has success=true",
+    )
+    p_archive_evidence.add_argument(
+        "--require-capture-attachment-report",
+        action="store_true",
+        help="fail closed unless an attachment report is supplied or discoverable",
+    )
+    p_archive_evidence.add_argument(
+        "--require-profile-certified",
+        action="store_true",
+        help="fail closed unless the input report has profile_certified=true",
+    )
+    p_archive_evidence.add_argument(
+        "--require-physical-print-scan",
+        action="store_true",
+        help=(
+            "fail closed unless the input report required and passed the physical "
+            "print-scan gate"
+        ),
+    )
+    p_archive_evidence.add_argument(
+        "--require-real-camera-perspective-correction",
+        action="store_true",
+        help=(
+            "fail closed unless the input report required and passed the real camera "
+            "perspective-correction gate"
+        ),
+    )
+    p_archive_evidence.add_argument(
+        "--require-ocr-only-backend",
+        action="store_true",
+        help="fail closed unless the input report required and passed the OCR-only backend gate",
+    )
+
+    p_verify_evidence = sub.add_parser(
+        "verify-evidence-archive",
+        help="verify a transport evidence archive ZIP and gate snapshot before replay/audit use",
+    )
+    p_verify_evidence.add_argument(
+        "--archive-file",
+        required=True,
+        help="transport_capture_evidence_archive.zip to verify",
+    )
+    p_verify_evidence.add_argument(
+        "--manifest-file",
+        default=None,
+        help=(
+            "optional external transport_capture_evidence_archive_manifest.json; "
+            "defaults beside the archive when present"
+        ),
+    )
+    p_verify_evidence.add_argument(
+        "--output-file",
+        default=None,
+        help="optional path for the verification report JSON",
+    )
+    p_verify_evidence.add_argument(
+        "--require-successful-report",
+        action="store_true",
+        help="fail closed unless the archived transport report had success=true",
+    )
+    p_verify_evidence.add_argument(
+        "--require-profile-certified",
+        action="store_true",
+        help="fail closed unless the archived report had profile_certified=true",
+    )
+    p_verify_evidence.add_argument(
+        "--require-capture-attachment-report",
+        action="store_true",
+        help="fail closed unless the attachment-report gate was required, passed, and archived",
+    )
+    p_verify_evidence.add_argument(
+        "--require-physical-print-scan",
+        action="store_true",
+        help="fail closed unless the physical print-scan gate was required and passed",
+    )
+    p_verify_evidence.add_argument(
+        "--require-real-camera-perspective-correction",
+        action="store_true",
+        help="fail closed unless the real camera perspective-correction gate was required and passed",
+    )
+    p_verify_evidence.add_argument(
+        "--require-ocr-only-backend",
+        action="store_true",
+        help="fail closed unless the OCR-only backend gate was required and passed",
+    )
+
+    p_replay_evidence = sub.add_parser(
+        "replay-evidence-archive",
+        help="extract a transport evidence archive, rerun recovery, and compare replay outcomes",
+    )
+    p_replay_evidence.add_argument(
+        "--archive-file",
+        required=True,
+        help="transport_capture_evidence_archive.zip to replay",
+    )
+    p_replay_evidence.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="directory for extracted archive files and replay reports",
+    )
+    p_replay_evidence.add_argument(
+        "--manifest-file",
+        default=None,
+        help="optional external transport_capture_evidence_archive_manifest.json",
+    )
+    p_replay_evidence.add_argument(
+        "--replay-report-file",
+        default=None,
+        help="optional path/name for the rerun transport_reliability_report.json",
+    )
+    p_replay_evidence.add_argument(
+        "--output-file",
+        default=None,
+        help="optional path/name for the replay summary report JSON",
+    )
+    p_replay_evidence.add_argument(
+        "--require-successful-report",
+        action="store_true",
+        help="fail closed unless the archived transport report had success=true",
+    )
+    p_replay_evidence.add_argument(
+        "--require-profile-certified",
+        action="store_true",
+        help="fail closed unless the archived report had profile_certified=true",
+    )
+    p_replay_evidence.add_argument(
+        "--require-capture-attachment-report",
+        action="store_true",
+        help="fail closed unless the attachment-report gate was required, passed, and archived",
+    )
+    p_replay_evidence.add_argument(
+        "--require-physical-print-scan",
+        action="store_true",
+        help="fail closed unless the physical print-scan gate was required and passed",
+    )
+    p_replay_evidence.add_argument(
+        "--require-real-camera-perspective-correction",
+        action="store_true",
+        help="fail closed unless the real camera perspective-correction gate was required and passed",
+    )
+    p_replay_evidence.add_argument(
+        "--require-ocr-only-backend",
+        action="store_true",
+        help="fail closed unless the OCR-only backend gate was required and passed",
+    )
+
+    p_cert_status = sub.add_parser(
+        "certification-status",
+        help="summarize measured transport certification claims for product/launch review",
+    )
+    p_cert_status.add_argument(
+        "--report-file",
+        default=None,
+        help="transport_reliability_report.json to summarize",
+    )
+    p_cert_status.add_argument(
+        "--verification-file",
+        default=None,
+        help="transport_archive_verification.json to summarize",
+    )
+    p_cert_status.add_argument(
+        "--archive-file",
+        default=None,
+        help=(
+            "transport_capture_evidence_archive.zip to verify and summarize; requires "
+            "--verify-archive"
+        ),
+    )
+    p_cert_status.add_argument(
+        "--manifest-file",
+        default=None,
+        help="optional archive manifest used with --archive-file",
+    )
+    p_cert_status.add_argument(
+        "--verify-archive",
+        action="store_true",
+        help="verify --archive-file before deriving certification status",
+    )
+    p_cert_status.add_argument(
+        "--require-certified-claim",
+        dest="required_certified_claims",
+        action="append",
+        choices=_transport_certify.TRANSPORT_CERTIFICATION_CLAIMS,
+        default=None,
+        help=(
+            "fail closed unless this measured certification claim is certified=true; "
+            "valid values: {}; repeat for multiple launch claims".format(
+                ", ".join(_transport_certify.TRANSPORT_CERTIFICATION_CLAIMS)
+            )
+        ),
+    )
+    p_cert_status.add_argument(
+        "--output-file",
+        default=None,
+        help="optional path for the certification status JSON",
+    )
+
     return parser
 
 
@@ -290,6 +1438,286 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
     )
 
     try:
+        if args.cmd == "certify":
+            result = transport.certify_reliability(
+                output_dir=args.output_dir,
+                payload_sizes=args.payload_sizes,
+                iterations_per_size=args.iterations_per_size,
+                seed=args.seed,
+                backend=args.backend,
+                redundancy_copies=args.redundancy_copies,
+                interleave=(not args.no_interleave),
+                parity_group_size=args.parity_group_size,
+                filename_prefix=args.filename_prefix,
+                report_file=args.report_file,
+                require_success_rate=args.require_success_rate,
+                lang=args.lang,
+                psm=args.psm,
+                ocr_provider_cmd=args.ocr_provider_cmd,
+                ocr_provider_timeout_sec=args.ocr_provider_timeout_sec,
+                strict_payload_chars=args.strict_payload_chars,
+                max_list=args.max_list,
+                profile=args.profile,
+                allow_unsafe_profile=args.allow_unsafe_profile,
+                allow_ocr_fallback=args.allow_ocr_fallback,
+                profile_redundancy_threshold_bytes=args.profile_redundancy_threshold_bytes,
+                distortion_suite=args.distortion_suite,
+                distortion_required_success_rate=args.distortion_required_success_rate,
+                capture_corpus_file=args.capture_corpus_file,
+                include_generated_corpus=(not args.capture_corpus_only),
+                require_distinct_capture_images=args.require_distinct_capture_images,
+                require_real_camera_perspective_correction=(
+                    args.require_real_camera_perspective_correction
+                ),
+                require_physical_print_scan=args.require_physical_print_scan,
+                capture_attachment_report_file=args.capture_attachment_report_file,
+                require_capture_attachment_report=args.require_capture_attachment_report,
+                require_capture_provenance=args.require_capture_provenance,
+                capture_required_classification=args.capture_required_classification,
+                capture_required_success_rate=args.capture_required_success_rate,
+                require_ocr_only_backend=args.require_ocr_only_backend,
+                ocr_only_required_success_rate=args.ocr_only_required_success_rate,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "prepare-capture-corpus":
+            result = _transport_certify.prepare_capture_corpus_kit(
+                transport=transport,
+                output_dir=args.output_dir,
+                classification=args.classification,
+                capture_medium=args.capture_medium,
+                include_raw_capture_dirs=args.include_raw_capture_dirs,
+                perspective_correction_method=args.perspective_correction_method,
+                payload_sizes=args.payload_sizes,
+                iterations_per_size=args.iterations_per_size,
+                seed=args.seed,
+                redundancy_copies=args.redundancy_copies,
+                interleave=(not args.no_interleave),
+                parity_group_size=args.parity_group_size,
+                filename_prefix=args.filename_prefix,
+                corpus_file=args.corpus_file,
+                kit_manifest_file=args.kit_manifest_file,
+                profile=args.profile,
+                profile_redundancy_threshold_bytes=args.profile_redundancy_threshold_bytes,
+                capture_metadata=parse_metadata_items(args.capture_metadata),
+                case_label_prefix=args.case_label_prefix,
+                ocr_only_backend=args.ocr_only_backend,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "attach-capture-corpus":
+            result = transport.attach_capture_corpus(
+                capture_corpus_file=args.capture_corpus_file,
+                output_dir=args.output_dir,
+                report_file=args.report_file,
+                kit_manifest_file=args.kit_manifest_file,
+                require_captures=args.require_captures,
+                require_distinct_capture_images=args.require_distinct_capture_images,
+                require_raw_captures=args.require_raw_captures,
+                update_corpus=(not args.no_update_corpus),
+                update_kit_manifest=(not args.no_update_kit_manifest),
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "ingest-capture-corpus":
+            result = transport.ingest_capture_corpus(
+                capture_corpus_file=args.capture_corpus_file,
+                capture_root=args.capture_root,
+                output_dir=args.output_dir,
+                report_file=args.report_file,
+                kit_manifest_file=args.kit_manifest_file,
+                raw_capture_root=args.raw_capture_root,
+                classification=args.classification,
+                capture_medium=args.capture_medium,
+                capture_metadata=parse_metadata_items(args.capture_metadata),
+                capture_metadata_manifest_file=args.capture_metadata_manifest_file,
+                require_captures=args.require_captures,
+                require_raw_captures=args.require_raw_captures,
+                require_all_case_labels=(not args.allow_unmatched_labels),
+                update_corpus=(not args.no_update_corpus),
+                update_kit_manifest=(not args.no_update_kit_manifest),
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "correct-capture-perspective":
+            result = transport.correct_capture_perspective(
+                capture_corpus_file=args.capture_corpus_file,
+                output_dir=args.output_dir,
+                report_file=args.report_file,
+                kit_manifest_file=args.kit_manifest_file,
+                method=args.method,
+                mode=args.mode,
+                require_raw_captures=args.require_raw_captures,
+                require_distinct_from_raw=args.require_distinct_from_raw,
+                update_corpus=(not args.no_update_corpus),
+                update_kit_manifest=(not args.no_update_kit_manifest),
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "validate-capture-corpus":
+            result = transport.validate_capture_corpus(
+                capture_corpus_file=args.capture_corpus_file,
+                output_file=args.output_file,
+                profile=args.profile,
+                backend=args.backend,
+                allow_ocr_fallback=args.allow_ocr_fallback,
+                profile_redundancy_threshold_bytes=args.profile_redundancy_threshold_bytes,
+                require_captures=args.require_captures,
+                require_distinct_capture_images=args.require_distinct_capture_images,
+                require_raw_captures=args.require_raw_captures,
+                capture_attachment_report_file=args.capture_attachment_report_file,
+                require_capture_attachment_report=args.require_capture_attachment_report,
+                require_capture_provenance=args.require_capture_provenance,
+                capture_required_classification=args.capture_required_classification,
+                require_physical_print_scan=args.require_physical_print_scan,
+                require_real_camera_perspective_correction=(
+                    args.require_real_camera_perspective_correction
+                ),
+                require_ocr_only_backend=args.require_ocr_only_backend,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "certify-capture-evidence":
+            require_profile_certified = (
+                None
+                if args.require_profile_certified is _UNSET
+                else bool(args.require_profile_certified)
+            )
+            result = transport.certify_capture_evidence_pipeline(
+                capture_corpus_file=args.capture_corpus_file,
+                output_dir=args.output_dir,
+                capture_root=args.capture_root,
+                raw_capture_root=args.raw_capture_root,
+                capture_medium=args.capture_medium,
+                capture_metadata=parse_metadata_items(args.capture_metadata),
+                capture_metadata_manifest_file=args.capture_metadata_manifest_file,
+                require_all_case_labels=(not args.allow_unmatched_labels),
+                profile=args.profile,
+                backend=args.backend,
+                allow_ocr_fallback=args.allow_ocr_fallback,
+                allow_unsafe_profile=args.allow_unsafe_profile,
+                profile_redundancy_threshold_bytes=args.profile_redundancy_threshold_bytes,
+                redundancy_copies=args.redundancy_copies,
+                interleave=(not args.no_interleave),
+                parity_group_size=args.parity_group_size,
+                require_captures=(not args.allow_missing_captures),
+                require_raw_captures=args.require_raw_captures,
+                require_distinct_capture_images=(
+                    not args.allow_reference_identical_captures
+                ),
+                require_capture_attachment_report=(
+                    not args.allow_missing_capture_attachment_report
+                ),
+                require_capture_provenance=args.require_capture_provenance,
+                capture_required_classification=args.capture_required_classification,
+                capture_required_success_rate=args.capture_required_success_rate,
+                require_success_rate=args.require_success_rate,
+                require_physical_print_scan=args.require_physical_print_scan,
+                require_real_camera_perspective_correction=(
+                    args.require_real_camera_perspective_correction
+                ),
+                require_ocr_only_backend=args.require_ocr_only_backend,
+                ocr_only_required_success_rate=args.ocr_only_required_success_rate,
+                require_profile_certified=require_profile_certified,
+                required_certified_claims=args.required_certified_claims,
+                lang=args.lang,
+                psm=args.psm,
+                ocr_provider_cmd=args.ocr_provider_cmd,
+                ocr_provider_timeout_sec=args.ocr_provider_timeout_sec,
+                strict_payload_chars=args.strict_payload_chars,
+                max_list=args.max_list,
+                kit_manifest_file=args.kit_manifest_file,
+                ingestion_report_file=args.ingestion_report_file,
+                attachment_report_file=args.capture_attachment_report_file,
+                validation_report_file=args.validation_report_file,
+                certification_report_file=args.certification_report_file,
+                archive_file=args.archive_file,
+                archive_manifest_file=args.archive_manifest_file,
+                verification_report_file=args.verification_report_file,
+                replay_output_dir=args.replay_output_dir,
+                replay_report_file=args.replay_report_file,
+                replay_summary_file=args.replay_summary_file,
+                status_report_file=args.status_report_file,
+                pipeline_report_file=args.pipeline_report_file,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "archive-evidence":
+            result = _transport_certify.archive_transport_evidence(
+                report_file=args.report_file,
+                output_dir=args.output_dir,
+                capture_corpus_file=args.capture_corpus_file,
+                capture_attachment_report_file=args.capture_attachment_report_file,
+                archive_file=args.archive_file,
+                manifest_file=args.manifest_file,
+                require_successful_report=args.require_successful_report,
+                require_capture_attachment_report=args.require_capture_attachment_report,
+                require_physical_print_scan=args.require_physical_print_scan,
+                require_real_camera_perspective_correction=(
+                    args.require_real_camera_perspective_correction
+                ),
+                require_ocr_only_backend=args.require_ocr_only_backend,
+                require_profile_certified=args.require_profile_certified,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "verify-evidence-archive":
+            result = _transport_certify.verify_transport_evidence_archive(
+                archive_file=args.archive_file,
+                manifest_file=args.manifest_file,
+                output_file=args.output_file,
+                require_successful_report=args.require_successful_report,
+                require_capture_attachment_report=args.require_capture_attachment_report,
+                require_physical_print_scan=args.require_physical_print_scan,
+                require_real_camera_perspective_correction=(
+                    args.require_real_camera_perspective_correction
+                ),
+                require_ocr_only_backend=args.require_ocr_only_backend,
+                require_profile_certified=args.require_profile_certified,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "replay-evidence-archive":
+            result = transport.replay_transport_evidence_archive(
+                archive_file=args.archive_file,
+                output_dir=args.output_dir,
+                manifest_file=args.manifest_file,
+                replay_report_file=args.replay_report_file,
+                output_file=args.output_file,
+                require_successful_report=args.require_successful_report,
+                require_capture_attachment_report=args.require_capture_attachment_report,
+                require_physical_print_scan=args.require_physical_print_scan,
+                require_real_camera_perspective_correction=(
+                    args.require_real_camera_perspective_correction
+                ),
+                require_ocr_only_backend=args.require_ocr_only_backend,
+                require_profile_certified=args.require_profile_certified,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "certification-status":
+            result = _transport_certify.summarize_transport_certification_status(
+                report_file=args.report_file,
+                verification_file=args.verification_file,
+                archive_file=args.archive_file,
+                manifest_file=args.manifest_file,
+                output_file=args.output_file,
+                verify_archive=args.verify_archive,
+                required_certified_claims=args.required_certified_claims,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
         if args.cmd == "estimate":
             result = transport.estimate_export_artifact(
                 input_file=args.input_file,
@@ -390,6 +1818,7 @@ __all__ = [
     "print_json",
     "save_json",
     "save_missing_chunks",
+    "parse_metadata_items",
     "build_parser",
     "run_cli",
 ]

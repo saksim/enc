@@ -469,6 +469,48 @@ python .\soenc.py transport
 python .\soenc.py transport export -i .\artifact.bin -o .\airgap_pkg
 ```
 
+3. Generate a replayable generated-page sidecar reliability report:
+
+```powershell
+python .\soenc.py transport certify -o .\transport_cert --profile reliable-airgap-v1 --payload-size 128 --payload-size 4096 --backend sidecar --redundancy-copies 2 --parity-group-size 4
+```
+
+This writes `transport_reliability_report.json`. Add `--distortion-suite generated-page-basic-v1` to cover the basic generated-page distortion gate: PNG re-encode, JPEG recompression, mild blur, mild contrast/brightness shift, and screenshot-like high-quality recompression. Add `--distortion-suite generated-page-stress-v1` to cover generated-page resize down/up, small rotation, crop/margin loss, deterministic skew approximation, sparse noise, and print-scan-like approximation.
+
+Backend-specific OCR-only evidence is a separate, non-default run. Use `--require-ocr-only-backend` with `--backend tesseract`, `easyocr`, or `external`, plus sidecar-disabled pages (`--no-sidecar` for generated cases). For operator capture sets, stage sidecar-free pages with `prepare-capture-corpus --ocr-only-backend tesseract` (or `easyocr`/`external`) and preflight with `validate-capture-corpus --profile ocr-only-backend-v1 --backend tesseract --require-ocr-only-backend`. The report records `ocr_only_certification`, per-case `ocr_only_evidence`, and per-backend thresholds, and fails with `ocr_only_evidence_missing` if sidecar evidence is present or the requested OCR backend was not actually selected. These reports do not certify generic OCR fallback or `reliable-airgap-v1` production readiness.
+
+Prepare a physical/lab capture kit before the next manual scanner or camera run:
+
+```powershell
+python .\soenc.py transport prepare-capture-corpus -o .\capture_kit --classification lab --capture-medium print-scan --payload-size 64 --payload-size 257 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata printer=example-printer --capture-metadata scanner=example-flatbed --capture-metadata dpi=300 --capture-metadata capture_session_id=example-session-001 --capture-metadata operator=example-operator --capture-metadata captured_at_utc=2026-05-28T00:00:00Z
+```
+
+This writes generated pages, empty `captures/*` drop directories, `capture_corpus.json`, and `capture_kit_manifest.json`. The kit is only a replay contract. After real photos/scans are placed in the matching capture directories, bind them before certification:
+
+```powershell
+python .\soenc.py transport attach-capture-corpus --capture-corpus-file .\capture_kit\capture_corpus.json --kit-manifest-file .\capture_kit\capture_kit_manifest.json --require-captures --require-distinct-capture-images
+```
+
+If the lab or operator returns a separate folder tree, ingest it first instead of hand-editing `capture_corpus.json`. The capture root should contain one subdirectory per case label; for camera runs, provide a separate raw-photo root with matching labels:
+
+```powershell
+python .\soenc.py transport ingest-capture-corpus --capture-corpus-file .\capture_kit\capture_corpus.json --capture-root .\lab_scans --kit-manifest-file .\capture_kit\capture_kit_manifest.json --capture-medium print-scan --capture-metadata scanner=example-flatbed --capture-metadata dpi=300 --capture-metadata capture_session_id=example-session-001 --capture-metadata operator=example-operator --capture-metadata captured_at_utc=2026-05-28T00:00:00Z --require-captures
+```
+
+This writes `enc2sop-transport-capture-corpus-ingestion-report/v1`, updates the corpus case paths, records SHA256/size bindings, and refreshes the kit manifest. It is still only ingestion evidence; attachment, validation, certification, archive verification/replay, and `certification-status` gates remain required for any medium claim.
+
+For real camera perspective-correction kits, stage raw-photo directories with `prepare-capture-corpus --classification real --capture-medium camera-photo --include-raw-capture-dirs --perspective-correction-method "operator-supplied homography correction"`. Put raw uncorrected photos in `captures\CASE__raw`. If corrected recovery images are not already available, run `correct-capture-perspective --capture-corpus-file .\camera_capture\capture_corpus.json --mode four-point --require-raw-captures` after recording per-case `perspective_correction.source_corners`; this writes `enc2sop-transport-capture-perspective-correction-report/v1` and updates `image_path` with SHA-bound corrected images. Then run `attach-capture-corpus --require-captures --require-raw-captures --require-distinct-capture-images` before certification. Perspective correction reports are preparation evidence only; the real-camera claim still requires validate/certify/archive/status gates with `--require-real-camera-perspective-correction`.
+
+Run a preflight validation before certification when the corpus will support a claim:
+
+```powershell
+python .\soenc.py transport validate-capture-corpus --capture-corpus-file .\capture_kit\capture_corpus.json --output-file .\capture_kit\transport_capture_validation_report.json --profile reliable-airgap-v1 --backend sidecar --require-captures --require-distinct-capture-images --capture-attachment-report-file .\capture_kit\transport_capture_attachment_report.json --require-capture-attachment-report --require-capture-provenance --capture-required-classification lab --require-physical-print-scan
+```
+
+This writes `enc2sop-transport-capture-corpus-validation/v1` with per-case missing-gate reasons. It checks readiness only; it does not run recovery or certify print-scan, camera, OCR-only, or production airgap readiness. Add `--require-capture-provenance` for real/lab claims so missing `capture_session_id`, `operator`, `captured_at_utc`, or capture device metadata fails before measurement.
+
+This writes `transport_capture_attachment_report.json`, records attached image SHA256 values in `capture_corpus.json`, and refreshes the kit manifest summary. It is not recovery certification; use `certify --capture-corpus-file .\capture_kit\capture_corpus.json --capture-corpus-only` to measure supplied captures. Add `--require-capture-attachment-report` to the certification run when the claim depends on physical or operator-provided files; certification then fails closed with `capture_attachment_report_mismatch` unless the current capture/raw/reference image path, size, and SHA256 records match the attachment report. Add `--require-capture-provenance` when the claim depends on lab/real operator captures; certification then fails closed with `capture_provenance_missing` unless each case records session, operator, timestamp, and capture-device metadata. After a passing run, package replay evidence with `soenc transport archive-evidence --report-file .\transport_cert\transport_reliability_report.json -o .\transport_evidence_archive --require-successful-report --require-profile-certified --require-capture-attachment-report`; add `--require-physical-print-scan`, `--require-real-camera-perspective-correction`, or `--require-ocr-only-backend` to archive creation when packaging one of those claims. Archive creation fails closed unless the report required and passed the same gate. Verify the package before handoff with `soenc transport verify-evidence-archive --archive-file .\transport_evidence_archive\transport_capture_evidence_archive.zip --manifest-file .\transport_evidence_archive\transport_capture_evidence_archive_manifest.json --require-successful-report --require-profile-certified --require-capture-attachment-report` plus the same medium/backend gate, then replay it with `soenc transport replay-evidence-archive --archive-file .\transport_evidence_archive\transport_capture_evidence_archive.zip --manifest-file .\transport_evidence_archive\transport_capture_evidence_archive_manifest.json -o .\transport_evidence_replay --require-successful-report --require-profile-certified --require-capture-attachment-report` plus the same medium/backend gate. For an already populated operator corpus, `soenc transport certify-capture-evidence --capture-corpus-file .\capture_kit\capture_corpus.json -o .\capture_pipeline --profile reliable-airgap-v1 --backend sidecar --capture-required-classification lab --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan` runs attach, validate, certify, archive, verify, executable archive replay, and certification status in one fail-closed chain. If the lab returns a separate folder tree, add `--capture-root .\lab_scans --capture-medium print-scan --capture-metadata scanner=example-flatbed --capture-metadata dpi=300 --capture-metadata capture_session_id=example-session-001 --capture-metadata operator=example-operator --capture-metadata captured_at_utc=2026-05-28T00:00:00Z`; for camera evidence also add `--raw-capture-root .\raw_photos --require-raw-captures --capture-medium camera-photo`. The pipeline then writes `ingest\transport_capture_corpus_ingestion_report.json` before attachment and fails closed before certification when required external captures are missing. Then generate launch status with `soenc transport certification-status --archive-file .\transport_evidence_archive\transport_capture_evidence_archive.zip --manifest-file .\transport_evidence_archive\transport_capture_evidence_archive_manifest.json --verify-archive --require-certified-claim physical-print-scan`; repeat `--require-certified-claim` for every transport claim in the launch copy. The status command writes `claim_gate` metadata and exits non-zero if any requested claim is not certified. The archive, verifier, replay, pipeline, and status gate preserve replayability only; they do not broaden the certification claim beyond the included report gates. Reports and archives also include `certification_claims` (`enc2sop-transport-certification-claims/v1`); each claim is usable only when that claim has `certified=true`, so synthetic stress, lab print-scan, real camera perspective correction, and OCR-only backend evidence stay separate. The capture manifest schema is `enc2sop-transport-capture-corpus/v1` and records a corpus `classification` of `real`, `lab`, `synthetic`, or `stress-only`, plus per-case `capture_medium` (`unspecified`, `camera-photo`, `print-scan`, or `mixed`), `label`, `manifest_path`, `payload_path`, `image_path`, optional `reference_image_paths`, optional `raw_image_paths`, optional `perspective_correction`, and optional `capture_metadata`. Reports record source image SHA256 values, reference image SHA256 values, raw camera image SHA256 values when provided, backend, success/failure reason, capture-medium counts, and per-classification success rates. For physical/lab claims, add `--capture-required-classification lab` or `real`, `--capture-required-success-rate`, `--require-distinct-capture-images`, `--require-capture-attachment-report`, and usually `--require-capture-provenance`; the distinct gate rejects byte-identical generated-page fixture copies with `capture_reference_not_distinct`. `attach-capture-corpus --require-raw-captures` rejects missing camera raw-photo attachments with `raw_capture_images_missing`. For physical print-scan claims, also add `--require-physical-print-scan`; this requires `capture_medium=print-scan`, generated reference pages, byte-distinct scan images, and printer/scanner/dpi metadata. For a real camera perspective-correction claim, also add `--require-real-camera-perspective-correction`; this requires corpus classification `real`, raw camera photos in `raw_image_paths`, perspective-corrected recovery images in `image_path`, and `perspective_correction.applied=true` plus a method. For OCR-only claims, also add `--require-ocr-only-backend` with a non-sidecar backend and sidecar-free pages. Real camera/photo, full physical print-scan, and OCR-only claims remain uncertified unless a report explicitly measures and passes those cases for the claimed corpus and backend.
+
 For full transport workflow and backend behavior, use [QRCODE_AIRGAP_MANUAL.md](./QRCODE_AIRGAP_MANUAL.md).
 
 ## 9. Troubleshooting
@@ -581,6 +623,14 @@ Use this helper to execute the real workflow-dispatch run and archive determinis
 ```bash
 bash scripts/github_release_promotion_evidence.sh --repo owner/repo --ref main --rotation-rehearsal true
 ```
+
+Before dispatching, validate the target repository and active workflow identity without starting a run:
+
+```bash
+bash scripts/github_release_promotion_evidence.sh --repo owner/repo --ref main --preflight-only
+```
+
+This writes `.tmp_ci/live_promotion/promotion_preflight_receipt.json` with schema `enc2sop-promotion-preflight/v1`. It proves repository API access and workflow-definition identity only; it is not a substitute for archived protected-branch promotion artifacts.
 
 If workflow dispatch is not available from your current environment, capture from an already started run:
 
@@ -759,9 +809,10 @@ What it does:
 
 Operational prerequisites:
 
-1. `gh` CLI installed and authenticated (`gh auth status` must pass).
+1. `gh` CLI installed and able to access `repos/<owner>/<repo>` via API (token-based access via `GH_TOKEN`/`GITHUB_TOKEN` is supported even when `gh auth status` is non-zero).
 2. Repository allows `workflow_dispatch` for `release_promotion.yml`.
-3. Required secrets are already configured:
+3. Workflow definition `release_promotion.yml` (or provided `--workflow-file`) must resolve via `repos/<owner>/<repo>/actions/workflows/<id-or-file>` as `state=active`.
+4. Required secrets are already configured:
    - `SOENC_RELEASE_APPROVAL_KEY_B64`
    - `SOENC_RELEASE_APPROVAL_KEY_ID` (optional but recommended)
    - `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64` (required when `--rotation-rehearsal true`)

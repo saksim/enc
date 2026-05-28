@@ -50,6 +50,13 @@ The platform mainline is:
 
 `qrcode` and OCR flows are optional plugins for special transport scenarios, not the platform core.
 
+Clarification (2026-05-25):
+
+- This decision allows mainline Beta/GA work to proceed without waiting for OCR/cross-medium transport certification.
+- This does not mean OCR/cross-medium transfer is fully solved.
+- If airgap QR/OCR transport is marketed as a Beta or GA product capability, it requires separate transport reliability certification.
+- The detailed product-launch track split is maintained in `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`.
+
 ### [DECISION][P0] D-002 Product Positioning
 
 The product goal is not merely "hide Python code".
@@ -74,6 +81,12 @@ The product goal is:
 
 The default platform path must not depend on OCR.
 
+Clarification (2026-05-25):
+
+- The default path must also avoid implying OCR reliability for generated transport pages.
+- Current transport mitigations reduce OCR dependency through sidecar-first recovery, manifest guidance, CRC/SHA checks, and parity.
+- Product readiness for transport requires measured reliability reports, not architectural mitigation alone.
+
 ### [DECISION][P0] D-004 Recovery Priority
 
 If airgap transport is used, the preferred recovery order is:
@@ -82,6 +95,12 @@ If airgap transport is used, the preferred recovery order is:
 2. manifest-guided structured extraction
 3. external OCR provider
 4. generic OCR fallback
+
+Clarification (2026-05-25):
+
+- sidecar and manifest-guided recovery are the intended certified path for self-generated pages.
+- generic OCR fallback remains best-effort until it is certified by the transport reliability harness.
+- OCR-only transfer without sidecar/redundancy must not be the default production profile.
 
 ### [DECISION][P0] D-005 Key Architecture Direction
 
@@ -333,6 +352,9 @@ Keep the platform as a modular single repository with explicit boundaries, not a
 1. pluginized airgap transport
 2. sidecar-first recovery
 3. OCR fallback adapters
+4. transport reliability certification harness
+5. reliable airgap production profile
+6. distortion corpus and certification gate
 
 ## 8. Go-Live Gate
 
@@ -344,6 +366,7 @@ Production go-live should not be claimed until the following are true:
 - manifest signing is active
 - at least one non-local key-control path exists
 - qrcode/OCR is no longer part of the mandatory mainline
+- if QR/OCR airgap transport is included in the launch claim, `transport_reliability_report.json` exists and satisfies the selected launch profile
 
 Current go-live gate note (2026-05-07):
 
@@ -443,6 +466,85 @@ Current go-live gate note (2026-05-07):
     - run protected-branch/environment workflow against live rollout controls,
     - archive real promotion + rotation + receipt artifacts from CI,
     - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (product-launch clarification), broad product launch is split into independent gates:
+  - Mainline Beta remains gated by real `ENC-P0-016` live promotion execution evidence when claiming production-grade release governance.
+  - Optional QR/OCR airgap transport is not launch-certified for Beta/GA until `ENC-P0-017` through `ENC-P0-019` produce replayable transport reliability reports.
+  - Current transport implementation has important mitigations, including sidecar-first recovery, manifest-guided structured extraction, CRC/SHA verification, parity recovery, and missing-chunk retake diagnostics.
+  - Those mitigations are not sufficient to claim that OCR/cross-medium transfer is "completely solved" because no distortion corpus, quantified success-rate gate, or `transport_reliability_report.json` exists yet.
+  - Future local iterations should avoid indefinite local hardening of `ENC-P0-016` when live GitHub execution is unavailable and should move to `ENC-P0-017`.
+- As of 2026-05-25 (iteration 154), `ENC-P0-017` delivers the first transport reliability certification loop:
+  - `soenc transport certify` emits `transport_reliability_report.json` with schema `enc2sop-transport-reliability-report/v1`.
+  - The delivered profile is `digital-sidecar-v1` for deterministic generated PNG pages recovered through manifest-guided sidecar decoding.
+  - The report records payload corpus parameters, backend, page/chunk/redundancy/parity settings, recovery metrics, runtime, categorized failure reasons, and SHA256 bindings for payload/manifest/images/restored output.
+  - Local evidence generated in this iteration passed `2/2` sidecar cases at success rate `1.0`.
+  - This closed the first generated-page sidecar certification slice, but did not certify camera/photo/screenshot or OCR-only transfer. At that point, `ENC-P0-018` and `ENC-P0-019` still remained required before broad airgap Beta/GA claims.
+- As of 2026-05-25 (iteration 155), `ENC-P0-018` delivers the reliable airgap production profile:
+  - `soenc transport certify --profile reliable-airgap-v1` fails closed when sidecar rendering, line CRC, compact page/hash metadata, manifest-guided line indexing, or redundancy/parity requirements are weakened.
+  - The report now records `profile_compliance` and `profile_certified` so unsafe experimental runs cannot be mistaken for production-certified evidence.
+  - Local evidence generated in this iteration passed `2/2` generated-page sidecar cases at success rate `1.0` with `profile_certified=true`.
+  - This makes the generated-page sidecar path production-profile certifiable, but still does not certify camera/photo/screenshot degradation or generic OCR fallback. `ENC-P0-019` remains required before broad airgap Beta/GA claims.
+- As of 2026-05-25 (iteration 156), `ENC-P0-019` delivers the first generated-page basic distortion certification slice:
+  - `soenc transport certify` / `qrcode_helper.py certify` now accept:
+    - `--distortion-suite none|generated-page-basic-v1|generated-page-stress-v1`,
+    - `--distortion-required-success-rate`.
+  - `transport_reliability_report.json` now records:
+    - per-case distortion name/kind/parameters,
+    - input and distorted image SHA256/size bindings,
+    - per-distortion success rates,
+    - per-distortion threshold results,
+    - per-distortion failure reason counts.
+  - `generated-page-basic-v1` covers generated-page control, PNG re-encode, JPEG recompression at quality 95, mild blur, mild contrast/brightness shift, and screenshot-like high-quality recompression.
+  - Local evidence generated in this iteration passed `12/12` basic generated-page distortion cases at success rate `1.0` using `reliable-airgap-v1`, with `profile_certified=true`.
+  - Remaining transport launch risk is now narrower but still real:
+    - camera/photo capture is not certified,
+    - full print-scan and perspective/crop/rotation/resize stress cases are measured-only until decoder support and thresholds pass,
+    - generic OCR fallback remains best-effort until backend-specific measured thresholds pass.
+- As of 2026-05-25 (iteration 157), `ENC-P0-019` certifies the generated-page synthetic stress distortion suite:
+  - Render-layout sidecar decoding now uses cell-interior sampling, floating-point grid placement for resize drift, and CRC-guided threshold/offset/scale candidate selection.
+  - Local evidence `.tmp_transport_distortion_stress_iter157e/transport_reliability_report.json` passed `13/13` generated-page stress distortion cases at success rate `1.0` using `reliable-airgap-v1`, with `distortion_threshold_passed=true` and `profile_certified=true`.
+  - The certified synthetic stress set covers generated-page resize down/up, small rotation, crop/margin loss, deterministic skew approximation, sparse noise, screenshot-like recompression, and print-scan-like grayscale/contrast/blur approximation.
+  - Remaining transport launch risk is now real-world rather than synthetic-generated-page:
+    - real camera/photo capture is not certified,
+    - full physical print-scan is not certified,
+    - generic OCR fallback remains best-effort until backend-specific measured thresholds pass.
+- As of 2026-05-26 (iteration 164), `ENC-P0-019` adds a first-class physical print-scan evidence gate:
+  - `soenc transport prepare-capture-corpus` supports `--capture-medium print-scan` so lab scanner kits can be staged without hand-editing `capture_corpus.json`.
+  - `soenc transport certify` / `qrcode_helper.py certify` support `--require-physical-print-scan`.
+  - Reports now record per-case `physical_print_scan_evidence`, capture-medium counts, and threshold fields `physical_print_scan_required` / `physical_print_scan_passed`.
+  - The gate fails closed unless cases are classified `lab` or `real`, declare `capture_medium=print-scan`, include generated `reference_image_paths`, use byte-distinct scan images in `image_path`, and record printer/scanner/dpi metadata.
+  - Local negative evidence `.tmp_transport_print_scan_gate_20260526/cert/transport_reliability_report.json` recovered fixture-copied generated pages but failed with `capture_print_scan_evidence_missing`, proving generated fixtures and metadata alone cannot certify physical print-scan.
+  - Remaining transport launch risk:
+    - actual physical print-scan corpus evidence is still unarchived,
+    - real camera raw+corrected corpus evidence is still unarchived,
+    - backend-specific OCR-only measured reports are still unarchived.
+- As of 2026-05-27 (iteration 166), `ENC-P0-019` adds a first-class raw-camera attachment contract for perspective-correction evidence:
+  - `soenc transport prepare-capture-corpus --include-raw-capture-dirs` stages `captures/*__raw` directories and writes per-case `raw_image_paths` plus `perspective_correction` metadata.
+  - `soenc transport attach-capture-corpus --require-raw-captures` records raw-photo SHA256 bindings and fails closed with `raw_capture_images_missing` when raw camera photos have not been attached.
+  - Local negative evidence `.tmp_transport_camera_raw_kit_20260527/transport_capture_attachment_report.json` failed closed on the empty staged kit with `capture_images_missing`, `raw_capture_images_missing`, and `capture_reference_not_distinct`.
+  - This is a staging and evidence-binding contract only; real camera transfer and real perspective-correction remain uncertified until actual raw photos plus corrected recovery images pass `soenc transport certify --require-real-camera-perspective-correction`.
+- As of 2026-05-27 (iteration 167), `ENC-P0-019` binds capture certification to the operator attachment report:
+  - `soenc transport certify` now supports `--capture-attachment-report-file` and `--require-capture-attachment-report`.
+  - Reports include per-case `capture_corpus.attachment_report_evidence`, report SHA256 binding, current-vs-reported capture/raw/reference image comparisons, `summary.capture_attachment_report_evidence_counts`, and threshold fields for the attachment-report gate.
+  - The gate fails closed with `capture_attachment_report_mismatch` if files drift after `soenc transport attach-capture-corpus` or if certification measures images that do not match the attachment report.
+  - This improves replayability for future physical/lab evidence but does not certify real camera/photo, physical print-scan, perspective correction, or OCR-only reliability by itself.
+- As of 2026-05-27 (iteration 168), `ENC-P0-019` adds replayable transport evidence archive packaging:
+  - `soenc transport archive-evidence` writes `transport_capture_evidence_archive.zip` and `transport_capture_evidence_archive_manifest.json` (`enc2sop-transport-capture-evidence-archive/v1`).
+  - The archive records SHA256/size/path inventory for the measured transport report, capture corpus, attachment report, payloads, manifests, capture/raw/reference images, and recovery outputs when present.
+  - Local evidence `.tmp_transport_evidence_archive_20260527/` archives the prior fixture-based attachment-lineage report with 8 files and ZIP SHA256 `47141c48712e991038a39441b73e93f7e127c6988e2d0099cc7ee2d6bcbe3e13`.
+  - This closes a replay-packaging gap for future real/lab corpus runs, but does not itself certify real camera/photo, physical print-scan, perspective correction, or OCR-only reliability.
+- As of 2026-05-27 (iteration 170), `ENC-P0-019` adds strict archive-creation gates for transport evidence claims:
+  - `soenc transport archive-evidence` now supports `--require-profile-certified`, `--require-physical-print-scan`, `--require-real-camera-perspective-correction`, and `--require-ocr-only-backend` alongside the existing success and attachment-report gates.
+  - Archive creation fails closed unless the input `transport_reliability_report.json` both required and passed the exact gate named by the archive command.
+  - `soenc transport verify-evidence-archive` now accepts workspace-relative external manifest paths before falling back to archive-directory-relative lookup, preserving replay ergonomics without weakening digest or inventory checks.
+  - Local evidence `.tmp_transport_archive_strict_gate_20260527/` shows a fixture-based lab print-scan report can be archived with `--require-successful-report --require-profile-certified --require-capture-attachment-report --require-physical-print-scan`, while the same report fails closed under `--require-real-camera-perspective-correction`.
+  - This hardens claim packaging only; fixture-based evidence still does not certify real physical print-scan, real camera, or OCR-only readiness.
+- As of 2026-05-27 (iteration 176), `ENC-P0-019` adds a replayable camera perspective-correction preparation step:
+  - `soenc transport correct-capture-perspective` reads prepared camera kit `raw_image_paths`, writes corrected recovery images into the corpus `image_path`, and emits `transport_capture_perspective_correction_report.json` (`enc2sop-transport-capture-perspective-correction-report/v1`) with raw/corrected/reference SHA256 bindings.
+  - Correction modes are `copy`, `normalize`, and `four-point`; `four-point` requires per-case `perspective_correction.source_corners`.
+  - Evidence archives now include and schema-check `capture_perspective_correction_report` files when the corpus references one.
+  - Local evidence `.tmp_transport_camera_correction_20260527/` proves the correction-prep contract on a fixture raw image only.
+  - This is preparation and replay evidence only; real camera perspective-correction remains uncertified until actual raw photos plus corrected recovery images pass attach, validation, certification, archive verification, and `certification-status --require-certified-claim real-camera-perspective-correction`.
 - As of 2026-05-10 (iteration 22), `ENC-P0-016` adds fail-closed CI-context binding for archived promotion evidence:
   - `collect-promotion-evidence` now records `github_context` in `promotion_evidence.json`.
   - `soenc verify-promotion-artifacts` now supports `--require-ci-context-match` to enforce evidence/run identity consistency:
@@ -2040,6 +2142,105 @@ Current go-live gate note (2026-05-07):
     - the separately uploaded/extracted artifact file for each required promotion evidence artifact.
   - promotion capture receipts now include `bundle_manifest_verification.archive_member_sha256` for replay handoff.
   - this reduces residual replay ambiguity where bundle names and archive paths matched while nested bundle member bytes drifted from separately uploaded evidence artifacts.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (iteration 148), `ENC-P0-016` tightens operational preflight determinism for live evidence capture in constrained operator environments:
+  - `scripts/github_release_promotion_evidence.sh` now enforces strict `owner/repo` slug validation before GitHub API calls.
+  - capture preflight no longer hard-fails exclusively on `gh auth status`; it now fail-closes on functional repository API access:
+    - performs repo-scoped probe `gh api repos/<owner>/<repo> --jq .full_name`,
+    - requires canonical identity parity between probe output and requested repo slug.
+  - non-zero `gh auth status` is tolerated only when repo API probe succeeds, preserving fail-closed behavior on actual access failures.
+  - when probe fails, capture emits explicit token-based remediation (`GH_TOKEN`/`GITHUB_TOKEN`) while keeping approval/provenance checks unchanged.
+  - this reduces false-negative external closure blockers where local keyring/login state is invalid but valid token-backed API access is available.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (iteration 149), `ENC-P0-016` tightens workflow-target identity determinism before live dispatch/evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes pre-dispatch unless workflow-definition identity is API-resolvable and coherent:
+    - probes `repos/<owner>/<repo>/actions/workflows/<workflow-file-or-id>` before dispatch/run capture.
+    - requires numeric workflow id, canonical `.github/workflows/...` path, `state=active`, and non-empty trimmed workflow name.
+    - when workflow alias/id is used, resolved workflow path is promoted as canonical expected path for downstream run-path parity checks.
+  - capture now fail-closes unless run details report a coherent workflow-definition binding:
+    - `actions/runs/<run_id>.workflow_id` must be present and numeric,
+    - run `workflow_id` must match preflight-resolved workflow definition id.
+  - promotion capture receipts now include explicit workflow-definition lineage:
+    - `workflow_definition_verification.id`,
+    - `workflow_definition_verification.path`,
+    - `workflow_definition_verification.state`,
+    - `workflow_definition_verification.name`,
+    - `workflow_definition_verification.run_workflow_id`.
+  - this reduces residual replay ambiguity where dispatch could target an unintended/disabled workflow definition before later run-level path checks.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (iteration 150), `ENC-P0-016` tightens artifact metadata/archive parity determinism during live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` final capture receipt validator now fail-closes unless artifact metadata and extracted archive verification remain internally coherent and run-bound:
+    - `artifact_metadata.workflow_run_id` must be positive integer and equal resolved `workflow_run_id`.
+    - `artifact_metadata.size_in_bytes` must be positive integer and equal `artifact_archive_verification.size_in_bytes_verified`.
+    - both `artifact_metadata.digest` and `artifact_archive_verification.digest_verified` must be canonical `sha256:<64-hex>` and equal.
+    - `artifact_archive_verification.entry_count_verified` must be a positive integer.
+    - `artifact_metadata.archive_download_url_host` must be non-empty/trimmed and case-insensitively match resolved workflow run URL host.
+    - when present, artifact branch/SHA identity echoes must be canonical and parity-bound to resolved run identity:
+      - `artifact_metadata.workflow_head_branch` trimmed + equal `workflow_head_branch`,
+      - `artifact_metadata.workflow_head_sha` trimmed + 40-char lowercase hex + equal `workflow_head_sha`.
+  - this reduces residual replay ambiguity where earlier pre-download checks passed but final capture receipt assembly could still accept drifted artifact metadata/archive parity fields.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (iteration 151), `ENC-P0-016` corrects artifact host provenance semantics for live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now enforces canonical artifact API-host parity instead of direct run-URL host equality:
+    - expected artifact host mapping is deterministic:
+      - `github.com -> api.github.com`,
+      - non-public hosts (GHES) remain host-equal.
+  - both pre-download host checks and final capture-receipt validation now fail-close on mismatch with this expected API host.
+  - this removes a false-negative failure mode where valid GitHub.com runs could be rejected because run URLs use `github.com` while artifact metadata uses `api.github.com`.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (iteration 152), `ENC-P0-016` tightens dispatch-response lineage determinism for live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now fail-closes when `workflow_dispatch` response identity is ambiguous or inconsistent with resolved run identity:
+    - dispatch response parser now returns run id, dispatch run URL, dispatch HTML URL, and dispatch workflow id.
+    - run-id candidate disagreement across response fields now fails closed before capture proceeds.
+  - dispatch lineage is now parity-bound to resolved run/workflow identity whenever dispatch metadata is available:
+    - dispatch `workflow_id` must be numeric and match preflight-resolved workflow definition id.
+    - dispatch `run_url` and `html_url` must be whitespace-free, include canonical `/actions/runs/<id>`, and resolve to the same captured run id.
+    - final receipt validator enforces the same parity when `run_id_resolution_mode=dispatch-api`.
+  - promotion capture receipts now include explicit dispatch lineage fields:
+    - `dispatch_response_verification.run_id`,
+    - `dispatch_response_verification.workflow_id`,
+    - `dispatch_response_verification.run_url`,
+    - `dispatch_response_verification.html_url`.
+  - this reduces residual replay ambiguity where dispatch API payload drift could select or attest the wrong run prior to downstream run/artifact verification.
+  - remaining launch risk remains external execution:
+    - run protected-branch/environment workflow against live rollout controls,
+    - archive real promotion + rotation + receipt artifacts from CI,
+    - complete live old-key rejection rehearsal records.
+
+- As of 2026-05-25 (iteration 153), `ENC-P0-016` tightens dispatch URL provenance binding for live evidence capture:
+  - `scripts/github_release_promotion_evidence.sh` now validates dispatch response `run_url` and `html_url`, when present, against the resolved run URL identity:
+    - URLs must be HTTPS, whitespace-free, query/fragment-free, and canonical `/owner/repo/actions/runs/<id>` paths.
+    - URL repository path must match the requested GitHub repository slug.
+    - URL run id must match the resolved workflow run id.
+    - URL attempt segment, when present, must match the resolved run attempt.
+    - URL host must match the verified workflow run host, and dispatch `run_url` / `html_url` hosts must match each other.
+  - promotion capture receipts now include dispatch URL replay fields:
+    - `dispatch_response_verification.run_url_host`,
+    - `dispatch_response_verification.html_url_host`,
+    - `dispatch_response_verification.run_url_attempt`,
+    - `dispatch_response_verification.html_url_attempt`.
+  - final capture-receipt assembly now uses tuple unpacking for heredoc arguments to reduce positional binding drift as provenance fields grow.
+  - this reduces residual replay ambiguity where a dispatch response could provide URLs for the right numeric run id but under a different repository path, host, or run attempt.
   - remaining launch risk remains external execution:
     - run protected-branch/environment workflow against live rollout controls,
     - archive real promotion + rotation + receipt artifacts from CI,

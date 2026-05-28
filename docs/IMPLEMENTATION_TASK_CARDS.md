@@ -393,6 +393,46 @@ If one card is too large for one iteration, the agent should deliver a vertical 
 
 ## P1 Cards
 
+### CARD `ENC-P1-020`
+
+- Status: `todo`
+- Goal: add stronger forward-error-correction only if reliability reports show current parity is insufficient
+- Type: reliability hardening
+- Depends on: `ENC-P0-017`
+- Trigger:
+  - promote to P0 only if `transport_reliability_report.json` shows common multi-chunk loss within parity groups
+- Main files:
+  - `enc2sop/transport/`
+  - `qrcode_helper.py`
+  - transport tests
+- Deliverables:
+  - Reed-Solomon or equivalent bounded-dependency FEC design
+  - compatibility strategy for existing manifests
+  - report fields comparing parity vs stronger FEC recovery
+- Acceptance:
+  - stronger FEC recovers failure modes shown in reliability data
+  - existing parity manifests remain readable or fail with explicit compatibility messages
+
+### CARD `ENC-P1-021`
+
+- Status: `todo`
+- Goal: add operator-facing transport planning, self-test, and certification UX
+- Type: product UX + operator readiness
+- Depends on: `ENC-P0-017`
+- Main files:
+  - `enc2sop/transport/cli.py`
+  - `QRCODE_AIRGAP_MANUAL.md`
+  - `USAGE_MANUAL.md`
+- Deliverables:
+  - `soenc transport plan`
+  - `soenc transport self-test`
+  - `soenc transport certify`
+  - clearer retake instructions and not-GA-certified warnings for OCR fallback
+- Acceptance:
+  - operators can estimate page count and reliability risk before export
+  - certification command produces or validates `transport_reliability_report.json`
+  - manual docs show safe defaults and explicit experimental paths
+
 ### CARD `ENC-P1-009`
 
 - Status: `done`
@@ -2807,7 +2847,7 @@ Rationale:
       - `promotion_capture_receipt.json` `promotion_job_verification` now records:
         - `actor_parity_checked`,
         - `triggering_actor_parity_checked`,
-      so downstream audit can distinguish “field unavailable” from “field verified”.
+      so downstream audit can distinguish "field unavailable" from "field verified".
     - Updated operator runbook (`USAGE_MANUAL.md`) with conditional actor parity semantics and new receipt fields.
     - Updated workflow helper contract coverage:
       - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts conditional actor-parity validation strings and parity-check receipt keys.
@@ -3404,9 +3444,1046 @@ Rationale:
       - embedded Python heredoc compile check for `scripts/github_release_promotion_evidence.sh` => `compiled_python_heredocs=11`
       - `git diff --check` => clean
       - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 148):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted operational capture reliability for external `ENC-P0-016` closure without weakening provenance checks.
+    - Hardened `scripts/github_release_promotion_evidence.sh` GitHub preflight to fail closed on functional API access instead of login-state-only checks:
+      - added strict `--repo` slug validation (`owner/repo`) before API calls.
+      - replaced unconditional `gh auth status` hard gate with repo-scoped functional probe (`gh api repos/<owner>/<repo> --jq .full_name`).
+      - capture now tolerates non-zero `gh auth status` only when API probe proves repository access and identity parity.
+      - when API probe fails, capture now emits explicit remediation to provide token-based access (`GH_TOKEN`/`GITHUB_TOKEN`) or run `gh auth login`.
+    - This reduces false-negative launch blockers in constrained environments where keyring/login state is degraded but valid token-backed API access exists.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new auth preflight diagnostics and repo-slug validation wiring.
+    - Updated operator runbook prerequisite wording in `USAGE_MANUAL.md` to reflect functional API-access requirement rather than strict `gh auth status` success.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 149):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger pre-dispatch workflow-target determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed before dispatch/capture unless workflow-definition identity is resolvable and coherent:
+      - added workflow-definition preflight probe: `gh api repos/<owner>/<repo>/actions/workflows/<workflow-file-or-id>`.
+      - requires resolved workflow metadata to be valid and launch-safe:
+        - numeric workflow id,
+        - canonical workflow path under `.github/workflows/`,
+        - `state=active`,
+        - non-empty trimmed workflow name.
+      - when `--workflow-file` is alias/id-driven, resolved path is now promoted to canonical expected workflow path for downstream run-path parity checks.
+      - run-detail provenance now fail-closes unless `actions/runs/<run_id>.workflow_id` is present, numeric, and matches preflight-resolved workflow definition id.
+    - Capture receipt now records explicit workflow-definition provenance in `promotion_capture_receipt.json`:
+      - `workflow_definition_verification.id`,
+      - `workflow_definition_verification.path`,
+      - `workflow_definition_verification.state`,
+      - `workflow_definition_verification.name`,
+      - `workflow_definition_verification.run_workflow_id`.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new workflow-definition preflight and run-workflow-id parity diagnostics plus receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 150):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter artifact metadata/archive parity determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` final capture receipt validator to fail closed unless artifact metadata and extracted archive verification are internally coherent and run-bound:
+      - requires `artifact_metadata.workflow_run_id` as positive integer and exact parity with resolved `workflow_run_id`.
+      - requires `artifact_metadata.size_in_bytes` and `artifact_archive_verification.size_in_bytes_verified` as positive integers with exact parity.
+      - requires canonical `sha256:<64-hex>` formatting for both:
+        - `artifact_metadata.digest`,
+        - `artifact_archive_verification.digest_verified`,
+        and exact digest parity between them.
+      - requires `artifact_archive_verification.entry_count_verified` as a positive integer.
+      - requires non-empty trimmed `artifact_metadata.archive_download_url_host` and enforces case-insensitive host parity with resolved workflow run URL host.
+      - enforces trimmed/typed parity for optional artifact run identity echoes when present:
+        - `artifact_metadata.workflow_head_branch` (trimmed + parity with resolved `workflow_head_branch`),
+        - `artifact_metadata.workflow_head_sha` (trimmed, canonical 40-hex, parity with resolved `workflow_head_sha`).
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed diagnostics and field bindings.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 151):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted removal of a false-negative host-binding condition while preserving fail-closed artifact provenance checks for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` artifact host provenance semantics to enforce canonical API-host parity instead of raw run-URL host equality:
+      - added deterministic mapping helper for expected artifact API host:
+        - `github.com -> api.github.com`,
+        - non-public hosts (GHES) -> same host.
+      - pre-download artifact host check now fail-closes on mismatch with expected API host.
+      - final capture receipt validator now fail-closes on mismatch with expected API host.
+    - This prevents valid GitHub.com promotion runs from being rejected solely because run URLs are on `github.com` while artifact API metadata hosts are `api.github.com`.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts expected API-host mismatch diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 152):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter dispatch-to-run identity determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed when `workflow_dispatch` response identity is ambiguous or drifts from captured run identity:
+      - `extract_run_id_from_dispatch_response_json` now parses and returns:
+        - run id,
+        - dispatch `run_url`,
+        - dispatch `html_url`,
+        - dispatch `workflow_id`.
+      - dispatch response now fails closed if run-id candidates disagree across available fields (`workflow_run_id`, `run_id`, `workflow_run.id`, and run URLs).
+      - when dispatch metadata is present, capture now enforces:
+        - dispatch `workflow_id` is numeric and matches preflight-resolved workflow definition id,
+        - dispatch `run_url`/`html_url` are whitespace-free, include canonical `/actions/runs/<id>`, and bind to resolved `run_id`.
+      - final receipt validator now fail-closes when `run_id_resolution_mode=dispatch-api` unless dispatch response lineage remains coherent with resolved run/workflow identity.
+    - Capture receipt now records explicit dispatch lineage for replay handoff:
+      - `dispatch_response_verification.run_id`,
+      - `dispatch_response_verification.workflow_id`,
+      - `dispatch_response_verification.run_url`,
+      - `dispatch_response_verification.html_url`.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts dispatch-response ambiguity/mismatch diagnostics and new receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 153):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` still reports invalid keyring token), so this slice targeted stricter dispatch URL lineage determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` dispatch-response URL verification so dispatch API lineage must remain canonical and run-bound:
+      - dispatch `run_url` and `html_url`, when present, must be HTTPS URLs with no query/fragment, no leading/trailing whitespace, and canonical `/owner/repo/actions/runs/<id>` paths.
+      - dispatch URL repository path must match the requested `--repo` slug.
+      - dispatch URL run id must match the resolved workflow run id.
+      - dispatch URL attempt segment, when present, must match the resolved run attempt.
+      - dispatch URL host must match the verified workflow run URL host, and dispatch `run_url` / `html_url` hosts must agree with each other.
+    - Capture receipt now records replayable dispatch URL verification metadata:
+      - `dispatch_response_verification.run_url_host`,
+      - `dispatch_response_verification.html_url_host`,
+      - `dispatch_response_verification.run_url_attempt`,
+      - `dispatch_response_verification.html_url_attempt`.
+    - Refactored the final capture-receipt heredoc argument handling to tuple unpacking so added provenance fields cannot silently shift later positional bindings.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new dispatch URL host/repo/run/attempt diagnostics and capture receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+      - MSYS Bash syntax check: `C:\msys64\usr\bin\bash.exe -n scripts/github_release_promotion_evidence.sh` => passed
+      - embedded Python heredoc compile check for `scripts/github_release_promotion_evidence.sh` => `compiled_python_heredocs=14`
+      - `git diff --check` => clean
+  - Notes (2026-05-25, iteration 157):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` still reports invalid keyring token), so this slice targeted real-run capture executability for external `ENC-P0-016` closure.
+    - Fixed live evidence-capture JSON plumbing in `scripts/github_release_promotion_evidence.sh`:
+      - removed broken `pipe | python - <<'PY'` patterns where Bash fed the heredoc program to Python stdin and discarded the piped GitHub API JSON payload.
+      - workflow definition and recent-run fallback JSON are now passed explicitly to Python validators.
+      - dispatch response URL run-id parsing now passes URL values explicitly instead of reading from stdin under a heredoc.
+      - promotion job API payloads are written to `${OUTPUT_ROOT}/run-<id>-attempt-<attempt>/promotion_jobs.json` before validation.
+      - artifact metadata API payloads are written to `${OUTPUT_ROOT}/run-<id>-attempt-<attempt>/artifact_metadata.json` on each index-poll attempt before validation.
+    - This improves the first live protected-branch/environment run by removing a capture-time parsing failure mode and preserving raw GitHub API payloads for replay diagnostics without weakening approval, provenance, artifact, or rotation checks.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now rejects the broken pipe/heredoc pattern and asserts raw job/artifact API payload archival.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+      - MSYS Bash syntax check: `C:\msys64\usr\bin\bash.exe -n scripts/github_release_promotion_evidence.sh` => passed
+  - Notes (2026-05-25, iteration 158):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` still reports invalid keyring token), so this slice targeted pre-dispatch operational determinism for external `ENC-P0-016` closure.
+    - Added `--preflight-only` to `scripts/github_release_promotion_evidence.sh`:
+      - validates the requested `owner/repo` slug and repo API access through the same fail-closed repository probe used by live capture,
+      - resolves the target workflow definition through `repos/<owner>/<repo>/actions/workflows/<id-or-file>`,
+      - enforces numeric workflow id, active workflow state, canonical `.github/workflows/...` path, and non-empty workflow name before any dispatch,
+      - writes `.tmp_ci/live_promotion/promotion_preflight_receipt.json` with schema `enc2sop-promotion-preflight/v1`,
+      - records `repository_api_verified=true`, `dispatch_executed=false`, requested rotation/collect inputs, and workflow-definition identity for replayable operator handoff.
+    - The preflight receipt is explicitly not launch evidence; it only proves the target repo/workflow identity before operators rerun without `--preflight-only` or capture an existing protected-branch run.
+    - Updated `USAGE_MANUAL.md` with the preflight command and receipt semantics.
+    - Updated workflow capture-script contract coverage in `tests/test_release_promotion_workflow.py`.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+      - MSYS Bash syntax check: `C:\msys64\usr\bin\bash.exe -n scripts/github_release_promotion_evidence.sh` => passed
+      - `git diff --check` => clean, with existing CRLF/LF warnings for docs files
   - Remaining scope to complete card:
     - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
     - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+
+### CARD `ENC-P0-017`
+
+- Status: `done`
+- Goal: add a transport reliability certification harness that produces replayable evidence for QR/OCR/cross-medium transfer readiness
+- Type: product reliability + QA automation
+- Depends on: `ENC-P0-002`
+- Product scope:
+  - required for "Beta With Airgap" or any launch claim that QR/OCR/cross-medium transfer is reliable
+  - not required for mainline-only Beta when transport remains optional/experimental
+- Main files:
+  - `enc2sop/transport/`
+  - `qrcode_helper.py`
+  - `enc2sop/cli.py` or transport CLI boundary
+  - new tests under `tests/`
+  - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`
+- Deliverables:
+  - deterministic payload corpus generation
+  - export/recover certification loop for generated transport pages
+  - first `transport_reliability_report.json` schema
+  - per-backend result records for sidecar/structured/OCR provider modes where available
+  - success-rate, failure-reason, missing-chunk, parity-recovered, runtime, and artifact-digest fields
+  - focused tests proving report generation and fail-closed behavior on unrecoverable cases
+- Acceptance:
+  - a local command or test helper can generate `transport_reliability_report.json`
+  - sidecar recovery on tool-generated digital pages is measured and expected to be 100%
+  - report includes enough metadata to replay payload sizes, page counts, chunk settings, backend choices, and recovery outcomes
+  - failures are categorized rather than only reported as generic exceptions
+  - existing transport tests remain green:
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py`
+- Notes (2026-05-25):
+  - Current transport has sidecar-first recovery, manifest-guided extraction, external OCR provider support, optional tesseract/easyocr fallback, line/page CRC, raw/compressed SHA256, parity recovery, and retake diagnostics.
+  - Those mechanisms reduce failure probability but do not prove OCR/cross-medium reliability.
+  - At that point, this card became the next recommended local product-readiness card when live GitHub execution for `ENC-P0-016` was unavailable.
+  - Notes (2026-05-25, iteration 154):
+    - Added `enc2sop/transport/certify.py` with schema `enc2sop-transport-reliability-report/v1`.
+    - Added `soenc transport certify` / `qrcode_helper.py certify` command support.
+    - The harness generates deterministic payloads, exports digital PNG pages, recovers them with the selected backend, and writes `transport_reliability_report.json`.
+    - The first certified profile is `digital-sidecar-v1`:
+      - manifest-guided sidecar recovery,
+      - deterministic payload sizes/iterations/seed,
+      - redundancy and parity settings,
+      - per-case payload, manifest, image, and restored-output SHA256 bindings,
+      - page/chunk counts,
+      - runtime elapsed milliseconds,
+      - recovery metrics for missing chunks, line errors, warnings, parity recovery, and package-hash resolution,
+      - categorized failure reasons.
+    - CLI behavior is fail-closed: `certify` returns non-zero when the required success-rate threshold is not met.
+    - Local implementation evidence generated:
+      - `.tmp_transport_certification_20260525/transport_reliability_report.json`
+      - parameters: payload sizes `64` and `257`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+      - result: `2/2` passed, success rate `1.0`
+    - Verification:
+      - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py` => `25 passed`
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`
+      - `python .\soenc.py transport certify -o .tmp_transport_certification_20260525 --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --max-list 20` => success
+    - Remaining product scope:
+      - `ENC-P0-019` must add the distortion corpus before OCR/camera/screenshot cross-medium transfer can be claimed Beta/GA-ready.
+
+### CARD `ENC-P0-018`
+
+- Status: `done`
+- Goal: add a reliable airgap production profile that fails closed on unsafe transport/OCR configurations
+- Type: product hardening + UX guardrails
+- Depends on: `ENC-P0-017`
+- Product scope:
+  - required before marketing airgap/QR/OCR transport as Beta-ready
+- Main files:
+  - `enc2sop/transport/cli.py`
+  - `qrcode_helper.py`
+  - `QRCODE_AIRGAP_MANUAL.md`
+  - transport tests
+- Deliverables:
+  - production profile, for example `reliable-airgap-v1`
+  - default requirements for sidecar, manifest, line CRC, page CRC, SHA256 verification, and parity/redundancy
+  - explicit opt-in for generic OCR fallback under production profile
+  - warnings converted to fail-closed errors when profile reliability would be weakened
+  - docs showing supported vs experimental transport modes
+- Acceptance:
+  - profile rejects OCR-only or no-redundancy settings unless explicit unsafe/experimental flags are provided
+  - profile preserves backward compatibility outside the production profile
+  - tests cover accepted safe config and rejected unsafe config
+- Notes (2026-05-25, iteration 155):
+  - Added `reliable-airgap-v1` to the transport certification harness.
+  - `soenc transport certify --profile reliable-airgap-v1` now emits profile compliance data in `transport_reliability_report.json`.
+  - Production profile checks require:
+    - sidecar backend unless `--allow-ocr-fallback` is explicitly provided,
+    - sidecar rendering enabled,
+    - manifest-guided certification,
+    - line CRC enabled,
+    - compact page/hash metadata for page CRC/hash fragments,
+    - line index mode not `off`,
+    - redundancy copies `>= 2` or parity group size `>= 2` above the configured threshold,
+    - payload/restored SHA256 verification.
+  - Unsafe settings fail closed unless `--allow-unsafe-profile` is explicitly provided.
+  - Unsafe override runs remain distinguishable from production-certified evidence through `profile_certified=false` and profile-compliance warnings.
+  - Backward compatibility is preserved outside `--profile reliable-airgap-v1`; the default generated-page sidecar profile remains `digital-sidecar-v1`.
+  - Local implementation evidence generated:
+    - `.tmp_transport_reliable_profile_20260525/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, payload sizes `64` and `257`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `2/2` passed, success rate `1.0`, `profile_certified=true`
+  - Negative evidence:
+    - `python .\qrcode_helper.py certify -o .tmp_transport_reliable_profile_reject_20260525 --profile reliable-airgap-v1 --payload-size 64 --backend sidecar --no-sidecar` exits with code `2` and reports `render_sidecar_required observed False`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py tests/test_qrcode_helper_sidecar.py` => `66 passed`
+    - `python .\qrcode_helper.py certify -o .tmp_transport_reliable_profile_20260525 --profile reliable-airgap-v1 --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --max-list 20` => success
+  - Remaining product scope:
+    - `ENC-P0-019` must add distortion corpus certification before screenshot/camera/photo/generic-OCR transfer can be claimed Beta/GA-ready.
+
+### CARD `ENC-P0-019`
+
+- Status: `in_progress`
+- Goal: add distortion corpus and certification gates for realistic cross-medium transport degradation
+- Type: product reliability + acceptance testing
+- Depends on: `ENC-P0-017`
+- Product scope:
+  - required before GA claims for QR/OCR/cross-medium transport
+- Main files:
+  - `enc2sop/transport/`
+  - new test utilities or scripts for image distortion
+  - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`
+- Deliverables:
+  - deterministic distortion suite for compression, resize, rotation, crop, blur, contrast, brightness, perspective, noise, screenshot-like degradation, and print-scan-like degradation
+  - report fields that bind distortion parameters to recovery outcomes
+  - threshold checks for selected launch profiles
+  - documented limits for generic OCR fallback
+- Acceptance:
+  - certification can run a bounded local distortion suite deterministically
+  - `transport_reliability_report.json` records per-distortion pass/fail and aggregate success rates
+  - failures include enough detail to decide whether stronger FEC is required
+  - generic OCR fallback is not treated as GA-ready unless measured thresholds pass.
+- Notes (2026-05-25, iteration 156):
+  - Added deterministic generated-page distortion support to `soenc transport certify` / `qrcode_helper.py certify`.
+  - New CLI options:
+    - `--distortion-suite none|generated-page-basic-v1|generated-page-stress-v1`
+    - `--distortion-required-success-rate`
+  - `generated-page-basic-v1` is the first production-profile certifying suite for generated pages. It covers:
+    - control PNG pages,
+    - PNG decode/re-encode,
+    - JPEG recompression at quality 95,
+    - mild blur,
+    - mild contrast/brightness shift,
+    - screenshot-like downscale/upscale plus high-quality recompression.
+  - `generated-page-stress-v1` adds measured-but-not-yet-production-certified stress distortions:
+    - resize down/up,
+    - small rotation,
+    - crop/margin loss,
+    - perspective-skew approximation,
+    - sparse noise,
+    - print-scan-like grayscale/contrast/blur approximation.
+  - Reports now record per-case distortion metadata, distorted image SHA256/size bindings, per-distortion success rates, per-distortion threshold gates, and per-distortion failure reason counts.
+  - Local implementation evidence generated:
+    - `.tmp_transport_distortion_basic_20260525/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, distortion suite `generated-page-basic-v1`, payload sizes `64` and `257`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `12/12` passed, success rate `1.0`, each basic distortion success rate `1.0`, `profile_certified=true`
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `9 passed`
+    - `python -m pytest -q tests/test_transport_modules.py -k certify` => `1 passed, 21 deselected`
+    - `python .\qrcode_helper.py certify -o .tmp_transport_distortion_basic_20260525 --profile reliable-airgap-v1 --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --distortion-suite generated-page-basic-v1 --max-list 20` => success
+  - Remaining product scope:
+    - camera/photo capture is still not certified.
+    - full print-scan and perspective/crop/rotation stress claims are still not production-certified.
+    - generic OCR fallback remains best-effort until measured backend-specific thresholds pass.
+- Notes (2026-05-25, iteration 157):
+  - Hardened render-layout sidecar decoding for synthetic cross-medium distortion:
+    - decodes each sidecar bit from the cell interior region instead of a single center pixel,
+    - uses floating-point grid placement to avoid resize-induced cumulative column drift,
+    - uses line CRC to select valid payload candidates across threshold, offset, and scale candidates,
+    - prioritizes common affine/perspective offsets before full offset fallback to keep certification runtime bounded.
+  - `generated-page-stress-v1` is now production-profile certifying for generated-page sidecar recovery. It covers:
+    - control PNG pages,
+    - PNG decode/re-encode,
+    - JPEG recompression at quality 95,
+    - resize down to 90 percent and up to 110 percent,
+    - mild blur,
+    - mild contrast/brightness shift,
+    - screenshot-like recompression,
+    - small rotation,
+    - crop/margin loss,
+    - deterministic skew approximation,
+    - sparse noise,
+    - print-scan-like grayscale/contrast/blur approximation.
+  - Local implementation evidence generated:
+    - `.tmp_transport_distortion_stress_iter157e/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, distortion suite `generated-page-stress-v1`, payload size `64`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `13/13` passed, success rate `1.0`, every synthetic stress distortion success rate `1.0`, `distortion_threshold_passed=true`, `profile_certified=true`
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py::TransportModuleExtractionTests::test_sidecar_payload_decode_survives_resize_and_affine_skew tests/test_transport_modules.py::TransportModuleExtractionTests::test_qrcode_helper_ocr_runtime_helpers_delegate_to_transport_module tests/test_transport_modules.py::TransportModuleExtractionTests::test_qrcode_helper_ocr_runtime_page_sidecar_helpers_delegate_to_transport_module` => `3 passed`
+    - `python .\soenc.py transport certify -o .tmp_transport_distortion_stress_iter157e --profile reliable-airgap-v1 --payload-size 64 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --distortion-suite generated-page-stress-v1 --max-list 20` => success
+  - Remaining product scope:
+    - real camera/photo capture is still not certified.
+    - full physical print-scan is still not certified.
+    - generic OCR fallback remains best-effort until measured backend-specific thresholds pass.
+- Notes (2026-05-25, iteration 159):
+  - Added operator-supplied capture corpus ingestion for `soenc transport certify` / `qrcode_helper.py certify`.
+  - New capture corpus schema:
+    - `enc2sop-transport-capture-corpus/v1`
+    - corpus `classification` must be one of `real`, `lab`, `synthetic`, or `stress-only`.
+    - each case binds `label`, `manifest_path`, `payload_path`, `image_path`, and optional `capture_metadata`.
+  - New CLI options:
+    - `--capture-corpus-file`
+    - `--capture-corpus-only`
+  - Reports now include:
+    - top-level `capture_corpus` metadata and certification boundary text,
+    - per-case `capture_corpus` records with label/classification/capture metadata,
+    - source and attached image SHA256 bindings in `capture_corpus` and `artifact_digests.source_images`,
+    - capture classification counts,
+    - capture profile-certified counts,
+    - per-classification success rates.
+  - Under `reliable-airgap-v1`, attached capture cases fail closed with `capture_profile_not_certified` when the bound manifest does not prove:
+    - sidecar layout metadata,
+    - line CRC,
+    - compact page/hash metadata,
+    - manifest-guided line indexing,
+    - payload SHA256 binding,
+    - redundancy or parity above threshold.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_contract_next/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, payload size `64`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `1/1` generated control case passed, `profile_certified=true`
+    - `.tmp_transport_capture_corpus_contract_next/capture_corpus.json`
+    - `.tmp_transport_capture_corpus_contract_next/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, capture corpus classification `lab`, backend `sidecar`, redundancy copies `2`, parity group size `4`, `--capture-corpus-only`
+    - result: `1/1` capture-corpus contract case passed, `capture_profile_certified_counts={"lab": 1}`, `success_rates_by_classification={"lab": 1.0}`
+    - note: unit/CLI capture-corpus tests use generated lab fixtures to prove the attachment contract; they are not real camera or physical print-scan certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `74 passed`
+    - focused capture tests prove lab corpus success, CLI `--capture-corpus-only`, and fail-closed weak-manifest behavior.
+    - `python .\soenc.py transport certify -o .tmp_transport_capture_contract_next --profile reliable-airgap-v1 --payload-size 64 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --max-list 20` => success
+    - `python .\soenc.py transport certify -o .tmp_transport_capture_corpus_contract_next\cert --profile reliable-airgap-v1 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-corpus-file .tmp_transport_capture_corpus_contract_next\capture_corpus.json --capture-corpus-only --max-list 20` => success
+  - Remaining product scope:
+    - archive an actual `real` or `lab` camera/photo or physical print-scan corpus using `--capture-corpus-file`.
+    - real camera perspective-correction evidence remains separate from synthetic `perspective-skew-lite`.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 160):
+  - Added a replayable physical/lab capture-kit preparation command for the next manual scanner/camera run:
+    - `soenc transport prepare-capture-corpus`
+    - schema `enc2sop-transport-capture-kit/v1`
+    - stages deterministic payloads, production-profile generated page exports, empty `captures/*` drop directories, `capture_corpus.json`, `capture_kit_manifest.json`, and `instructions/NEXT_STEPS.md`.
+  - Capture kits fail closed during preparation if the generated manifest cannot satisfy `reliable-airgap-v1` capture prerequisites:
+    - sidecar layout metadata,
+    - line CRC,
+    - compact page/hash metadata,
+    - manifest-guided line indexing,
+    - payload SHA256 binding,
+    - redundancy or parity above threshold.
+  - The generated kit explicitly states its certification boundary:
+    - the kit is only a replay contract,
+    - it is not real camera/photo or physical print-scan certification evidence until operator captures are placed in `captures/*` and measured with `soenc transport certify --capture-corpus-file ... --capture-corpus-only`.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_kit_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_capture_kit_20260526/capture_corpus.json`
+    - `.tmp_transport_capture_kit_20260526/instructions/NEXT_STEPS.md`
+    - `.tmp_transport_capture_kit_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, payload sizes `64` and `257`, seed `20260526`, backend `sidecar`, chunk chars `24`, lines per page `8`, redundancy copies `2`, parity group size `4`
+    - result: capture-kit staging succeeded with `2` cases and `8` generated page images; controlled fixture certification after copying generated pages into capture directories passed `2/2`, success rate `1.0`, `capture_profile_certified_counts={"lab": 2}`, `success_rates_by_classification={"lab": 1.0}`
+    - note: the controlled fixture proves the attachment/replay contract only; it is not real scanner/camera or physical print-scan certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py` => `41 passed`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `77 passed`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py tests/test_soenc_cli.py -k "transport or certify"` => `71 passed, 38 deselected`
+    - `python .\soenc.py transport prepare-capture-corpus -o .tmp_transport_capture_kit_20260526 --classification lab --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata scanner=fixture-copy --capture-metadata dpi=300` => success
+    - `python .\soenc.py transport certify -o .tmp_transport_capture_kit_20260526\cert --profile reliable-airgap-v1 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-corpus-file .tmp_transport_capture_kit_20260526\capture_corpus.json --capture-corpus-only --max-list 20` => success
+  - Remaining product scope:
+    - replace the controlled fixture images in `.tmp_transport_capture_kit_20260526/captures/*` with actual `real` or `lab` camera/photo or physical print-scan captures and rerun certification.
+    - real camera perspective-correction evidence remains separate from synthetic `perspective-skew-lite`.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 161):
+  - Added explicit physical/lab capture evidence gates to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--capture-required-classification real|lab|synthetic|stress-only`
+    - `--capture-required-success-rate`
+    - `--require-distinct-capture-images`
+  - Prepared capture corpora now include `reference_image_paths` for generated source pages so attached captures can be compared against the reference PNGs.
+  - Reports now include per-case `capture_corpus.reference_images` and `capture_corpus.reference_transform` metadata:
+    - whether reference pages were provided,
+    - byte-identical capture/reference match count and SHA256 bindings,
+    - `distinct_from_reference`,
+    - `strict_gate_passed`,
+    - `status`.
+  - Report-level capture gates now record:
+    - `thresholds.capture_required_classification`,
+    - `thresholds.capture_required_classification_passed`,
+    - `thresholds.capture_required_success_rate`,
+    - `thresholds.capture_threshold_passed`,
+    - `thresholds.distinct_capture_images_required`,
+    - `thresholds.distinct_capture_images_passed`,
+    - per-classification capture thresholds.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_distinct_gate_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_capture_distinct_gate_20260526/capture_corpus.json`
+    - `.tmp_transport_capture_distinct_gate_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, payload size `64`, seed `20260526`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification lab`, `--require-distinct-capture-images`
+    - result: fixture-copied generated pages recovered successfully but report failed closed with `capture_reference_not_distinct`, `success=false`, and `distinct_capture_images_passed=false`; this proves generated fixture copies cannot be counted as physical/lab capture evidence.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `18 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `61 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "transport or certify"` => `3 passed, 29 deselected`
+    - `python .\soenc.py transport prepare-capture-corpus -o .tmp_transport_capture_distinct_gate_20260526 --classification lab --payload-size 64 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata scanner=fixture-copy --capture-metadata dpi=300` => success
+    - strict fixture-copy certification command wrote `.tmp_transport_capture_distinct_gate_20260526\cert\transport_reliability_report.json` with the expected fail-closed result.
+  - Remaining product scope:
+    - replace prepared-kit captures with actual `real` or `lab` camera/photo or physical print-scan captures and rerun certification using `--capture-required-classification` and `--require-distinct-capture-images`.
+    - real camera perspective-correction evidence remains separate from synthetic `perspective-skew-lite`.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 162):
+  - Added an explicit real camera perspective-correction evidence gate to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--require-real-camera-perspective-correction`
+  - Capture corpus cases now support:
+    - `raw_image_paths` / `raw_image_path` for uncorrected camera/photo inputs,
+    - `perspective_correction` metadata with `applied=true` and a declared `method` or `algorithm`.
+  - Reports now include per-case `capture_corpus.perspective_correction_evidence`:
+    - raw camera image SHA256 bindings,
+    - corrected recovery image SHA256 bindings,
+    - reference generated page SHA256 bindings,
+    - raw/reference, corrected/reference, and raw/corrected byte-distinct checks,
+    - individual check results for classification, raw image presence, corrected image presence, reference image presence, correction metadata, correction applied flag, and correction method declaration.
+  - Report-level camera perspective gates now record:
+    - `parameters.require_real_camera_perspective_correction`,
+    - `thresholds.real_camera_perspective_correction_required`,
+    - `thresholds.real_camera_perspective_correction_passed`,
+    - `capture_corpus.real_camera_perspective_evidence_counts`,
+    - `summary.capture_real_camera_perspective_evidence_counts`.
+  - The gate is intentionally non-default and fail-closed:
+    - enabling it without `--capture-corpus-file` raises a validation error,
+    - supplied capture cases fail with `capture_perspective_evidence_missing` unless they are classified `real`, include raw camera photos, include corrected images used for recovery, include generated reference images, declare correction metadata, and prove all image sets are byte-distinct.
+  - Local implementation evidence generated:
+    - `.tmp_transport_camera_perspective_gate_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_camera_perspective_gate_20260526/capture_corpus.json`
+    - `.tmp_transport_camera_perspective_gate_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `real`, payload size `64`, seed `20260526`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification real`, `--capture-required-success-rate 1.0`, `--require-real-camera-perspective-correction`
+    - result: fixture-copied corrected images recovered the payload, but report failed closed with `capture_perspective_evidence_missing`, `real_camera_perspective_correction_passed=false`, and `capture_real_camera_perspective_evidence_counts={}` because no raw camera photos or correction metadata were attached. This proves generated or corrected-only fixture captures cannot be counted as real camera perspective-correction evidence.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `21 passed`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `82 passed`
+    - `python .\soenc.py transport prepare-capture-corpus -o .tmp_transport_camera_perspective_gate_20260526 --classification real --payload-size 64 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata device=fixture-camera --capture-metadata purpose=perspective-gate-negative` => success
+    - camera-gate certification command wrote `.tmp_transport_camera_perspective_gate_20260526\cert\transport_reliability_report.json` and exited non-zero as expected with `capture_perspective_evidence_missing`.
+  - Remaining product scope:
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - full physical print-scan evidence remains unarchived.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 163):
+  - Added an explicit backend-specific OCR-only evidence gate to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--require-ocr-only-backend`
+    - `--ocr-only-required-success-rate`
+  - The gate is intentionally non-default and fail-closed:
+    - enabling it with `backend=sidecar` or `backend=auto` raises a validation error.
+    - supplied/generated cases fail with `ocr_only_evidence_missing` unless the requested backend is `tesseract`, `easyocr`, or `external`, the selected backend and OCR extraction backend match the request, recovery succeeds, and the bound manifest has no binary sidecar boxes.
+    - generated OCR-only certification must use sidecar-free pages, for example `--backend tesseract --no-sidecar --require-ocr-only-backend`.
+  - Reports now include:
+    - top-level `ocr_only_certification`,
+    - per-case `ocr_only_evidence`,
+    - `parameters.require_ocr_only_backend`,
+    - `thresholds.ocr_only_backend_required`,
+    - `thresholds.ocr_only_required_success_rate`,
+    - `thresholds.ocr_only_threshold_passed`,
+    - `thresholds.ocr_only_backends`,
+    - `summary.ocr_only_backend_counts`,
+    - `summary.ocr_only_evidence_counts`,
+    - `summary.ocr_only_success_rates_by_backend`.
+  - Tightened certification semantics:
+    - top-level `profile_certified` now requires `profile_compliance.strict_profile`, so explicit OCR fallback runs are measured evidence but not production-certified profile proof.
+    - capture `profile_certified_counts` now counts only strict sidecar profile evidence rather than broad profile pass status.
+  - Local implementation evidence:
+    - focused unit tests simulate a successful `tesseract` OCR-only report on sidecar-free generated pages.
+    - focused negative tests prove sidecar-backed pages fail closed with `ocr_only_evidence_missing`, even when a mocked OCR backend recovers successfully.
+    - no real `tesseract`, `easyocr`, or external OCR provider threshold report was archived in this iteration.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `24 passed`
+  - Remaining product scope:
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - full physical print-scan evidence remains unarchived.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 164):
+  - Added an explicit physical print-scan evidence gate to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--require-physical-print-scan`
+  - Added capture-medium support to capture corpora and prepared kits:
+    - `capture_medium` supports `unspecified`, `camera-photo`, `print-scan`, and `mixed`.
+    - `soenc transport prepare-capture-corpus` now accepts `--capture-medium print-scan` so scanner kits can be staged without hand-editing `capture_corpus.json`.
+  - The print-scan gate is intentionally non-default and fail-closed:
+    - enabling it without `--capture-corpus-file` raises a validation error.
+    - supplied cases fail with `capture_print_scan_evidence_missing` unless they are classified `lab` or `real`, declare `capture_medium=print-scan`, include scanned recovery images, include generated `reference_image_paths`, prove scans are byte-distinct from generated references, and record printer/scanner/dpi metadata.
+  - Reports now include:
+    - per-case `capture_corpus.physical_print_scan_evidence`,
+    - per-case/top-level `capture_medium`,
+    - `summary.capture_medium_counts`,
+    - `summary.capture_physical_print_scan_evidence_counts`,
+    - `thresholds.physical_print_scan_required`,
+    - `thresholds.physical_print_scan_passed`,
+    - per-classification `physical_print_scan_evidence_count`.
+  - Local implementation evidence generated:
+    - `.tmp_transport_print_scan_gate_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_print_scan_gate_20260526/capture_corpus.json`
+    - `.tmp_transport_print_scan_gate_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, capture medium `print-scan`, payload size `64`, seed `20260526`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification lab`, `--capture-required-success-rate 1.0`, `--require-physical-print-scan`
+    - result: fixture-copied generated pages recovered the payload, but report failed closed with `capture_print_scan_evidence_missing`, `physical_print_scan_passed=false`, and `capture_physical_print_scan_evidence_counts={}` because the attached images were byte-identical to generated references. This proves generated fixtures and metadata alone cannot be counted as physical print-scan evidence.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `27 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `61 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "transport or certify"` => `3 passed, 29 deselected`
+    - print-scan gate certification command wrote `.tmp_transport_print_scan_gate_20260526\cert\transport_reliability_report.json` and exited non-zero as expected with `capture_print_scan_evidence_missing`.
+  - Remaining product scope:
+    - replace prepared-kit fixture copies with actual physical print-scan images and rerun with `--require-physical-print-scan`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 165):
+  - Added an operator attachment step for prepared physical/lab capture kits:
+    - CLI command: `soenc transport attach-capture-corpus`
+    - report schema: `enc2sop-transport-capture-attachment-report/v1`
+    - qrcode compatibility entrypoint: `AirgapTransportLayer.attach_capture_corpus(...)`
+  - The command scans each case's existing `image_path` capture directory/file, records attached image SHA256/size bindings, compares attached captures against `reference_image_paths`, and can fail closed with:
+    - `capture_images_missing` when `--require-captures` is set and a case has no attached image.
+    - `capture_reference_not_distinct` when `--require-distinct-capture-images` is set and captures are missing references or byte-identical to generated pages.
+  - The command refreshes `capture_corpus.json` with per-case `attached_capture_images` and `capture_attachment` metadata, and updates `capture_kit_manifest.json` operator-capture summary fields when present.
+  - Certification boundary remains strict:
+    - `transport_capture_attachment_report.json` is a hash-binding/staging artifact only.
+    - It does not prove recovery, physical print-scan readiness, camera transfer, perspective correction, OCR-only reliability, or production transport readiness until `soenc transport certify --capture-corpus-file ... --capture-corpus-only` measures the same corpus with the required gates.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_attach_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_capture_attach_20260526/capture_corpus.json`
+    - `.tmp_transport_capture_attach_20260526/attach/transport_capture_attachment_report.json`
+    - parameters: classification `lab`, capture medium `print-scan`, payload size `64`, seed `20260526`, `--require-captures`, `--require-distinct-capture-images`
+    - result: one intentionally modified fixture image was attached and hash-bound successfully; this proves the attachment workflow only, not real scanner/camera certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py tests/test_soenc_cli.py -k "transport or certify"` => `59 passed, 29 deselected`
+    - manual prepare/attach sample succeeded after fixing workspace-relative `--kit-manifest-file` resolution.
+  - Remaining product scope:
+    - replace prepared-kit fixture files with actual physical print-scan images, run `attach-capture-corpus`, then rerun certification with `--require-physical-print-scan`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, run `attach-capture-corpus`, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 166):
+  - Added first-class raw-camera staging and attachment support for real camera perspective-correction evidence:
+    - `soenc transport prepare-capture-corpus --include-raw-capture-dirs`
+    - `--perspective-correction-method`
+    - `soenc transport attach-capture-corpus --require-raw-captures`
+  - Prepared camera kits now create a sibling `captures/*__raw` directory for each case, write that directory into `raw_image_paths`, and write per-case `perspective_correction.applied=true` plus a method into `capture_corpus.json`.
+  - Attachment reports now record raw-capture presence counts:
+    - `summary.cases_with_raw_captures`
+    - `summary.cases_missing_raw_captures`
+    - `summary.raw_capture_image_count`
+    - refreshed kit summary fields for operator raw-capture presence.
+  - The raw-capture attachment gate is intentionally non-default and fail-closed:
+    - `--require-raw-captures` fails with `raw_capture_images_missing` until every staged case has at least one image under `raw_image_paths`.
+    - empty staged raw directories are allowed at kit-creation time so the next operator run can attach external photos without hand-editing JSON.
+  - Local implementation evidence generated:
+    - `.tmp_transport_camera_raw_kit_20260527/capture_kit_manifest.json`
+    - `.tmp_transport_camera_raw_kit_20260527/capture_corpus.json`
+    - `.tmp_transport_camera_raw_kit_20260527/transport_capture_attachment_report.json`
+    - parameters: classification `real`, capture medium `camera-photo`, payload size `64`, seed `20260527`, `--include-raw-capture-dirs`, perspective method `operator-supplied homography correction`, attachment flags `--require-captures --require-raw-captures --require-distinct-capture-images`
+    - result: kit staging succeeded and created one corrected-image drop directory plus one raw-photo drop directory; attachment on the empty kit exited non-zero as expected with `capture_images_missing`, `raw_capture_images_missing`, and `capture_reference_not_distinct`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py` => `58 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - replace staged camera-kit placeholders with actual raw camera photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, then rerun certification with `--require-real-camera-perspective-correction`.
+    - replace prepared print-scan fixture files with actual physical print-scan images and rerun with `--require-physical-print-scan`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 167):
+  - Added attachment-report lineage gating for capture certification:
+    - `soenc transport certify --capture-attachment-report-file ...`
+    - `--require-capture-attachment-report`
+  - Certification reports now include per-case `capture_corpus.attachment_report_evidence` with:
+    - `transport_capture_attachment_report.json` SHA256 binding,
+    - current-vs-reported capture image path/SHA256/size comparisons,
+    - current-vs-reported raw-photo comparisons,
+    - current-vs-reported generated-reference comparisons,
+    - explicit fail-closed checks and status.
+  - Report summaries now include `capture_attachment_report_evidence_counts`, and thresholds now include `capture_attachment_report_required` / `capture_attachment_report_passed`.
+  - The gate fails closed with `capture_attachment_report_mismatch` when files change after `attach-capture-corpus` or when certification measures files not recorded by the attachment report.
+  - Generated capture-kit instructions now tell operators to run `attach-capture-corpus` before certification and to add `--require-capture-attachment-report` for physical/lab capture claims.
+  - Local implementation evidence generated:
+    - `.tmp_transport_attachment_lineage_20260527/capture_corpus.json`
+    - `.tmp_transport_attachment_lineage_20260527/attach/transport_capture_attachment_report.json`
+    - `.tmp_transport_attachment_lineage_20260527/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, capture medium `print-scan`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification lab`, `--require-distinct-capture-images`, `--require-capture-attachment-report`
+    - result: fixture-based lab attachment certified only while image digests matched the attachment report; after appending bytes to the capture image, certification failed closed with `capture_attachment_report_mismatch`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "attachment_report or attach_capture_corpus_binds_operator_files"` => `3 passed, 31 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or certify_entrypoint"` => `2 passed, 24 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py -k "attachment_report or attach_capture_corpus or cli_aliases or certify_entrypoint"` => `9 passed, 51 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, then rerun certification with `--require-capture-attachment-report --require-physical-print-scan`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, then rerun certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 168):
+  - Added replayable transport evidence archive packaging:
+    - `soenc transport archive-evidence`
+    - report/API schema `enc2sop-transport-capture-evidence-archive/v1`
+    - default outputs `transport_capture_evidence_archive.zip` and `transport_capture_evidence_archive_manifest.json`
+  - The archive command records SHA256/size/path inventory for:
+    - `transport_reliability_report.json`
+    - `capture_corpus.json`
+    - `transport_capture_attachment_report.json`
+    - payload files
+    - transport manifests
+    - attached capture images
+    - raw camera images when present
+    - generated reference images
+    - recovery outputs and diagnostics when present
+  - The command can fail closed with:
+    - `--require-successful-report`
+    - `--require-capture-attachment-report`
+  - Local implementation evidence generated:
+    - `.tmp_transport_evidence_archive_20260527/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_evidence_archive_20260527/transport_capture_evidence_archive_manifest.json`
+    - parameters: archived `.tmp_transport_attachment_lineage_20260527/cert/transport_reliability_report.json` with `--require-successful-report --require-capture-attachment-report`
+    - result: archive manifest recorded 8 hash-bound files and final ZIP SHA256 `47141c48712e991038a39441b73e93f7e127c6988e2d0099cc7ee2d6bcbe3e13`
+    - note: this archive packages the prior fixture-based lab evidence, so it proves replay packaging only and does not certify real camera/photo or physical print-scan readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence or archive_evidence_command"` => `3 passed, 34 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "archive_transport_evidence or cli_aliases"` => `2 passed, 25 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `100 passed`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, then archive the passing report with `archive-evidence`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, then archive the passing report with `archive-evidence`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 169):
+  - Added transport evidence archive replay verification:
+    - `soenc transport verify-evidence-archive`
+    - report/API schema `enc2sop-transport-capture-evidence-archive-verification/v1`
+  - Verification checks include:
+    - embedded and external archive manifest schema/parity,
+    - safe relative ZIP member paths with no directories, symlinks, traversal, backslashes, or drive-prefixed names,
+    - exact ZIP inventory against `files[*].archive_path` plus the embedded manifest,
+    - per-file SHA256 and byte-size checks,
+    - summary file-count/role/size coherence,
+    - archived `transport_reliability_report.json`, `capture_corpus.json`, and `transport_capture_attachment_report.json` schema checks,
+    - optional gate checks for `--require-successful-report`, `--require-profile-certified`, `--require-capture-attachment-report`, `--require-physical-print-scan`, `--require-real-camera-perspective-correction`, and `--require-ocr-only-backend`.
+  - Added compatibility entrypoint `AirgapTransportLayer.verify_transport_evidence_archive(...)` and CLI parser/dispatch wiring.
+  - Updated operator docs and next-iteration prompt to add archive verification after `archive-evidence`.
+  - Local implementation evidence:
+    - focused unit evidence verifies a passing archive with `--require-successful-report --require-profile-certified --require-capture-attachment-report --require-physical-print-scan`,
+    - tampered ZIP evidence fails closed with duplicate member and external archive SHA256 mismatch diagnostics,
+    - CLI evidence writes `transport_archive_verification.json`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence or verify_transport_evidence_archive or verify_evidence_archive"` => `4 passed, 35 deselected` (one expected Python zipfile duplicate-member warning in the tamper test)
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or archive_transport_evidence or verify_transport_evidence_archive"` => `3 passed, 25 deselected`
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, archive with `archive-evidence`, then verify with `verify-evidence-archive`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, then verify.
+    - run, archive, and verify a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 170):
+  - Added strict archive-creation gates to prevent claim packaging before the measured report proves the same gate:
+    - `soenc transport archive-evidence --require-profile-certified`
+    - `--require-physical-print-scan`
+    - `--require-real-camera-perspective-correction`
+    - `--require-ocr-only-backend`
+  - Archive creation now fails closed unless the input `transport_reliability_report.json` both required and passed the requested medium/backend gate.
+  - `soenc transport verify-evidence-archive` now accepts workspace-relative external `--manifest-file` paths before falling back to paths relative to the archive ZIP directory.
+  - Local implementation evidence:
+    - `.tmp_transport_archive_strict_gate_20260527/archive/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_archive_strict_gate_20260527/archive/transport_capture_evidence_archive_manifest.json`
+    - `.tmp_transport_archive_strict_gate_20260527/archive/transport_archive_verification.json`
+    - parameters: fixture-based lab print-scan report archived with `--require-successful-report --require-profile-certified --require-capture-attachment-report --require-physical-print-scan`
+    - result: archive manifest recorded 9 hash-bound files and ZIP SHA256 `37866ab6f7db602537c26e749a866596741628b2aafbb3a1fb1b627110609013`; requiring `--require-real-camera-perspective-correction` on the same report failed closed before archive creation.
+    - note: this proves strict claim packaging and archive replay only; fixture-based captures still do not certify real physical print-scan or real camera readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence or archive_evidence_command or verify_evidence_archive"` => `7 passed, 35 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "archive_transport_evidence or verify_transport_evidence_archive or cli_aliases"` => `3 passed, 25 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "transport or certify"` => `3 passed, 29 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `105 passed, 1 warning` (expected duplicate-member warning in tamper test)
+    - manual archive verification with workspace-relative manifest path passed with `failure_count=0`.
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, archive with matching archive gates, then verify with matching verification gates.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive with matching archive gates, then verify.
+    - run, archive, and verify a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 171):
+  - Added machine-readable transport certification claim boundaries:
+    - report/API schema block: `enc2sop-transport-certification-claims/v1`
+    - embedded in `transport_reliability_report.json`
+    - copied into `transport_capture_evidence_archive_manifest.json` under `certification_gates.certification_claims`
+    - emitted again by `soenc transport verify-evidence-archive`
+  - Claim records now independently label:
+    - `generated-page-sidecar`
+    - `generated-page-synthetic-stress`
+    - `physical-print-scan`
+    - `real-camera-perspective-correction`
+    - `backend-specific-ocr-only`
+  - Each claim records `certified`, `status`, `evidence_level`, required/passed/missing gates, scoped metrics, and a certification boundary. This lets launch/audit tooling distinguish production sidecar evidence, synthetic-stress evidence, lab print-scan evidence, real camera perspective evidence, backend-specific OCR-only measurement, and not-certified modes without inferring from scattered threshold fields.
+  - Physical print-scan and real camera perspective claim records require attachment-report lineage plus the corresponding medium/camera gate before reporting `certified=true`.
+  - Archive verification now fails closed on certification-claim snapshot drift between the archived `transport_reliability_report.json` and the archive manifest gate snapshot.
+  - Local implementation evidence:
+    - focused generated-page stress evidence reports `generated-page-synthetic-stress.certified=true` while physical/camera/OCR-only claims remain `certified=false`.
+    - focused fixture-based lab print-scan evidence reports `physical-print-scan.status=lab-certified` and keeps the boundary scoped to the measured lab corpus.
+    - focused tamper evidence rejects an archive whose embedded manifest claim snapshot is edited away from the archived report with `transport_claims_gate_mismatch`.
+    - focused archive packaging evidence rejects reports whose legacy medium/backend gate fields pass but whose matching `certification_claims` record is not certified.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "claim or archive_transport_evidence_fails_when_required_claim_not_certified or archive_transport_evidence_packages_report_corpus_attachment_and_artifacts"` => `4 passed, 41 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py -k "claim or archive_transport_evidence or verify_transport_evidence_archive or cli_aliases or certify_entrypoint"` => `12 passed, 61 deselected` (one expected Python zipfile duplicate-member warning in the tamper test)
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `109 passed` (one expected Python zipfile duplicate-member warning in the tamper test)
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py` => passed
+    - direct `python -m py_compile enc2sop\transport\certify.py` hit a Windows `__pycache__` permission error before the redirected-pycache compile passed.
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, archive with matching archive gates, then verify with matching verification gates and inspect `certification_claims`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive with matching archive gates, then verify.
+    - run, archive, and verify a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 172):
+  - Added a product-facing transport certification status artifact:
+    - CLI command: `soenc transport certification-status`
+    - schema: `enc2sop-transport-certification-status/v1`
+    - accepted sources: a measured `transport_reliability_report.json`, a saved `transport_archive_verification.json`, or a `transport_capture_evidence_archive.zip` when `--verify-archive` is supplied.
+  - The status artifact records:
+    - source type/file/SHA256,
+    - archive verification state when applicable,
+    - profile/profile-certified state,
+    - certified/uncertified claim lists,
+    - one row each for `generated-page-sidecar`, `generated-page-synthetic-stress`, `physical-print-scan`, `real-camera-perspective-correction`, and `backend-specific-ocr-only`,
+    - each row's status, evidence level, boundary, required/passed/missing gates, and metrics,
+    - product-facing booleans for production airgap, real camera, physical print-scan, OCR-only, and generic OCR fallback readiness,
+    - recommended next evidence steps for still-uncertified media.
+  - Compatibility/API wiring:
+    - `qrcode_helper.AirgapTransportLayer.summarize_transport_certification_status(...)`
+    - `enc2sop.transport.certify.summarize_transport_certification_status(...)`
+  - Certification boundary:
+    - The status artifact is a launch-readable summary only. It does not broaden any claim beyond the underlying `certification_claims`; product copy should quote only rows with `certified=true`.
+    - `generic_ocr_fallback_ready` remains `false` because only backend-specific OCR-only evidence can be certified by the current gate.
+  - Local implementation evidence:
+    - `.tmp_transport_certification_status_20260527/transport_reliability_report.json`
+    - `.tmp_transport_certification_status_20260527/transport_certification_status.json`
+    - parameters: profile `reliable-airgap-v1`, distortion suite `generated-page-stress-v1`, payload size `64`, seed `20260527`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: certification status reports `production_airgap_ready=true` for generated-page sidecar, `generated-page-synthetic-stress.certified=true`, `physical_print_scan_ready=false`, `real_camera_ready=false`, `ocr_only_ready=false`, and `generic_ocr_fallback_ready=false`
+    - note: this proves the launch-readable status artifact path only; it does not certify real camera/photo, physical print-scan, or OCR-only readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "certification_status"` => `4 passed, 45 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "certification_status"` => `1 passed, 28 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py -k "certification_status or archive_transport_evidence_packages_report_corpus_attachment_and_artifacts or verify_evidence_archive_command"` => `7 passed, 71 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `114 passed, 1 warning` (expected duplicate-member warning in tamper test)
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+    - `git diff --check` clean except existing CRLF conversion warnings in docs.
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status`.
+    - run, archive, verify, and summarize a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+- Notes (2026-05-27, iteration 173):
+  - Added an operator capture-corpus validation preflight:
+    - CLI command: `soenc transport validate-capture-corpus`
+    - schema: `enc2sop-transport-capture-corpus-validation/v1`
+    - API wiring: `qrcode_helper.AirgapTransportLayer.validate_capture_corpus(...)` and `enc2sop.transport.certify.validate_capture_corpus(...)`
+  - The validation report records:
+    - source corpus file/SHA256,
+    - profile and backend intended for certification,
+    - per-case manifest/payload/capture/reference/raw image SHA256 records,
+    - reliable-airgap profile compliance,
+    - distinctness from generated reference pages,
+    - attachment-report lineage status,
+    - physical print-scan evidence status,
+    - real camera perspective-correction evidence status,
+    - readiness counts and `failures_by_reason`.
+  - Certification boundary:
+    - The validator is a preflight only. It does not run recovery, does not produce `transport_reliability_report.json`, and does not certify camera/photo, physical print-scan, OCR-only, or production airgap readiness.
+    - It is intended to catch missing physical files, raw photos, distinctness, metadata, and attachment lineage before a costly certification run.
+  - Local implementation evidence:
+    - `.tmp_transport_capture_validation_20260527/capture_kit_manifest.json`
+    - `.tmp_transport_capture_validation_20260527/capture_corpus.json`
+    - `.tmp_transport_capture_validation_20260527/transport_capture_validation_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, capture medium `print-scan`, payload size `64`, seed `20260527`, `--require-captures`, `--require-distinct-capture-images`, `--require-capture-attachment-report`, `--require-physical-print-scan`
+    - result: empty prepared kit failed closed with `capture_images_missing`, `capture_reference_not_distinct`, `capture_attachment_report_mismatch`, and `capture_print_scan_evidence_missing`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "validate_capture_corpus"` => `3 passed, 49 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "validate_capture_corpus or cli_aliases"` => `2 passed, 28 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, validate with `validate-capture-corpus --require-real-camera-perspective-correction`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status`.
+    - run, archive, verify, and summarize a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+- Notes (2026-05-27, iteration 174):
+  - Added a sidecar-free OCR-only capture-kit and preflight contract:
+    - `soenc transport prepare-capture-corpus --ocr-only-backend {tesseract,easyocr,external}`
+    - non-production profile marker: `ocr-only-backend-v1`
+    - generated manifests now explicitly record `sidecar_enabled=false` for sidecar-free exports.
+    - prepared OCR-only corpora record `metadata.ocr_only_backend` and per-case `ocr_only_backend` / `ocr_only_evidence` hints.
+    - generated `instructions/NEXT_STEPS.md` tells operators to certify with the named backend and `--require-ocr-only-backend`.
+  - Extended `soenc transport validate-capture-corpus` with `--require-ocr-only-backend`:
+    - validates backend is `tesseract`, `easyocr`, or `external`,
+    - fails closed with `ocr_only_evidence_missing` when attached capture cases bind manifests with binary sidecar data,
+    - records per-case `ocr_only_evidence` and summary `ocr_only_ready_case_count`.
+  - Certification boundary:
+    - `ocr-only-backend-v1` is not a production airgap profile and must not be used for `--require-profile-certified` claims.
+    - The kit and validation report prove sidecar-free/backend-specific readiness only. They do not run OCR recovery, do not certify generic OCR fallback, and do not certify real physical print-scan/camera transfer.
+  - Local implementation evidence:
+    - unit-generated sidecar-free kit in `tests/test_transport_certify.py` records `profile=ocr-only-backend-v1`, `metadata.ocr_only_backend=tesseract`, and manifest `sidecar_enabled=false`.
+    - validation succeeds only after an attached distinct capture file and matching attachment report are present.
+    - a sidecar-present corpus validated with `--require-ocr-only-backend` fails closed with `ocr_only_evidence_missing`.
+    - manual local kit evidence:
+      - `.tmp_transport_ocr_only_kit_20260527/capture_kit_manifest.json`
+      - `.tmp_transport_ocr_only_kit_20260527/capture_corpus.json`
+      - `.tmp_transport_ocr_only_kit_20260527/transport_capture_validation_report.json`
+      - parameters: classification `lab`, capture medium `print-scan`, OCR-only backend `tesseract`, payload size `64`, seed `20260527`, profile `ocr-only-backend-v1`
+      - result: kit staging succeeded with manifest `sidecar_enabled=false`; validation exited non-zero as expected because no operator captures were attached, while `ocr_only_ready_case_count=1` proved the sidecar-free/backend gate preflight passed.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "ocr_only or validate_capture_corpus"` => `9 passed, 46 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or prepare_capture_corpus or validate_capture_corpus"` => `3 passed, 27 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `121 passed, 1 warning` (expected duplicate-member warning in archive tamper test)
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+    - `git diff --check` clean except existing CRLF conversion warnings in docs.
+  - Remaining product scope:
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, and summarize the measured report with `--require-ocr-only-backend`.
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, validate with `validate-capture-corpus --require-real-camera-perspective-correction`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status`.
+- Notes (2026-05-27, iteration 175):
+  - Added a fail-closed claim gate to the launch-readable transport status artifact:
+    - CLI flag: `soenc transport certification-status --require-certified-claim {generated-page-sidecar,generated-page-synthetic-stress,physical-print-scan,real-camera-perspective-correction,backend-specific-ocr-only}`.
+    - API option: `summarize_transport_certification_status(required_certified_claims=[...])`.
+    - compatibility wiring: `qrcode_helper.AirgapTransportLayer.summarize_transport_certification_status(..., required_certified_claims=[...])`.
+  - The status report now records:
+    - `claim_gate.required`,
+    - `claim_gate.required_certified_claims`,
+    - `claim_gate.passed`,
+    - `claim_gate.missing_required_certified_claims`,
+    - matching summary fields under `summary.required_certified_claims*`.
+  - Fail-closed behavior:
+    - status generation remains backwards-compatible when no required claim is supplied.
+    - when a required claim is not already `certified=true` in the measured report or verified archive, the JSON still writes but `success=false` and the CLI exits `2`.
+    - the gate does not create new evidence or broaden any certification boundary; it only checks existing `certification_claims` rows.
+  - Local implementation evidence:
+    - focused generated-page sidecar evidence passes `--require-certified-claim generated-page-sidecar` implicitly through the status matrix.
+    - the same generated-page-only report fails closed for `--require-certified-claim physical-print-scan`, writing `claim_gate.missing_required_certified_claims=["physical-print-scan"]`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "certification_status"` => `6 passed, 51 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "certification_status or cli_aliases"` => `3 passed, 28 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status --require-certified-claim physical-print-scan` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, validate with `validate-capture-corpus --require-real-camera-perspective-correction`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status --require-certified-claim real-camera-perspective-correction`.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, and generate `certification-status --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-27, iteration 176):
+  - Added camera perspective-correction preparation workflow for real capture kits:
+    - CLI command: `soenc transport correct-capture-perspective`.
+    - schema: `enc2sop-transport-capture-perspective-correction-report/v1`.
+    - compatibility API: `qrcode_helper.AirgapTransportLayer.correct_capture_perspective(...)`.
+    - modes: `copy`, `normalize`, and `four-point`.
+  - Behavior:
+    - reads per-case `raw_image_paths` from a prepared `capture_corpus.json`,
+    - writes corrected recovery images under a correction output directory,
+    - updates each case `image_path` plus `perspective_correction` metadata when requested,
+    - refreshes `capture_kit_manifest.json` summary fields when available,
+    - records raw/corrected/reference image SHA256 and size bindings in the correction report,
+    - `--require-raw-captures` fails closed with `raw_capture_images_missing`,
+    - `--mode four-point` fails closed unless per-case `perspective_correction.source_corners` is present.
+  - Certification boundary:
+    - the correction report is preparation evidence only.
+    - it does not run recovery and does not certify real camera transfer.
+    - real-camera claims still require `attach-capture-corpus --require-raw-captures`, `validate-capture-corpus --require-real-camera-perspective-correction`, `certify --require-capture-attachment-report --require-real-camera-perspective-correction`, archive verification, and `certification-status --require-certified-claim real-camera-perspective-correction`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "correct_capture_perspective"` => `3 passed, 57 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "correct_capture_perspective or cli_aliases"` => `2 passed, 30 deselected`
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status --require-certified-claim physical-print-scan` from the verified archive.
+    - attach actual real camera raw photos, run `correct-capture-perspective` or provide externally corrected images, attach with `--require-raw-captures`, validate/certify/archive/status with `--require-real-camera-perspective-correction`, and do not claim camera support until the measured archive passes.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, and generate `certification-status --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-27, iteration 177):
+  - Added executable replay for archived transport evidence:
+    - CLI command: `soenc transport replay-evidence-archive`.
+    - schema: `enc2sop-transport-capture-evidence-archive-replay/v1`.
+    - compatibility API: `qrcode_helper.AirgapTransportLayer.replay_transport_evidence_archive(...)`.
+  - Behavior:
+    - runs `verify-evidence-archive` first with the same optional gate flags,
+    - extracts the archive into an isolated replay directory,
+    - rewrites archived `capture_corpus.json` and `transport_capture_attachment_report.json` path records to the extracted files,
+    - reruns `certify` against the extracted archived capture corpus with generated cases disabled,
+    - compares replayed case ids, success state, failure reason, payload digest, and restored digest evidence when both reports recorded it,
+    - writes `transport_evidence_archive_replay_report.json` with `comparison.mismatch_count` and fail-closed `success=false` when replay diverges.
+  - Certification boundary:
+    - archive replay proves executable recovery replay from archived bytes only.
+    - it does not broaden any `certification_claims` row and does not turn fixture-based evidence into real camera/photo or physical print-scan readiness.
+  - Local implementation evidence:
+    - `.tmp_transport_archive_replay_20260527/archive/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_archive_replay_20260527/archive/transport_capture_evidence_archive_manifest.json`
+    - `.tmp_transport_archive_replay_20260527/archive/transport_archive_verification.json`
+    - `.tmp_transport_archive_replay_20260527/replay/transport_evidence_archive_replay_report.json`
+    - `.tmp_transport_archive_replay_20260527/archive/transport_certification_status.json`
+    - result: fixture-based lab replay succeeded with `mismatch_count=0`; archive SHA256 `53956c032d42fa7bdf05aecd434b7f1f4362980f991ded65055a337c5328ba93`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "replay_evidence_archive or cli_aliases"` => `1 passed, 32 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence_packages_report_corpus_attachment_and_artifacts or replay_evidence_archive"` => `2 passed, 60 deselected`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `131 passed, 1 warning`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, replay with `replay-evidence-archive`, and generate `certification-status --require-certified-claim physical-print-scan`.
+    - attach actual real camera raw photos, run `correct-capture-perspective` or provide externally corrected images, attach with `--require-raw-captures`, validate/certify/archive/verify/replay/status with `--require-real-camera-perspective-correction`, and do not claim camera support until the measured archive passes.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, replay, and generate `certification-status --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 178):
+  - Added executable replay to the one-command operator capture evidence pipeline:
+    - `soenc transport certify-capture-evidence` now runs attach, validate, certify, archive, verify, replay, and certification-status in order.
+    - Pipeline reports still use schema `enc2sop-transport-capture-certification-pipeline/v1`.
+    - New optional pipeline output controls:
+      - `--replay-output-dir`
+      - `--replay-report-file`
+      - `--replay-summary-file`
+    - Compatibility API `qrcode_helper.AirgapTransportLayer.certify_capture_evidence_pipeline(...)` accepts `replay_output_dir`, `replay_report_file`, and `replay_summary_file`.
+  - Behavior:
+    - replay runs after `verify-evidence-archive` with the same success/profile/attachment/medium/backend gates,
+    - replay writes `transport_evidence_archive_replay_report.json` and a rerun `transport_reliability_replay_report.json`,
+    - pipeline summary records `archive_replayed` and `archive_replay_mismatch_count`,
+    - certification status is skipped if archive replay fails or diverges.
+  - Certification boundary:
+    - this makes the next manual/lab corpus handoff more replayable with one command.
+    - it does not broaden any `certification_claims` row and does not turn fixture-based evidence into real camera/photo or physical print-scan readiness.
+  - Local implementation evidence:
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/transport_capture_certification_pipeline_report.json`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_archive/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_archive/transport_evidence_archive_verification_report.json`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_replay/transport_evidence_archive_replay_report.json`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_archive/transport_certification_status.json`
+    - result: fixture-based lab print-scan pipeline completed `7/7` steps, archive replay reported `mismatch_count=0`, and the status gate certified `physical-print-scan` for the fixture corpus only.
+    - note: this proves replay-gated pipeline orchestration only; it is not real physical scanner/camera certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "certify_capture_evidence_pipeline"` => initially `2 passed, 63 deselected`; after CLI layout flag coverage, `python -m pytest -q tests/test_transport_certify.py -k "transport_cli_certify_capture_evidence_command_writes_pipeline_report"` => `1 passed, 64 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or certify_capture_evidence_pipeline"` => `2 passed, 32 deselected`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `135 passed, 1 warning`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+  - Remaining product scope:
+    - attach actual physical print-scan images and run the now replay-gated `certify-capture-evidence --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - attach actual real camera raw/corrected images and run the replay-gated pipeline with `--require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then run the replay-gated pipeline with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 179):
+  - Added external capture-folder ingestion for the operator/lab handoff path:
+    - new CLI command: `soenc transport ingest-capture-corpus`
+    - compatibility API: `qrcode_helper.AirgapTransportLayer.ingest_capture_corpus(...)`
+    - report schema: `enc2sop-transport-capture-corpus-ingestion-report/v1`
+  - Behavior:
+    - maps one capture-root subdirectory per `capture_corpus.json` case label into the case `image_path`,
+    - optionally maps a separate raw-photo root into `raw_image_paths` for camera evidence,
+    - records per-case capture/raw image SHA256 and size records, classification, capture medium, metadata, unmatched label entries, and fail-closed missing-capture/raw-photo reasons,
+    - updates `capture_corpus.json` and `capture_kit_manifest.json` summaries unless disabled.
+  - Certification boundary:
+    - this removes JSON hand-editing for externally returned lab/real captures.
+    - it is ingestion and hash-binding evidence only; it does not run recovery and does not certify physical print-scan, real camera perspective correction, or OCR-only backend claims.
+  - Local implementation evidence:
+    - focused tests generated temporary ingestion reports under `.tmp_test_runs/*/ingest/transport_capture_corpus_ingestion_report.json`.
+    - fixture images were intentionally modified copies of generated pages; this proves ingestion plumbing only, not real scanner/camera readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "ingest_capture_corpus"` => `3 passed, 65 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or ingest_capture_corpus"` => `2 passed, 33 deselected`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - ingest or attach actual physical print-scan images and run the replay-gated `certify-capture-evidence --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - ingest or attach actual real camera raw/corrected images and run the replay-gated pipeline with `--require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then run the replay-gated pipeline with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 180):
+  - Added optional external capture-folder ingestion directly inside the replay-gated capture evidence pipeline:
+    - `soenc transport certify-capture-evidence --capture-root <returned-captures>` runs `ingest-capture-corpus` before attachment.
+    - optional camera raw-photo ingestion uses `--raw-capture-root <returned-raw-photos>`.
+    - ingestion metadata can be supplied with `--capture-medium` and repeated `--capture-metadata KEY=VALUE`.
+    - `--allow-unmatched-labels` controls extra capture-root entries; default remains fail-closed.
+    - optional output control: `--ingestion-report-file`.
+  - Behavior:
+    - pipeline reports still use schema `enc2sop-transport-capture-certification-pipeline/v1`;
+    - when ingestion is used, the step list starts with `ingest-capture-corpus`;
+    - summary records `capture_ingested`;
+    - artifacts record `capture_ingestion_report_file`;
+    - ingestion failures stop before attachment/certification/archive/status, with skipped downstream steps pointing to the first failed step.
+  - Certification boundary:
+    - this removes the last required separate command for externally returned lab/real folder trees.
+    - it is still orchestration and hash-binding only; real physical print-scan, real camera, and OCR-only claims require measured recovery, verified archive replay, and `certification-status --require-certified-claim ...`.
+  - Verification:
+    - focused pipeline tests cover success and fail-closed missing-capture ingestion paths.
+    - CLI and `qrcode_helper` facade tests cover new parser flags and delegation.
+  - Remaining product scope:
+    - run the one-command pipeline against actual physical print-scan captures with `--capture-root` and `--require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run it against a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 181):
+  - Added a non-default operator capture provenance gate for lab/real certification evidence:
+    - CLI flags: `--require-capture-provenance` on `soenc transport certify`, `validate-capture-corpus`, and `certify-capture-evidence`.
+    - compatibility API parameters on `AirgapTransportLayer.certify_reliability(...)`, `validate_capture_corpus(...)`, and `certify_capture_evidence_pipeline(...)`.
+  - Behavior:
+    - per-case reports now include `capture_corpus.capture_provenance_evidence`.
+    - the gate fails closed with `capture_provenance_missing` unless the case declares a capture medium and records session, operator, capture timestamp, and capture-device metadata such as `capture_session_id`, `operator`, `captured_at_utc`, and scanner/camera/printer identity.
+    - validation reports, certification thresholds, summaries, and `certification_claims` expose the provenance gate state.
+  - Certification boundary:
+    - provenance binds measured captures to operator/session/device metadata only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer unless the measured recovery report, archive replay, and certification-status claim gate also pass.
+  - Verification:
+    - focused unit/CLI tests cover passing print-scan and real-camera provenance, fail-closed missing provenance, CLI flag wiring, and pipeline propagation.
+  - Remaining product scope:
+    - run the one-command pipeline against actual physical print-scan captures with `--require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
 
 ### CARD `ENC-P0-013`
 
