@@ -42,6 +42,43 @@ def save_missing_chunks(path: str, records: List[Dict[str, int]]) -> str:
     return str(out)
 
 
+def _csv_escape(value: object) -> str:
+    text = str(value if value is not None else "")
+    if any(ch in text for ch in [",", '"', "\n", "\r"]):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def save_corrections_template(path: str, records: List[Dict[str, object]]) -> str:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "page",
+        "line",
+        "raw_text",
+        "normalized_text",
+        "candidates",
+        "status",
+        "expected_crc",
+        "actual_crc",
+        "corrected_text",
+    ]
+    lines = [",".join(columns)]
+    for item in records:
+        candidates = item.get("candidates", [])
+        if isinstance(candidates, list):
+            candidates_value = "|".join(str(candidate) for candidate in candidates)
+        else:
+            candidates_value = str(candidates or "")
+        row = []
+        for column in columns:
+            value = candidates_value if column == "candidates" else item.get(column, "")
+            row.append(_csv_escape(value))
+        lines.append(",".join(row))
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(out)
+
+
 def parse_metadata_items(items: Optional[List[str]]) -> Dict[str, object]:
     metadata: Dict[str, object] = {}
     for raw in items or []:
@@ -124,6 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="append per-line CRC suffix in transport lines",
     )
     p_export.add_argument(
+        "--payload-alphabet-profile",
+        choices=list(protocol.SUPPORTED_PAYLOAD_ALPHABET_PROFILES),
+        default="safe-base32-v1",
+        help="payload alphabet profile; ocr-safe-human-correctable-v1 avoids ambiguous glyphs",
+    )
+    p_export.add_argument(
         "--no-sidecar",
         action="store_true",
         help="disable rendering right-side sidecar blocks in PNG pages",
@@ -168,6 +211,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="add one parity chunk per N data chunks (0 disables, recommended 8)",
     )
+    p_estimate.add_argument(
+        "--payload-alphabet-profile",
+        choices=list(protocol.SUPPORTED_PAYLOAD_ALPHABET_PROFILES),
+        default="safe-base32-v1",
+        help="payload alphabet profile for encoded size and parity planning",
+    )
 
     p_recover = sub.add_parser("recover", help="recover artifact from OCR text")
     p_recover.add_argument(
@@ -179,6 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_recover.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
     p_recover.add_argument("-o", "--output-file", required=True, help="recovered artifact path")
     p_recover.add_argument("--strict-payload-chars", action="store_true")
+    p_recover.add_argument(
+        "--apply-corrections-file",
+        dest="corrections_file",
+        default=None,
+        help="filled OCR-safe corrections_template.csv to replay before final sha verification",
+    )
 
     p_verify = sub.add_parser("verify", help="verify OCR text against manifest")
     p_verify.add_argument(
@@ -189,6 +244,250 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument("-t", "--ocr-input", required=True, help="ocr text file/dir")
     p_verify.add_argument("--strict-payload-chars", action="store_true")
+    p_verify.add_argument(
+        "--apply-corrections-file",
+        dest="corrections_file",
+        default=None,
+        help="filled OCR-safe corrections_template.csv to replay before final sha verification",
+    )
+
+    p_replay_corrections = sub.add_parser(
+        "replay-corrections",
+        help="replay a filled OCR-safe corrections_template.csv and write a SHA-verified report",
+    )
+    p_replay_corrections.add_argument(
+        "-m",
+        "--manifest",
+        required=True,
+        help="manifest json path from an ocr-safe-human-correctable-v1 export",
+    )
+    p_replay_corrections.add_argument(
+        "-t",
+        "--ocr-input",
+        required=True,
+        help="OCR text file/dir to replay corrections against",
+    )
+    p_replay_corrections.add_argument(
+        "--apply-corrections-file",
+        dest="corrections_file",
+        required=True,
+        help="filled OCR-safe corrections_template.csv",
+    )
+    p_replay_corrections.add_argument(
+        "-o",
+        "--output-file",
+        default=None,
+        help="optional recovered artifact output path; written only after final SHA verification",
+    )
+    p_replay_corrections.add_argument(
+        "--report-file",
+        default=None,
+        help="optional correction replay report JSON path",
+    )
+    p_replay_corrections.add_argument(
+        "--emit-corrections-template",
+        default=None,
+        help=(
+            "optional path for refreshed unresolved correction rows; defaults beside "
+            "--report-file on failed replay"
+        ),
+    )
+    p_replay_corrections.add_argument("--strict-payload-chars", action="store_true")
+
+    p_verify_correction_replay = sub.add_parser(
+        "verify-correction-replay",
+        help="verify a saved OCR-safe correction replay report and referenced artifacts",
+    )
+    p_verify_correction_replay.add_argument(
+        "--report-file",
+        required=True,
+        help="transport_ocr_correction_replay_report.json to verify",
+    )
+    p_verify_correction_replay.add_argument(
+        "--output-file",
+        default=None,
+        help="optional correction replay verification report JSON path",
+    )
+    p_verify_correction_replay.add_argument(
+        "--allow-failed-report",
+        action="store_true",
+        help="do not require the source correction replay report to have success=true",
+    )
+
+    p_certify_ocr_confusion = sub.add_parser(
+        "certify-ocr-confusion",
+        help=(
+            "write replayable synthetic OCR confusion evidence for "
+            "ocr-safe-human-correctable-v1"
+        ),
+    )
+    p_certify_ocr_confusion.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="output directory for synthetic OCR confusion evidence",
+    )
+    p_certify_ocr_confusion.add_argument(
+        "--report-file",
+        default=None,
+        help=(
+            "optional report path; defaults to "
+            "<output-dir>/synthetic_ocr_confusion_report.json"
+        ),
+    )
+    p_certify_ocr_confusion.add_argument(
+        "--payload-size",
+        type=int,
+        default=512,
+        help="deterministic synthetic payload size in bytes",
+    )
+    p_certify_ocr_confusion.add_argument("--chunk-chars", type=int, default=18)
+    p_certify_ocr_confusion.add_argument("--lines-per-page", type=int, default=5)
+    p_certify_ocr_confusion.add_argument(
+        "--payload-alphabet-profile",
+        choices=list(protocol.SUPPORTED_PAYLOAD_ALPHABET_PROFILES),
+        default=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+        help=(
+            "must remain ocr-safe-human-correctable-v1 for the synthetic "
+            "confusion suite"
+        ),
+    )
+    p_certify_ocr_confusion.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        help="disable rendering sidecar blocks in the synthetic export",
+    )
+    p_certify_ocr_confusion.add_argument(
+        "--render-sidecar",
+        dest="no_sidecar",
+        action="store_false",
+        help="render sidecar blocks in the synthetic export for comparison only",
+    )
+    p_certify_ocr_confusion.set_defaults(no_sidecar=True)
+    p_certify_ocr_confusion.add_argument("--seed", type=int, default=20260530)
+    p_certify_ocr_confusion.add_argument(
+        "--redundancy-copies",
+        type=int,
+        default=2,
+        help="repeat each chunk N copies in the synthetic export",
+    )
+    p_certify_ocr_confusion.add_argument(
+        "--parity-group-size",
+        type=int,
+        default=4,
+        help="add one parity chunk per N data chunks in the synthetic export",
+    )
+    p_certify_ocr_confusion.add_argument(
+        "--filename-prefix",
+        default="ocr_confusion_page",
+        help="output page filename prefix for the generated synthetic package",
+    )
+
+    p_verify_ocr_confusion = sub.add_parser(
+        "verify-ocr-confusion",
+        help="verify a saved synthetic OCR-safe confusion report and referenced artifacts",
+    )
+    p_verify_ocr_confusion.add_argument(
+        "--report-file",
+        required=True,
+        help="synthetic_ocr_confusion_report.json to verify",
+    )
+    p_verify_ocr_confusion.add_argument(
+        "--output-file",
+        default=None,
+        help="optional verification report JSON path",
+    )
+    p_verify_ocr_confusion.add_argument(
+        "--allow-failed-report",
+        action="store_true",
+        help="do not require the source synthetic confusion report to have success=true",
+    )
+
+    p_archive_ocr_safe = sub.add_parser(
+        "archive-ocr-safe-evidence",
+        help="package OCR-safe synthetic/correction evidence into a replayable archive",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--archive-file",
+        required=True,
+        help="output OCR-safe evidence ZIP archive path",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--manifest-file",
+        default=None,
+        help="optional external archive manifest JSON path",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--confusion-report-file",
+        default=None,
+        help="synthetic_ocr_confusion_report.json to include",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--correction-replay-report-file",
+        default=None,
+        help="transport_ocr_correction_replay_report.json to include",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--require-confusion-report",
+        action="store_true",
+        help="fail unless a successful synthetic confusion report is included",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--require-correction-replay-report",
+        action="store_true",
+        help="fail unless a successful correction replay report is included",
+    )
+    p_archive_ocr_safe.add_argument(
+        "--require-source-report-verification",
+        action="store_true",
+        help=(
+            "fail unless included source reports verify replayably before archive "
+            "creation"
+        ),
+    )
+
+    p_verify_ocr_safe_archive = sub.add_parser(
+        "verify-ocr-safe-evidence-archive",
+        help="verify and replay an OCR-safe synthetic/correction evidence archive",
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--archive-file",
+        required=True,
+        help="OCR-safe evidence ZIP archive to verify",
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--manifest-file",
+        default=None,
+        help="optional external archive manifest JSON path",
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--output-file",
+        default=None,
+        help="optional archive verification report JSON path",
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--require-confusion-report",
+        action="store_true",
+        help="fail unless the archive contains a verified synthetic confusion report",
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--require-correction-replay-report",
+        action="store_true",
+        help="fail unless the archive contains a verified correction replay report",
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--require-source-report-verification",
+        action="store_true",
+        help=(
+            "fail unless the archive manifest records successful pre-archive "
+            "source report verification"
+        ),
+    )
+    p_verify_ocr_safe_archive.add_argument(
+        "--allow-failed-report",
+        action="store_true",
+        help="do not require included source reports to have success=true",
+    )
 
     p_analyze = sub.add_parser("analyze", help="analyze OCR text quality and missing chunks")
     p_analyze.add_argument(
@@ -205,6 +504,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--emit-missing-file",
         default=None,
         help="optional csv output with chunk_index,page,line,copy,priority for recapture",
+    )
+    p_analyze.add_argument(
+        "--emit-corrections-template",
+        default=None,
+        help="optional csv output for OCR-safe unresolved or multi-candidate correction rows",
+    )
+    p_analyze.add_argument(
+        "--apply-corrections-file",
+        dest="corrections_file",
+        default=None,
+        help="filled OCR-safe corrections_template.csv to replay during analysis",
     )
 
     p_ocr = sub.add_parser("ocr-extract", help="extract text from images with OCR backend")
@@ -282,6 +592,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional csv output with chunk_index,page,line,copy,priority for recapture",
     )
+    p_recover_images.add_argument(
+        "--emit-corrections-template",
+        default=None,
+        help="optional csv output for OCR-safe unresolved or multi-candidate correction rows",
+    )
+    p_recover_images.add_argument(
+        "--apply-corrections-file",
+        dest="corrections_file",
+        default=None,
+        help="filled OCR-safe corrections_template.csv to replay before final sha verification",
+    )
     p_recover_images.add_argument("--max-list", type=int, default=200, help="max list size in analyze")
 
     p_certify = sub.add_parser(
@@ -308,6 +629,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["digital-sidecar-v1", "reliable-airgap-v1", "ocr-only-backend-v1"],
         default=None,
         help="certification profile; reliable-airgap-v1 enforces production transport guardrails",
+    )
+    p_certify.add_argument(
+        "--payload-alphabet-profile",
+        choices=list(protocol.SUPPORTED_PAYLOAD_ALPHABET_PROFILES),
+        default="safe-base32-v1",
+        help="generation alphabet profile used for deterministic certification cases",
     )
     p_certify.add_argument(
         "--allow-unsafe-profile",
@@ -550,6 +877,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_prepare_capture.add_argument(
+        "--payload-alphabet-profile",
+        choices=list(protocol.SUPPORTED_PAYLOAD_ALPHABET_PROFILES),
+        default="safe-base32-v1",
+        help="generation alphabet profile for staged capture-kit pages",
+    )
+    p_prepare_capture.add_argument(
         "--ocr-only-backend",
         choices=["tesseract", "easyocr", "external"],
         default=None,
@@ -673,6 +1006,95 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-update-kit-manifest",
         action="store_true",
         help="do not refresh capture_kit_manifest.json summary fields",
+    )
+
+    p_package_capture_return = sub.add_parser(
+        "package-capture-return",
+        help=(
+            "assemble an operator/lab return ZIP with filled return manifest and "
+            "exact SHA256 capture-file inventory"
+        ),
+    )
+    p_package_capture_return.add_argument(
+        "--capture-corpus-file",
+        required=True,
+        help="prepared capture_corpus.json that defines expected case labels",
+    )
+    p_package_capture_return.add_argument(
+        "--capture-root",
+        required=True,
+        help="folder tree containing returned captures, one subdirectory per case label",
+    )
+    p_package_capture_return.add_argument(
+        "--raw-capture-root",
+        default=None,
+        help="optional folder tree containing raw camera photos by case label",
+    )
+    p_package_capture_return.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="directory for operator_return.zip, manifest, metadata, and report",
+    )
+    p_package_capture_return.add_argument(
+        "--capture-metadata-manifest-file",
+        default=None,
+        help=(
+            "optional filled enc2sop-transport-capture-metadata-manifest/v1 file "
+            "to include in the return package"
+        ),
+    )
+    p_package_capture_return.add_argument(
+        "--capture-metadata",
+        action="append",
+        default=None,
+        help="metadata KEY=VALUE to write into a generated metadata manifest; repeatable",
+    )
+    p_package_capture_return.add_argument(
+        "--kit-manifest-file",
+        default=None,
+        help="optional capture_kit_manifest.json to bind in operator_return_manifest.json",
+    )
+    p_package_capture_return.add_argument(
+        "--package-file",
+        default=None,
+        help="optional package ZIP path/name; defaults to operator_return.zip",
+    )
+    p_package_capture_return.add_argument(
+        "--return-manifest-file",
+        default=None,
+        help="optional output path/name for operator_return_manifest.json",
+    )
+    p_package_capture_return.add_argument(
+        "--report-file",
+        default=None,
+        help="optional output path/name for transport_capture_return_package_report.json",
+    )
+    p_package_capture_return.add_argument("--return-session-id", default=None)
+    p_package_capture_return.add_argument("--operator", default=None)
+    p_package_capture_return.add_argument("--returned-at-utc", default=None)
+    p_package_capture_return.add_argument(
+        "--allow-missing-captures",
+        action="store_true",
+        help="allow package assembly when some cases have no returned capture image",
+    )
+    p_package_capture_return.add_argument(
+        "--require-raw-captures",
+        action="store_true",
+        help="fail closed unless every case has raw camera images",
+    )
+    p_package_capture_return.add_argument(
+        "--require-capture-provenance",
+        action="store_true",
+        help=(
+            "fail closed unless the packaged metadata manifest has session, operator, "
+            "timestamp, and device provenance for every lab/real case"
+        ),
+    )
+    p_package_capture_return.add_argument(
+        "--allow-unmatched-labels",
+        action="store_true",
+        help="do not fail on extra capture-root/raw-capture-root entries",
     )
 
     p_ingest_capture = sub.add_parser(
@@ -927,6 +1349,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="capture_corpus.json containing attached or attachable operator captures",
     )
     p_certify_capture_evidence.add_argument(
+        "--capture-return-package-file",
+        default=None,
+        help=(
+            "optional ZIP returned by an operator/lab; safely extracts captures/, "
+            "optional raw_captures/, and optional metadata manifest before ingestion"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--capture-return-package-report-file",
+        default=None,
+        help=(
+            "optional enc2sop-transport-capture-return-package/v1 report from "
+            "package-capture-return; extraction fails closed unless it matches the ZIP"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-capture-return-manifest",
+        action="store_true",
+        help=(
+            "fail before ingestion unless the return ZIP contains a validated "
+            "enc2sop-transport-capture-return-manifest/v1"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-capture-return-file-inventory",
+        action="store_true",
+        help=(
+            "fail before ingestion unless the return manifest declares and validates "
+            "exact capture/raw image SHA256 and byte-size inventory"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
+        "--require-capture-return-package-report",
+        action="store_true",
+        help=(
+            "fail before ingestion unless --capture-return-package-report-file is "
+            "provided and matches the supplied return ZIP"
+        ),
+    )
+    p_certify_capture_evidence.add_argument(
         "--capture-root",
         default=None,
         help=(
@@ -1148,6 +1610,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional capture_kit_manifest.json path to refresh during attachment",
     )
+    p_certify_capture_evidence.add_argument("--capture-return-extraction-report-file", default=None)
     p_certify_capture_evidence.add_argument("--ingestion-report-file", default=None)
     p_certify_capture_evidence.add_argument("--validation-report-file", default=None)
     p_certify_capture_evidence.add_argument("--certification-report-file", default=None)
@@ -1435,6 +1898,11 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
         line_index_mode=getattr(args, "line_index_mode", "full"),
         render_sidecar=(not bool(getattr(args, "no_sidecar", False))),
         line_crc_mode=getattr(args, "line_crc_mode", "on"),
+        payload_alphabet_profile=getattr(
+            args,
+            "payload_alphabet_profile",
+            "safe-base32-v1",
+        ),
     )
 
     try:
@@ -1522,6 +1990,29 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
             print_json(result)
             return 0 if result.get("success") else 2
 
+        if args.cmd == "package-capture-return":
+            result = transport.package_capture_return(
+                capture_corpus_file=args.capture_corpus_file,
+                output_dir=args.output_dir,
+                capture_root=args.capture_root,
+                raw_capture_root=args.raw_capture_root,
+                capture_metadata_manifest_file=args.capture_metadata_manifest_file,
+                capture_metadata=parse_metadata_items(args.capture_metadata),
+                kit_manifest_file=args.kit_manifest_file,
+                package_file=args.package_file,
+                return_manifest_file=args.return_manifest_file,
+                report_file=args.report_file,
+                return_session_id=args.return_session_id,
+                operator=args.operator,
+                returned_at_utc=args.returned_at_utc,
+                require_captures=(not args.allow_missing_captures),
+                require_raw_captures=args.require_raw_captures,
+                require_capture_provenance=args.require_capture_provenance,
+                require_all_case_labels=(not args.allow_unmatched_labels),
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
         if args.cmd == "ingest-capture-corpus":
             result = transport.ingest_capture_corpus(
                 capture_corpus_file=args.capture_corpus_file,
@@ -1592,6 +2083,15 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
             result = transport.certify_capture_evidence_pipeline(
                 capture_corpus_file=args.capture_corpus_file,
                 output_dir=args.output_dir,
+                capture_return_package_file=args.capture_return_package_file,
+                capture_return_package_report_file=args.capture_return_package_report_file,
+                require_capture_return_manifest=args.require_capture_return_manifest,
+                require_capture_return_file_inventory=(
+                    args.require_capture_return_file_inventory
+                ),
+                require_capture_return_package_report=(
+                    args.require_capture_return_package_report
+                ),
                 capture_root=args.capture_root,
                 raw_capture_root=args.raw_capture_root,
                 capture_medium=args.capture_medium,
@@ -1633,6 +2133,9 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
                 strict_payload_chars=args.strict_payload_chars,
                 max_list=args.max_list,
                 kit_manifest_file=args.kit_manifest_file,
+                capture_return_extraction_report_file=(
+                    args.capture_return_extraction_report_file
+                ),
                 ingestion_report_file=args.ingestion_report_file,
                 attachment_report_file=args.capture_attachment_report_file,
                 validation_report_file=args.validation_report_file,
@@ -1747,6 +2250,7 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
                 ocr_input_path=args.ocr_input,
                 output_file=args.output_file,
                 strict_payload_chars=args.strict_payload_chars,
+                corrections_file=args.corrections_file,
             )
             print_json(result)
             return 0
@@ -1756,6 +2260,77 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
                 manifest_path=args.manifest,
                 ocr_input_path=args.ocr_input,
                 strict_payload_chars=args.strict_payload_chars,
+                corrections_file=args.corrections_file,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "replay-corrections":
+            result = transport.replay_ocr_corrections(
+                manifest_path=args.manifest,
+                ocr_input_path=args.ocr_input,
+                corrections_file=args.corrections_file,
+                output_file=args.output_file,
+                report_file=args.report_file,
+                strict_payload_chars=args.strict_payload_chars,
+                emit_corrections_file=args.emit_corrections_template,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "verify-correction-replay":
+            result = transport.verify_ocr_correction_replay_report(
+                report_file=args.report_file,
+                output_file=args.output_file,
+                require_success=(not args.allow_failed_report),
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "certify-ocr-confusion":
+            result = transport.certify_ocr_safe_confusions(
+                output_dir=args.output_dir,
+                report_file=args.report_file,
+                payload_size=args.payload_size,
+                seed=args.seed,
+                redundancy_copies=args.redundancy_copies,
+                parity_group_size=args.parity_group_size,
+                filename_prefix=args.filename_prefix,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "verify-ocr-confusion":
+            result = transport.verify_ocr_safe_confusion_report(
+                report_file=args.report_file,
+                output_file=args.output_file,
+                require_success=(not args.allow_failed_report),
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "archive-ocr-safe-evidence":
+            result = transport.archive_ocr_safe_evidence(
+                archive_file=args.archive_file,
+                manifest_file=args.manifest_file,
+                confusion_report_file=args.confusion_report_file,
+                correction_replay_report_file=args.correction_replay_report_file,
+                require_confusion_report=args.require_confusion_report,
+                require_correction_replay_report=args.require_correction_replay_report,
+                require_source_report_verification=args.require_source_report_verification,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 2
+
+        if args.cmd == "verify-ocr-safe-evidence-archive":
+            result = transport.verify_ocr_safe_evidence_archive(
+                archive_file=args.archive_file,
+                manifest_file=args.manifest_file,
+                output_file=args.output_file,
+                require_confusion_report=args.require_confusion_report,
+                require_correction_replay_report=args.require_correction_replay_report,
+                require_source_report_verification=args.require_source_report_verification,
+                require_success=(not args.allow_failed_report),
             )
             print_json(result)
             return 0 if result.get("success") else 2
@@ -1768,6 +2343,8 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
                 max_list=args.max_list,
                 save_report_path=args.save_report,
                 emit_missing_file=args.emit_missing_file,
+                emit_corrections_file=args.emit_corrections_template,
+                corrections_file=args.corrections_file,
             )
             print_json(result)
             return 0 if result.get("success") else 2
@@ -1800,6 +2377,8 @@ def run_cli(argv: Optional[List[str]], transport_cls) -> int:
                 ocr_text_output=args.ocr_text_output,
                 save_analyze_report=args.save_analyze_report,
                 emit_missing_file=args.emit_missing_file,
+                emit_corrections_file=args.emit_corrections_template,
+                corrections_file=args.corrections_file,
                 max_list=args.max_list,
             )
             print_json(result)
@@ -1818,6 +2397,7 @@ __all__ = [
     "print_json",
     "save_json",
     "save_missing_chunks",
+    "save_corrections_template",
     "parse_metadata_items",
     "build_parser",
     "run_cli",

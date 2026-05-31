@@ -1374,8 +1374,19 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(kit["summary"]["operator_captures_present"], 0)
         corpus_file = Path(str(kit["corpus_file"]))
         instructions_file = Path(str(kit["instructions_file"]))
+        return_template_file = Path(str(kit["capture_return_manifest_template_file"]))
         self.assertTrue(corpus_file.exists())
         self.assertTrue(instructions_file.exists())
+        self.assertTrue(return_template_file.exists())
+        self.assertTrue(kit["summary"]["capture_return_manifest_template_ready"])
+        self.assertEqual(
+            kit["parameters"]["capture_return_manifest_template_schema"],
+            certify.CAPTURE_RETURN_MANIFEST_SCHEMA,
+        )
+        return_template = json.loads(return_template_file.read_text(encoding="utf-8"))
+        self.assertEqual(return_template["schema"], certify.CAPTURE_RETURN_MANIFEST_SCHEMA)
+        self.assertEqual(return_template["capture_corpus_sha256"], certify._sha256_file(corpus_file))
+        self.assertEqual(return_template["cases"][0]["label"], kit["cases"][0]["label"])
 
         corpus = json.loads(corpus_file.read_text(encoding="utf-8"))
         self.assertEqual(corpus["schema"], certify.CAPTURE_CORPUS_SCHEMA)
@@ -3478,6 +3489,1052 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue(status["summary"]["physical_print_scan_ready"])
 
     @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_uses_metadata_manifest_for_provenance(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_metadata_manifest")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+            capture_metadata={"printer": "manifest-pipeline-printer"},
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        source_image = corpus_path.parent / case["reference_image_paths"][0]
+        external_root = root / "returned_scans"
+        capture_dir = external_root / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "scan-from-manifest.png"
+        shutil.copy2(str(source_image), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# pipeline metadata manifest marker\n")
+        metadata_manifest = root / "operator_capture_metadata.json"
+        metadata_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "pipeline-manifest-session",
+                        "operator": "pipeline-manifest-operator",
+                        "captured_at_utc": "2026-05-28T15:15:00Z",
+                        "scanner": "pipeline-manifest-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_root=str(external_root),
+            capture_medium="print-scan",
+            capture_metadata_manifest_file=str(metadata_manifest),
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            require_physical_print_scan=True,
+            require_capture_provenance=True,
+            capture_required_classification="lab",
+            required_certified_claims=["physical-print-scan"],
+            max_list=20,
+        )
+
+        self.assertTrue(pipeline["success"])
+        self.assertEqual(
+            pipeline["parameters"]["capture_metadata_manifest_file"],
+            str(metadata_manifest),
+        )
+        ingestion_report = json.loads(
+            Path(str(pipeline["artifacts"]["capture_ingestion_report_file"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            ingestion_report["summary"]["capture_metadata_manifest_matched_case_count"],
+            1,
+        )
+        updated_corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        metadata = updated_corpus["cases"][0]["capture_metadata"]
+        self.assertEqual(metadata["capture_session_id"], "pipeline-manifest-session")
+        self.assertEqual(metadata["operator"], "pipeline-manifest-operator")
+        self.assertEqual(metadata["scanner"], "pipeline-manifest-flatbed")
+        self.assertTrue(pipeline["summary"]["status_claim_gate_passed"])
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_ingests_return_package_zip(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_return_package")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+            capture_metadata={"printer": "return-package-printer"},
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        source_image = corpus_path.parent / case["reference_image_paths"][0]
+        package_source = root / "package_source"
+        capture_dir = package_source / "captures" / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "return-package-scan.png"
+        shutil.copy2(str(source_image), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# return package scan marker\n")
+        metadata_manifest = package_source / "operator_capture_metadata_manifest.json"
+        metadata_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "return-package-session",
+                        "operator": "return-package-operator",
+                        "captured_at_utc": "2026-05-28T16:10:00Z",
+                        "scanner": "return-package-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_manifest = package_source / "operator_return_manifest.json"
+        return_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_RETURN_MANIFEST_SCHEMA,
+                    "capture_corpus_sha256": certify._sha256_file(corpus_path),
+                    "capture_kit_manifest_sha256": certify._sha256_file(
+                        root / "kit" / "capture_kit_manifest.json"
+                    ),
+                    "return_session_id": "return-package-session",
+                    "operator": "return-package-operator",
+                    "returned_at_utc": "2026-05-28T16:12:00Z",
+                    "capture_file_inventory": {"required": True},
+                    "cases": [
+                        {
+                            "label": case["label"],
+                            "capture_files": [
+                                {
+                                    "path": "captures/{}/{}".format(
+                                        case["label"],
+                                        scan_file.name,
+                                    ),
+                                    "sha256": certify._sha256_file(scan_file),
+                                    "size_bytes": scan_file.stat().st_size,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_package = root / "operator_return.zip"
+        with zipfile.ZipFile(str(return_package), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(package_source.rglob("*")):
+                if path.is_file():
+                    archive.write(str(path), str(path.relative_to(package_source)).replace("\\", "/"))
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(return_package),
+            capture_medium="print-scan",
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            require_physical_print_scan=True,
+            require_capture_provenance=True,
+            capture_required_classification="lab",
+            required_certified_claims=["physical-print-scan"],
+            max_list=20,
+        )
+
+        self.assertTrue(pipeline["success"])
+        self.assertTrue(pipeline["summary"]["capture_return_package_extracted"])
+        self.assertTrue(pipeline["summary"]["capture_return_manifest_validated"])
+        self.assertTrue(pipeline["summary"]["capture_ingested"])
+        self.assertEqual(pipeline["steps"][0]["name"], "extract-capture-return-package")
+        extraction_report = json.loads(
+            Path(
+                str(pipeline["artifacts"]["capture_return_package_extraction_report_file"])
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            extraction_report["schema"],
+            certify.CAPTURE_RETURN_PACKAGE_EXTRACTION_SCHEMA,
+        )
+        self.assertTrue(extraction_report["summary"]["capture_root_found"])
+        self.assertTrue(extraction_report["summary"]["capture_metadata_manifest_found"])
+        self.assertTrue(extraction_report["summary"]["capture_return_manifest_found"])
+        self.assertTrue(extraction_report["summary"]["capture_return_manifest_validated"])
+        self.assertTrue(
+            extraction_report["summary"][
+                "capture_return_manifest_file_inventory_validated"
+            ]
+        )
+        self.assertEqual(
+            extraction_report["summary"][
+                "capture_return_manifest_capture_file_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            extraction_report["capture_return_manifest"]["capture_corpus_sha256"],
+            extraction_report["expected_capture_corpus_sha256"],
+        )
+        self.assertEqual(
+            extraction_report["capture_return_manifest"]["file_inventory"]["files"][0][
+                "sha256"
+            ],
+            certify._sha256_file(scan_file),
+        )
+        self.assertTrue(Path(str(pipeline["parameters"]["effective_capture_root"])).exists())
+        updated_corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        metadata = updated_corpus["cases"][0]["capture_metadata"]
+        self.assertEqual(metadata["capture_session_id"], "return-package-session")
+        self.assertEqual(metadata["scanner"], "return-package-flatbed")
+        self.assertTrue(pipeline["summary"]["status_claim_gate_passed"])
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_package_capture_return_creates_inventory_zip_for_pipeline(self) -> None:
+        root = self.make_case_root("package_capture_return_pipeline")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+            capture_metadata={"printer": "package-return-printer"},
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        capture_root = root / "returned_scans"
+        capture_dir = capture_root / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "operator-scan.png"
+        shutil.copy2(str(root / "kit" / case["reference_image_paths"][0]), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# package-capture-return distinct marker\n")
+        metadata_manifest = root / "filled_capture_metadata.json"
+        metadata_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "package-return-session",
+                        "operator": "package-return-operator",
+                        "captured_at_utc": "2026-05-28T19:00:00Z",
+                        "scanner": "package-return-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        package_report = transport.package_capture_return(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "return_package"),
+            capture_root=str(capture_root),
+            capture_metadata_manifest_file=str(metadata_manifest),
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            return_session_id="package-return-session",
+            operator="package-return-operator",
+            returned_at_utc="2026-05-28T19:05:00Z",
+            require_capture_provenance=True,
+        )
+
+        self.assertTrue(package_report["success"])
+        self.assertEqual(package_report["schema"], certify.CAPTURE_RETURN_PACKAGE_SCHEMA)
+        self.assertEqual(package_report["summary"]["capture_file_count"], 1)
+        self.assertTrue(package_report["summary"]["capture_provenance_required"])
+        self.assertTrue(package_report["summary"]["capture_provenance_passed"])
+        self.assertEqual(
+            package_report["summary"]["capture_provenance_evidence_count"],
+            1,
+        )
+        self.assertTrue(Path(str(package_report["package_file"])).exists())
+        return_manifest = json.loads(
+            Path(str(package_report["capture_return_manifest_file"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(return_manifest["schema"], certify.CAPTURE_RETURN_MANIFEST_SCHEMA)
+        self.assertEqual(
+            return_manifest["cases"][0]["capture_files"][0]["sha256"],
+            certify._sha256_file(scan_file),
+        )
+        with zipfile.ZipFile(str(package_report["package_file"]), "r") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                [
+                    "captures/{}/operator-scan.png".format(case["label"]),
+                    "operator_capture_metadata_manifest.json",
+                    "operator_return_manifest.json",
+                ],
+            )
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(package_report["package_file"]),
+            capture_return_package_report_file=str(package_report["report_file"]),
+            require_capture_return_manifest=True,
+            require_capture_return_file_inventory=True,
+            require_capture_return_package_report=True,
+            capture_medium="print-scan",
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            require_physical_print_scan=True,
+            require_capture_provenance=True,
+            capture_required_classification="lab",
+            required_certified_claims=["physical-print-scan"],
+            max_list=20,
+        )
+
+        self.assertTrue(pipeline["success"])
+        self.assertTrue(pipeline["summary"]["capture_return_package_extracted"])
+        self.assertTrue(pipeline["summary"]["capture_return_package_report_validated"])
+        self.assertTrue(pipeline["summary"]["capture_return_manifest_validated"])
+        self.assertTrue(pipeline["summary"]["capture_return_manifest_required"])
+        self.assertTrue(
+            pipeline["summary"][
+                "capture_return_manifest_file_inventory_gate_required"
+            ]
+        )
+        self.assertTrue(
+            pipeline["summary"]["capture_return_manifest_file_inventory_validated"]
+        )
+        self.assertTrue(pipeline["summary"]["capture_return_package_report_required"])
+        extraction_report = json.loads(
+            Path(
+                str(pipeline["artifacts"]["capture_return_package_extraction_report_file"])
+            ).read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            extraction_report["summary"][
+                "capture_return_manifest_file_inventory_validated"
+            ]
+        )
+        self.assertTrue(
+            extraction_report["summary"]["capture_return_package_report_validated"]
+        )
+        self.assertEqual(
+            extraction_report["capture_return_package_report"]["package_sha256"],
+            certify._sha256_file(Path(str(package_report["package_file"]))),
+        )
+        self.assertEqual(
+            extraction_report["capture_return_manifest"]["file_inventory"]["files"][0][
+                "package_path"
+            ],
+            "captures/{}/operator-scan.png".format(case["label"]),
+        )
+        updated_corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            updated_corpus["cases"][0]["capture_metadata"]["capture_session_id"],
+            "package-return-session",
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_requires_return_package_report(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_return_report_required")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260529,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        capture_root = root / "returned_scans"
+        capture_dir = capture_root / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "operator-scan.png"
+        shutil.copy2(str(root / "kit" / case["reference_image_paths"][0]), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# required package report marker\n")
+
+        package_report = transport.package_capture_return(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "return_package"),
+            capture_root=str(capture_root),
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            capture_metadata={
+                "capture_session_id": "return-report-required-session",
+                "operator": "return-report-required-operator",
+                "captured_at_utc": "2026-05-29T08:00:00Z",
+                "scanner": "return-report-required-flatbed",
+                "dpi": "300",
+            },
+        )
+        self.assertTrue(package_report["success"])
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(package_report["package_file"]),
+            require_capture_return_package_report=True,
+            capture_medium="print-scan",
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            require_physical_print_scan=True,
+            require_capture_provenance=True,
+            capture_required_classification="lab",
+            required_certified_claims=["physical-print-scan"],
+            max_list=20,
+        )
+
+        self.assertFalse(pipeline["success"])
+        self.assertEqual(
+            pipeline["summary"]["failed_steps"],
+            ["extract-capture-return-package"],
+        )
+        self.assertTrue(pipeline["summary"]["capture_return_package_report_required"])
+        self.assertFalse(pipeline["summary"]["capture_return_package_report_validated"])
+        extraction_report = json.loads(
+            (
+                root
+                / "pipeline"
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertTrue(extraction_report["summary"]["capture_return_package_report_required"])
+        self.assertTrue(
+            any(
+                failure["code"] == "capture_return_package_report_required"
+                for failure in extraction_report["failures"]
+            )
+        )
+        self.assertFalse(
+            (root / "pipeline" / "ingest" / "transport_capture_corpus_ingestion_report.json").exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_requires_return_manifest_and_inventory(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_return_manifest_required")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260529,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        package_source = root / "operator_return_source"
+        capture_dir = package_source / "captures" / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "scan.png"
+        shutil.copy2(str(root / "kit" / case["reference_image_paths"][0]), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# no return manifest marker\n")
+        (package_source / "operator_capture_metadata_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "return-manifest-required-session",
+                        "operator": "return-manifest-required-operator",
+                        "captured_at_utc": "2026-05-29T08:30:00Z",
+                        "scanner": "return-manifest-required-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_package = root / "operator_return.zip"
+        with zipfile.ZipFile(str(return_package), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(package_source.rglob("*")):
+                if path.is_file():
+                    archive.write(str(path), str(path.relative_to(package_source)).replace("\\", "/"))
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(return_package),
+            require_capture_return_manifest=True,
+            require_capture_return_file_inventory=True,
+            capture_medium="print-scan",
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            require_physical_print_scan=True,
+            require_capture_provenance=True,
+            capture_required_classification="lab",
+            required_certified_claims=["physical-print-scan"],
+            max_list=20,
+        )
+
+        self.assertFalse(pipeline["success"])
+        self.assertEqual(
+            pipeline["summary"]["failed_steps"],
+            ["extract-capture-return-package"],
+        )
+        self.assertTrue(pipeline["summary"]["capture_return_manifest_required"])
+        self.assertFalse(pipeline["summary"]["capture_return_manifest_validated"])
+        self.assertTrue(
+            pipeline["summary"][
+                "capture_return_manifest_file_inventory_gate_required"
+            ]
+        )
+        self.assertFalse(
+            pipeline["summary"]["capture_return_manifest_file_inventory_validated"]
+        )
+        extraction_report = json.loads(
+            (
+                root
+                / "pipeline"
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        failure_codes = {failure["code"] for failure in extraction_report["failures"]}
+        self.assertIn("capture_return_manifest_required", failure_codes)
+        self.assertIn("capture_return_manifest_file_inventory_required", failure_codes)
+        self.assertFalse(
+            (root / "pipeline" / "ingest" / "transport_capture_corpus_ingestion_report.json").exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_package_capture_return_requires_capture_provenance(self) -> None:
+        root = self.make_case_root("package_capture_return_provenance_missing")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260529,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        capture_root = root / "returned_scans"
+        capture_dir = capture_root / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "operator-scan.png"
+        shutil.copy2(str(root / "kit" / case["reference_image_paths"][0]), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# package provenance missing marker\n")
+
+        report = transport.package_capture_return(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "return_package"),
+            capture_root=str(capture_root),
+            capture_metadata={"scanner": "package-return-flatbed"},
+            require_capture_provenance=True,
+        )
+
+        self.assertFalse(report["success"])
+        self.assertIsNone(report["package_file"])
+        self.assertFalse((root / "return_package" / "operator_return.zip").exists())
+        self.assertTrue(report["summary"]["capture_provenance_required"])
+        self.assertFalse(report["summary"]["capture_provenance_passed"])
+        self.assertEqual(report["summary"]["capture_provenance_evidence_count"], 0)
+        self.assertTrue(
+            any(
+                failure["code"] == "capture_provenance_missing"
+                for failure in report["failures"]
+            )
+        )
+        provenance = report["capture_provenance_evidence"][0]
+        self.assertFalse(provenance["strict_gate_passed"])
+        self.assertEqual(provenance["status"], "missing-capture_session_id_present")
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_rejects_return_package_report_mismatch(self) -> None:
+        root = self.make_case_root("package_capture_return_report_mismatch")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+            capture_metadata={"printer": "package-return-printer"},
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        capture_root = root / "returned_scans"
+        capture_dir = capture_root / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "operator-scan.png"
+        shutil.copy2(str(root / "kit" / case["reference_image_paths"][0]), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# package report mismatch source marker\n")
+        metadata_manifest = root / "filled_capture_metadata.json"
+        metadata_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "package-return-session",
+                        "operator": "package-return-operator",
+                        "captured_at_utc": "2026-05-28T19:00:00Z",
+                        "scanner": "package-return-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        package_report = transport.package_capture_return(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "return_package"),
+            capture_root=str(capture_root),
+            capture_metadata_manifest_file=str(metadata_manifest),
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            return_session_id="package-return-session",
+            operator="package-return-operator",
+        )
+        self.assertTrue(package_report["success"])
+        package_path = Path(str(package_report["package_file"]))
+        with zipfile.ZipFile(str(package_path), "a", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("captures/{}/drift.png".format(case["label"]), b"drift")
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(package_path),
+            capture_return_package_report_file=str(package_report["report_file"]),
+            capture_medium="print-scan",
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            require_physical_print_scan=True,
+            require_capture_provenance=True,
+            capture_required_classification="lab",
+            required_certified_claims=["physical-print-scan"],
+            max_list=20,
+        )
+
+        self.assertFalse(pipeline["success"])
+        self.assertEqual(
+            pipeline["summary"]["failed_steps"],
+            ["extract-capture-return-package"],
+        )
+        self.assertFalse(pipeline["summary"]["capture_return_package_report_validated"])
+        extraction_report = json.loads(
+            (
+                root
+                / "pipeline"
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertTrue(extraction_report["summary"]["capture_return_package_report_found"])
+        self.assertFalse(
+            extraction_report["summary"]["capture_return_package_report_validated"]
+        )
+        self.assertTrue(
+            any(
+                failure["code"]
+                == "capture_return_package_report_package_sha256_mismatch"
+                for failure in extraction_report["failures"]
+            )
+        )
+        self.assertFalse(
+            (root / "pipeline" / "ingest" / "transport_capture_corpus_ingestion_report.json").exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_package_capture_return_fails_closed_on_missing_required_capture(self) -> None:
+        root = self.make_case_root("package_capture_return_missing")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        capture_root = root / "empty_return"
+        capture_root.mkdir(parents=True)
+
+        report = transport.package_capture_return(
+            capture_corpus_file=str(kit["corpus_file"]),
+            output_dir=str(root / "return_package"),
+            capture_root=str(capture_root),
+        )
+
+        self.assertFalse(report["success"])
+        self.assertIsNone(report["package_file"])
+        self.assertFalse((root / "return_package" / "operator_return.zip").exists())
+        self.assertTrue(
+            any(
+                failure["code"] == "capture_label_directory_missing"
+                for failure in report["failures"]
+            )
+        )
+
+    def test_certify_capture_evidence_pipeline_rejects_unsafe_return_package_zip(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_unsafe_return_package")
+        transport = qrcode_helper.AirgapTransportLayer()
+        corpus_path = root / "capture_corpus.json"
+        corpus_path.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_CORPUS_SCHEMA,
+                    "classification": "lab",
+                    "capture_medium": "print-scan",
+                    "cases": [
+                        {
+                            "label": "case-one",
+                            "classification": "lab",
+                            "capture_medium": "print-scan",
+                            "image_path": "captures/case-one",
+                            "manifest_path": "missing-manifest.json",
+                            "payload_path": "missing-payload.bin",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_package = root / "unsafe_return.zip"
+        with zipfile.ZipFile(str(return_package), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("../outside.png", b"unsafe")
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(return_package),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            capture_required_classification="lab",
+            max_list=20,
+        )
+
+        self.assertFalse(pipeline["success"])
+        self.assertEqual(
+            pipeline["summary"]["failed_steps"],
+            ["extract-capture-return-package"],
+        )
+        self.assertEqual(pipeline["steps"][0]["name"], "extract-capture-return-package")
+        self.assertEqual(pipeline["steps"][1]["skip_reason"], "extract-capture-return-package failed")
+        extraction_report = json.loads(
+            (
+                root
+                / "pipeline"
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            extraction_report["failures"][0]["code"],
+            "unsafe_package_member",
+        )
+        self.assertFalse(
+            (root / "pipeline" / "attach" / "transport_capture_attachment_report.json").exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_rejects_wrong_return_manifest(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_wrong_return_manifest")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        package_source = root / "package_source"
+        capture_dir = package_source / "captures" / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "scan.png"
+        source_image = corpus_path.parent / case["reference_image_paths"][0]
+        shutil.copy2(str(source_image), str(scan_file))
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# wrong return manifest fixture marker\n")
+        (package_source / "operator_return_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_RETURN_MANIFEST_SCHEMA,
+                    "capture_corpus_sha256": "0" * 64,
+                    "cases": [{"label": "not-a-prepared-case"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_package = root / "operator_return.zip"
+        with zipfile.ZipFile(str(return_package), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(package_source.rglob("*")):
+                if path.is_file():
+                    archive.write(str(path), str(path.relative_to(package_source)).replace("\\", "/"))
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(return_package),
+            kit_manifest_file=str(root / "kit" / "capture_kit_manifest.json"),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            capture_required_classification="lab",
+            max_list=20,
+        )
+
+        self.assertFalse(pipeline["success"])
+        self.assertEqual(
+            pipeline["summary"]["failed_steps"],
+            ["extract-capture-return-package"],
+        )
+        self.assertFalse(pipeline["summary"]["capture_return_manifest_validated"])
+        extraction_report = json.loads(
+            (
+                root
+                / "pipeline"
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            extraction_report["failures"][0]["code"],
+            "capture_return_manifest_corpus_sha256_mismatch",
+        )
+        self.assertTrue(
+            any(
+                failure["code"] == "capture_return_manifest_case_label_unknown"
+                for failure in extraction_report["failures"]
+            )
+        )
+        self.assertFalse(
+            (root / "pipeline" / "attach" / "transport_capture_attachment_report.json").exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_certify_capture_evidence_pipeline_rejects_unlisted_return_package_capture_file(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_unlisted_return_file")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(root / "kit"),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        corpus_path = Path(str(kit["corpus_file"]))
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        source_image = corpus_path.parent / case["reference_image_paths"][0]
+        package_source = root / "package_source"
+        capture_dir = package_source / "captures" / case["label"]
+        capture_dir.mkdir(parents=True)
+        listed_file = capture_dir / "listed-scan.png"
+        extra_file = capture_dir / "extra-scan.png"
+        shutil.copy2(str(source_image), str(listed_file))
+        shutil.copy2(str(source_image), str(extra_file))
+        with listed_file.open("ab") as handle:
+            handle.write(b"\n# listed return package scan marker\n")
+        with extra_file.open("ab") as handle:
+            handle.write(b"\n# unlisted return package scan marker\n")
+        (package_source / "operator_return_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_RETURN_MANIFEST_SCHEMA,
+                    "capture_corpus_sha256": certify._sha256_file(corpus_path),
+                    "capture_file_inventory": {"required": True},
+                    "cases": [
+                        {
+                            "label": case["label"],
+                            "capture_files": [
+                                {
+                                    "path": "captures/{}/{}".format(
+                                        case["label"],
+                                        listed_file.name,
+                                    ),
+                                    "sha256": certify._sha256_file(listed_file),
+                                    "size_bytes": listed_file.stat().st_size,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_package = root / "operator_return.zip"
+        with zipfile.ZipFile(str(return_package), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(package_source.rglob("*")):
+                if path.is_file():
+                    archive.write(str(path), str(path.relative_to(package_source)).replace("\\", "/"))
+
+        pipeline = transport.certify_capture_evidence_pipeline(
+            capture_corpus_file=str(corpus_path),
+            output_dir=str(root / "pipeline"),
+            capture_return_package_file=str(return_package),
+            profile="reliable-airgap-v1",
+            backend="sidecar",
+            capture_required_classification="lab",
+            max_list=20,
+        )
+
+        self.assertFalse(pipeline["success"])
+        self.assertEqual(
+            pipeline["summary"]["failed_steps"],
+            ["extract-capture-return-package"],
+        )
+        extraction_report = json.loads(
+            (
+                root
+                / "pipeline"
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertFalse(
+            extraction_report["summary"][
+                "capture_return_manifest_file_inventory_validated"
+            ]
+        )
+        self.assertTrue(
+            any(
+                failure["code"] == "capture_return_manifest_unlisted_capture_file"
+                and failure["package_path"]
+                == "captures/{}/{}".format(case["label"], extra_file.name)
+                for failure in extraction_report["failures"]
+            )
+        )
+        self.assertFalse(
+            (root / "pipeline" / "attach" / "transport_capture_attachment_report.json").exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
     def test_certify_capture_evidence_pipeline_fails_closed_on_ingestion_miss(self) -> None:
         root = self.make_case_root("capture_evidence_pipeline_ingest_missing")
         transport = qrcode_helper.AirgapTransportLayer(
@@ -3712,6 +4769,23 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         shutil.copy2(str(source_page), str(scan_file))
         with scan_file.open("ab") as handle:
             handle.write(b"\n# capture evidence pipeline cli ingestion marker\n")
+        metadata_manifest = TEST_ROOT / Path(".tmp_test_runs") / root.name / "pipeline_metadata.json"
+        metadata_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "cli-pipeline-manifest-session",
+                        "operator": "cli-pipeline-manifest-operator",
+                        "captured_at_utc": "2026-05-28T15:45:00Z",
+                        "scanner": "cli-pipeline-manifest-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
         relative_output_dir = Path(".tmp_test_runs") / root.name / "pipeline"
 
         completed = subprocess.run(
@@ -3741,6 +4815,8 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
                 "operator=cli-pipeline-operator",
                 "--capture-metadata",
                 "captured_at_utc=2026-05-28T14:00:00Z",
+                "--capture-metadata-manifest-file",
+                str(metadata_manifest.relative_to(TEST_ROOT)),
                 "--require-physical-print-scan",
                 "--require-capture-provenance",
                 "--capture-required-classification",
@@ -3764,6 +4840,10 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         stdout = json.loads(completed.stdout)
         self.assertTrue(stdout["success"])
         self.assertTrue(stdout["summary"]["capture_ingested"])
+        self.assertEqual(
+            stdout["parameters"]["capture_metadata_manifest_file"],
+            str(metadata_manifest.relative_to(TEST_ROOT)),
+        )
         self.assertTrue(
             (
                 TEST_ROOT
@@ -3779,6 +4859,217 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
                 / "evidence_archive"
                 / "transport_certification_status.json"
             ).exists()
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_transport_cli_certify_capture_evidence_ingests_return_package_zip(self) -> None:
+        root = self.make_case_root("capture_evidence_pipeline_cli_return_package")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        relative_kit_dir = Path(".tmp_test_runs") / root.name / "kit"
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(TEST_ROOT / relative_kit_dir),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+            capture_metadata={"printer": "cli-return-package-printer"},
+        )
+        corpus = json.loads(Path(str(kit["corpus_file"])).read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        source_page = TEST_ROOT / relative_kit_dir / case["reference_image_paths"][0]
+        package_root = root / "operator_return_source"
+        package_capture_dir = package_root / "captures" / case["label"]
+        package_capture_dir.mkdir(parents=True)
+        scan_file = package_capture_dir / "scan.png"
+        shutil.copy2(str(source_page), str(scan_file))
+        scan_file.write_bytes(scan_file.read_bytes() + b"\n# cli return package marker\n")
+        (package_root / "operator_capture_metadata_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "cli-return-package-session",
+                        "operator": "cli-return-package-operator",
+                        "captured_at_utc": "2026-05-28T16:40:00Z",
+                        "scanner": "cli-return-package-flatbed",
+                        "dpi": "300",
+                    },
+                    "cases": [{"label": case["label"], "capture_metadata": {}}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return_package = root / "operator_return.zip"
+        with zipfile.ZipFile(str(return_package), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(package_root.rglob("*")):
+                if path.is_file():
+                    archive.write(str(path), str(path.relative_to(package_root)).replace("\\", "/"))
+        relative_output_dir = Path(".tmp_test_runs") / root.name / "pipeline_return"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "qrcode_helper.py",
+                "certify-capture-evidence",
+                "--capture-corpus-file",
+                str(relative_kit_dir / "capture_corpus.json"),
+                "--capture-return-package-file",
+                str(return_package.relative_to(TEST_ROOT)),
+                "-o",
+                str(relative_output_dir),
+                "--kit-manifest-file",
+                str(relative_kit_dir / "capture_kit_manifest.json"),
+                "--profile",
+                "reliable-airgap-v1",
+                "--backend",
+                "sidecar",
+                "--capture-medium",
+                "print-scan",
+                "--require-physical-print-scan",
+                "--require-capture-provenance",
+                "--capture-required-classification",
+                "lab",
+                "--require-certified-claim",
+                "physical-print-scan",
+                "--chunk-chars",
+                "24",
+                "--lines-per-page",
+                "8",
+                "--max-list",
+                "20",
+            ],
+            cwd=str(TEST_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+
+        stdout = json.loads(completed.stdout)
+        self.assertTrue(stdout["success"])
+        self.assertTrue(stdout["summary"]["capture_return_package_extracted"])
+        self.assertTrue(stdout["summary"]["capture_ingested"])
+        self.assertTrue(
+            (
+                TEST_ROOT
+                / relative_output_dir
+                / "return_package"
+                / "transport_capture_return_package_extraction_report.json"
+            ).exists()
+        )
+        self.assertEqual(
+            stdout["parameters"]["capture_return_package_file"],
+            str(return_package.relative_to(TEST_ROOT)),
+        )
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_transport_cli_package_capture_return_command_writes_zip(self) -> None:
+        root = self.make_case_root("package_capture_return_cli")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+        )
+        relative_kit_dir = Path(".tmp_test_runs") / root.name / "kit"
+        kit = transport.prepare_capture_corpus_kit(
+            output_dir=str(TEST_ROOT / relative_kit_dir),
+            classification="lab",
+            capture_medium="print-scan",
+            payload_sizes=[64],
+            iterations_per_size=1,
+            seed=20260528,
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        corpus = json.loads(Path(str(kit["corpus_file"])).read_text(encoding="utf-8"))
+        case = corpus["cases"][0]
+        relative_capture_root = Path(".tmp_test_runs") / root.name / "returned_scans"
+        capture_dir = TEST_ROOT / relative_capture_root / case["label"]
+        capture_dir.mkdir(parents=True)
+        scan_file = capture_dir / "scan.png"
+        shutil.copy2(
+            str(TEST_ROOT / relative_kit_dir / case["reference_image_paths"][0]),
+            str(scan_file),
+        )
+        with scan_file.open("ab") as handle:
+            handle.write(b"\n# cli package return marker\n")
+        relative_output_dir = Path(".tmp_test_runs") / root.name / "return_package"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "qrcode_helper.py",
+                "package-capture-return",
+                "--capture-corpus-file",
+                str(relative_kit_dir / "capture_corpus.json"),
+                "--capture-root",
+                str(relative_capture_root),
+                "-o",
+                str(relative_output_dir),
+                "--kit-manifest-file",
+                str(relative_kit_dir / "capture_kit_manifest.json"),
+                "--capture-metadata",
+                "capture_session_id=cli-package-session",
+                "--capture-metadata",
+                "operator=cli-package-operator",
+                "--capture-metadata",
+                "captured_at_utc=2026-05-28T19:30:00Z",
+                "--capture-metadata",
+                "scanner=cli-package-flatbed",
+                "--capture-metadata",
+                "dpi=300",
+                "--return-session-id",
+                "cli-package-session",
+                "--operator",
+                "cli-package-operator",
+                "--require-capture-provenance",
+            ],
+            cwd=str(TEST_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+
+        stdout = json.loads(completed.stdout)
+        self.assertTrue(stdout["success"])
+        self.assertEqual(stdout["schema"], certify.CAPTURE_RETURN_PACKAGE_SCHEMA)
+        self.assertEqual(stdout["summary"]["capture_file_count"], 1)
+        self.assertTrue(stdout["summary"]["capture_provenance_required"])
+        self.assertTrue(stdout["summary"]["capture_provenance_passed"])
+        package_file = TEST_ROOT / relative_output_dir / "operator_return.zip"
+        self.assertEqual(Path(stdout["package_file"]), package_file)
+        self.assertTrue(package_file.exists())
+        return_manifest = json.loads(
+            (TEST_ROOT / relative_output_dir / "operator_return_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            return_manifest["cases"][0]["capture_files"][0]["sha256"],
+            certify._sha256_file(scan_file),
+        )
+        metadata_manifest = json.loads(
+            (
+                TEST_ROOT
+                / relative_output_dir
+                / "operator_capture_metadata_manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            metadata_manifest["capture_metadata_defaults"]["capture_session_id"],
+            "cli-package-session",
         )
 
     def test_transport_certification_status_requires_exactly_one_source(self) -> None:
@@ -4252,9 +5543,47 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue((output_dir / "capture_corpus.json").exists())
         self.assertTrue((output_dir / "capture_kit_manifest.json").exists())
         self.assertTrue((output_dir / "instructions" / "NEXT_STEPS.md").exists())
+        template_path = output_dir / "instructions" / "operator_capture_metadata_manifest_template.json"
+        return_template_path = output_dir / "instructions" / "operator_return_manifest_template.json"
+        self.assertTrue(template_path.exists())
+        self.assertTrue(return_template_path.exists())
+        self.assertEqual(
+            Path(stdout["capture_metadata_manifest_template_file"]),
+            template_path.relative_to(TEST_ROOT),
+        )
+        self.assertEqual(
+            Path(stdout["capture_return_manifest_template_file"]),
+            return_template_path.relative_to(TEST_ROOT),
+        )
+        metadata_template = json.loads(template_path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata_template["schema"], certify.CAPTURE_METADATA_MANIFEST_SCHEMA)
+        self.assertEqual(metadata_template["capture_metadata_defaults"]["capture_medium"], "print-scan")
+        self.assertEqual(metadata_template["capture_metadata_defaults"]["scanner"], "unit-test-cli")
+        self.assertEqual(metadata_template["capture_metadata_defaults"]["capture_session_id"], "")
+        self.assertEqual(metadata_template["capture_metadata_defaults"]["operator"], "")
+        self.assertEqual(metadata_template["capture_metadata_defaults"]["captured_at_utc"], "")
+        self.assertEqual(len(metadata_template["cases"]), 1)
         corpus = json.loads((output_dir / "capture_corpus.json").read_text(encoding="utf-8"))
         self.assertEqual(corpus["capture_medium"], "print-scan")
         self.assertEqual(corpus["cases"][0]["capture_medium"], "print-scan")
+        self.assertEqual(metadata_template["cases"][0]["label"], corpus["cases"][0]["label"])
+        return_template = json.loads(return_template_path.read_text(encoding="utf-8"))
+        self.assertEqual(return_template["schema"], certify.CAPTURE_RETURN_MANIFEST_SCHEMA)
+        self.assertEqual(return_template["capture_corpus_sha256"], certify._sha256_file(output_dir / "capture_corpus.json"))
+        self.assertTrue(return_template["capture_file_inventory"]["required"])
+        self.assertEqual(return_template["cases"][0]["label"], corpus["cases"][0]["label"])
+        self.assertEqual(
+            return_template["cases"][0]["capture_files"][0]["path"],
+            "captures/{}/<returned-scan-or-corrected-photo>.png".format(
+                corpus["cases"][0]["label"]
+            ),
+        )
+        self.assertEqual(
+            return_template["cases"][0]["raw_capture_files"][0]["path"],
+            "raw_captures/{}/<returned-raw-camera-photo>.jpg".format(
+                corpus["cases"][0]["label"]
+            ),
+        )
         self.assertTrue(corpus["cases"][0]["reference_image_paths"])
         self.assertTrue(corpus["cases"][0]["raw_image_paths"])
         self.assertEqual(
@@ -4266,6 +5595,19 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertIn("--require-distinct-capture-images", instructions)
         self.assertIn("--capture-required-classification lab", instructions)
         self.assertIn("--require-real-camera-perspective-correction", instructions)
+        self.assertIn("--capture-metadata-manifest-file", instructions)
+        self.assertIn("operator_return_manifest_template.json", instructions)
+        kit_manifest = json.loads((output_dir / "capture_kit_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            kit_manifest["capture_metadata_manifest_template_sha256"],
+            certify.protocol.sha256_hex(template_path.read_bytes()),
+        )
+        self.assertEqual(
+            kit_manifest["capture_return_manifest_template_sha256"],
+            certify.protocol.sha256_hex(return_template_path.read_bytes()),
+        )
+        self.assertTrue(kit_manifest["summary"]["capture_metadata_manifest_template_ready"])
+        self.assertTrue(kit_manifest["summary"]["capture_return_manifest_template_ready"])
 
     @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
     def test_transport_cli_prepare_capture_corpus_can_stage_ocr_only_kit(self) -> None:
@@ -4466,6 +5808,11 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         )
         self.assertEqual(report["summary"]["unmatched_metadata_manifest_label_count"], 0)
         self.assertTrue(report["cases"][0]["capture_metadata_manifest_case_matched"])
+        self.assertEqual(
+            report["cases"][0]["capture_metadata"]["capture_session_id"],
+            "lab-session-20260528",
+        )
+        self.assertEqual(report["cases"][0]["capture_metadata"]["scanner"], "cli-override-flatbed")
         updated_corpus = json.loads(corpus_file.read_text(encoding="utf-8"))
         metadata = updated_corpus["cases"][0]["capture_metadata"]
         self.assertEqual(metadata["capture_session_id"], "lab-session-20260528")
@@ -4606,6 +5953,29 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         scan_file = capture_dir / "scan.png"
         shutil.copy2(str(source_page), str(scan_file))
         scan_file.write_bytes(scan_file.read_bytes() + b"\n# cli ingestion fixture marker\n")
+        metadata_manifest = TEST_ROOT / Path(".tmp_test_runs") / root.name / "capture_metadata.json"
+        metadata_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    "capture_metadata_defaults": {
+                        "capture_session_id": "cli-ingest-session",
+                        "operator": "cli-ingest-operator",
+                        "captured_at_utc": "2026-05-28T15:30:00Z",
+                    },
+                    "cases": [
+                        {
+                            "label": label,
+                            "capture_metadata": {
+                                "scanner": "cli-manifest-flatbed",
+                                "dpi": "300",
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         relative_output_dir = Path(".tmp_test_runs") / root.name / "ingest"
 
         completed = subprocess.run(
@@ -4625,6 +5995,8 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
                 "print-scan",
                 "--capture-metadata",
                 "scanner=cli-flatbed",
+                "--capture-metadata-manifest-file",
+                str(metadata_manifest.relative_to(TEST_ROOT)),
                 "--require-captures",
             ],
             cwd=str(TEST_ROOT),
@@ -4645,6 +6017,10 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
             (TEST_ROOT / relative_kit_dir / "capture_corpus.json").read_text(encoding="utf-8")
         )
         self.assertEqual(updated_corpus["cases"][0]["capture_metadata"]["scanner"], "cli-flatbed")
+        self.assertEqual(
+            updated_corpus["cases"][0]["capture_metadata"]["capture_session_id"],
+            "cli-ingest-session",
+        )
 
     @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
     def test_transport_cli_certify_reliable_airgap_profile(self) -> None:

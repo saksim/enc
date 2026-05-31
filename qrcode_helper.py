@@ -55,6 +55,8 @@ np = None
 PROTOCOL_VERSION = _transport_protocol.PROTOCOL_VERSION
 STD_BASE32_ALPHABET = _transport_protocol.STD_BASE32_ALPHABET
 SAFE_BASE32_ALPHABET = _transport_protocol.SAFE_BASE32_ALPHABET
+OCR_SAFE_HUMAN_CORRECTABLE_PROFILE = _transport_protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE
+OCR_SAFE_HUMAN_CORRECTABLE_ALPHABET = _transport_protocol.OCR_SAFE_HUMAN_CORRECTABLE_ALPHABET
 IMAGE_SUFFIXES = _transport_protocol.IMAGE_SUFFIXES
 SIDECAR_BITS_PER_ROW = _transport_protocol.SIDECAR_BITS_PER_ROW
 SIDECAR_CELL_SIZE = _transport_protocol.SIDECAR_CELL_SIZE
@@ -97,6 +99,8 @@ _levenshtein_distance = _transport_protocol.levenshtein_distance
 _build_easyocr_langs = _ocr_adapters.build_easyocr_langs
 _encode_safe_base32 = _transport_protocol.encode_safe_base32
 _decode_safe_base32 = _transport_protocol.decode_safe_base32
+_encode_payload_for_profile = _transport_protocol.encode_payload_for_profile
+_decode_payload_for_profile = _transport_protocol.decode_payload_for_profile
 _safe_base32_encoded_length = _transport_protocol.safe_base32_encoded_length
 _safe_payload_to_bits = _transport_protocol.safe_payload_to_bits
 _bits_to_safe_payload = _transport_protocol.bits_to_safe_payload
@@ -224,6 +228,7 @@ class AirgapTransportLayer(object):
         line_separator: str = "|",
         render_sidecar: bool = True,
         line_crc_mode: str = "on",
+        payload_alphabet_profile: str = "safe-base32-v1",
     ) -> None:
         self.max_compressed_bytes = max_compressed_kib * 1024
         self.chunk_chars = chunk_chars
@@ -254,6 +259,12 @@ class AirgapTransportLayer(object):
         self.line_crc_mode = str(line_crc_mode or "on").strip().lower()
         if self.line_crc_mode not in ("on", "off"):
             raise ValueError("line_crc_mode must be one of: on, off")
+        self.payload_alphabet_profile = str(
+            payload_alphabet_profile or "safe-base32-v1"
+        ).strip().lower()
+        self.payload_alphabet = _transport_protocol.payload_alphabet_for_profile(
+            self.payload_alphabet_profile
+        )
 
     def export_artifact(
         self,
@@ -298,7 +309,7 @@ class AirgapTransportLayer(object):
         if self.line_index_mode == "off" and self.render_sidecar:
             raise ValueError("line_index_mode=off requires --no-sidecar")
 
-        encoded = _encode_safe_base32(compressed)
+        encoded = _encode_payload_for_profile(compressed, self.payload_alphabet_profile)
         chunks = self._split_chunks(encoded, self.chunk_chars)
         parity_info = self._build_parity_info(chunks=chunks, parity_group_size=parity_group_size)
         raw_sha256 = _sha256_hex(raw)
@@ -361,8 +372,13 @@ class AirgapTransportLayer(object):
             "artifact_name": source_path.name,
             "created_at_utc": _utc_now_iso(),
             "compression": "zlib",
-            "encoding": "safe_base32",
-            "alphabet": SAFE_BASE32_ALPHABET,
+            "encoding": (
+                "safe_base32"
+                if self.payload_alphabet_profile == "safe-base32-v1"
+                else "profile_base_n"
+            ),
+            "payload_alphabet_profile": self.payload_alphabet_profile,
+            "alphabet": self.payload_alphabet,
             "raw_size": len(raw),
             "compressed_size": len(compressed),
             "raw_sha256": raw_sha256,
@@ -419,6 +435,8 @@ class AirgapTransportLayer(object):
             "line_index_mode": self.line_index_mode,
             "sidecar_enabled": self.render_sidecar,
             "font_fit_mode": self.font_fit_mode,
+            "payload_alphabet_profile": self.payload_alphabet_profile,
+            "alphabet": self.payload_alphabet,
             "raw_size": len(raw),
             "compressed_size": len(compressed),
             "compressed_limit": self.max_compressed_bytes,
@@ -450,7 +468,7 @@ class AirgapTransportLayer(object):
         if parity_group_size < 0:
             raise ValueError("parity_group_size must be >= 0")
 
-        encoded = _encode_safe_base32(compressed)
+        encoded = _encode_payload_for_profile(compressed, self.payload_alphabet_profile)
         chunks = self._split_chunks(encoded, self.chunk_chars)
         parity_info = self._build_parity_info(chunks=chunks, parity_group_size=parity_group_size)
         base_entries = [(idx, payload) for idx, payload in enumerate(chunks)]
@@ -485,9 +503,11 @@ class AirgapTransportLayer(object):
             "compressed_limit": self.max_compressed_bytes,
             "fits_current_limit": len(compressed) <= self.max_compressed_bytes,
             "minimum_recommended_max_compressed_kib": min_required_kib,
-            "encoded_chars": len(encoded),
-            "chunk_chars": self.chunk_chars,
-            "data_chunk_count": len(chunks),
+                "encoded_chars": len(encoded),
+                "chunk_chars": self.chunk_chars,
+                "payload_alphabet_profile": self.payload_alphabet_profile,
+                "alphabet": self.payload_alphabet,
+                "data_chunk_count": len(chunks),
             "parity_enabled": bool(parity_info["manifest"].get("enabled")),
             "parity_chunk_count": int(parity_info["manifest"].get("group_count", 0)),
             "redundancy_copies": redundancy_copies,
@@ -505,6 +525,7 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         output_file: str,
         strict_payload_chars: bool = False,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.recover_artifact(
             transport=self,
@@ -512,6 +533,7 @@ class AirgapTransportLayer(object):
             ocr_input_path=ocr_input_path,
             output_file=output_file,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def _recover_artifact_against_manifest(
@@ -520,6 +542,7 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         output_file: str,
         strict_payload_chars: bool = False,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.recover_artifact_against_manifest(
             transport=self,
@@ -527,6 +550,7 @@ class AirgapTransportLayer(object):
             ocr_input_path=ocr_input_path,
             output_file=output_file,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def verify_ocr_text(
@@ -534,12 +558,14 @@ class AirgapTransportLayer(object):
         manifest_path: Optional[str],
         ocr_input_path: str,
         strict_payload_chars: bool = False,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.verify_ocr_text(
             transport=self,
             manifest_path=manifest_path,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def _verify_ocr_text_against_manifest(
@@ -547,12 +573,123 @@ class AirgapTransportLayer(object):
         manifest: Dict[str, object],
         ocr_input_path: str,
         strict_payload_chars: bool = False,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.verify_ocr_text_against_manifest(
             transport=self,
             manifest=manifest,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
+        )
+
+    def replay_ocr_corrections(
+        self,
+        manifest_path: str,
+        ocr_input_path: str,
+        corrections_file: str,
+        output_file: Optional[str] = None,
+        report_file: Optional[str] = None,
+        strict_payload_chars: bool = False,
+        emit_corrections_file: Optional[str] = None,
+    ) -> Dict[str, object]:
+        return _transport_recover.replay_ocr_corrections(
+            transport=self,
+            manifest_path=manifest_path,
+            ocr_input_path=ocr_input_path,
+            corrections_file=corrections_file,
+            output_file=output_file,
+            report_file=report_file,
+            strict_payload_chars=strict_payload_chars,
+            emit_corrections_file=emit_corrections_file,
+        )
+
+    def verify_ocr_correction_replay_report(
+        self,
+        report_file: str,
+        output_file: Optional[str] = None,
+        require_success: bool = True,
+    ) -> Dict[str, object]:
+        return _transport_recover.verify_ocr_correction_replay_report(
+            transport=self,
+            report_file=report_file,
+            output_file=output_file,
+            require_success=require_success,
+        )
+
+    def certify_ocr_safe_confusions(
+        self,
+        output_dir: str,
+        report_file: Optional[str] = None,
+        payload_size: int = 512,
+        seed: int = 20260530,
+        redundancy_copies: int = 2,
+        parity_group_size: int = 4,
+        filename_prefix: str = "ocr_confusion_page",
+    ) -> Dict[str, object]:
+        return _transport_recover.certify_ocr_safe_confusions(
+            transport=self,
+            output_dir=output_dir,
+            report_file=report_file,
+            payload_size=payload_size,
+            seed=seed,
+            redundancy_copies=redundancy_copies,
+            parity_group_size=parity_group_size,
+            filename_prefix=filename_prefix,
+        )
+
+    def verify_ocr_safe_confusion_report(
+        self,
+        report_file: str,
+        output_file: Optional[str] = None,
+        require_success: bool = True,
+    ) -> Dict[str, object]:
+        return _transport_recover.verify_ocr_safe_confusion_report(
+            report_file=report_file,
+            output_file=output_file,
+            require_success=require_success,
+        )
+
+    def archive_ocr_safe_evidence(
+        self,
+        archive_file: str,
+        manifest_file: Optional[str] = None,
+        confusion_report_file: Optional[str] = None,
+        correction_replay_report_file: Optional[str] = None,
+        require_confusion_report: bool = False,
+        require_correction_replay_report: bool = False,
+        require_source_report_verification: bool = False,
+    ) -> Dict[str, object]:
+        return _transport_recover.archive_ocr_safe_evidence(
+            transport=self,
+            archive_file=archive_file,
+            manifest_file=manifest_file,
+            confusion_report_file=confusion_report_file,
+            correction_replay_report_file=correction_replay_report_file,
+            require_confusion_report=require_confusion_report,
+            require_correction_replay_report=require_correction_replay_report,
+            require_source_report_verification=require_source_report_verification,
+        )
+
+    def verify_ocr_safe_evidence_archive(
+        self,
+        archive_file: str,
+        manifest_file: Optional[str] = None,
+        output_file: Optional[str] = None,
+        require_confusion_report: bool = False,
+        require_correction_replay_report: bool = False,
+        require_source_report_verification: bool = False,
+        require_success: bool = True,
+    ) -> Dict[str, object]:
+        return _transport_recover.verify_ocr_safe_evidence_archive(
+            transport=self,
+            archive_file=archive_file,
+            manifest_file=manifest_file,
+            output_file=output_file,
+            require_confusion_report=require_confusion_report,
+            require_correction_replay_report=require_correction_replay_report,
+            require_source_report_verification=require_source_report_verification,
+            require_success=require_success,
         )
 
     def analyze_ocr_text(
@@ -563,6 +700,8 @@ class AirgapTransportLayer(object):
         max_list: int = 200,
         save_report_path: Optional[str] = None,
         emit_missing_file: Optional[str] = None,
+        emit_corrections_file: Optional[str] = None,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.analyze_ocr_text(
             transport=self,
@@ -572,6 +711,8 @@ class AirgapTransportLayer(object):
             max_list=max_list,
             save_report_path=save_report_path,
             emit_missing_file=emit_missing_file,
+            emit_corrections_file=emit_corrections_file,
+            corrections_file=corrections_file,
         )
 
     def _analyze_ocr_text_against_manifest(
@@ -582,6 +723,8 @@ class AirgapTransportLayer(object):
         max_list: int = 200,
         save_report_path: Optional[str] = None,
         emit_missing_file: Optional[str] = None,
+        emit_corrections_file: Optional[str] = None,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.analyze_ocr_text_against_manifest(
             transport=self,
@@ -591,6 +734,8 @@ class AirgapTransportLayer(object):
             max_list=max_list,
             save_report_path=save_report_path,
             emit_missing_file=emit_missing_file,
+            emit_corrections_file=emit_corrections_file,
+            corrections_file=corrections_file,
         )
 
     def extract_text_from_images(
@@ -811,6 +956,8 @@ class AirgapTransportLayer(object):
         ocr_text_output: Optional[str] = None,
         save_analyze_report: Optional[str] = None,
         emit_missing_file: Optional[str] = None,
+        emit_corrections_file: Optional[str] = None,
+        corrections_file: Optional[str] = None,
         max_list: int = 200,
     ) -> Dict[str, object]:
         backend = backend.lower().strip()
@@ -891,12 +1038,20 @@ class AirgapTransportLayer(object):
                 "missing_file_path": _materialize_selected_path(
                     emit_missing_file, analyze.get("missing_file_path")
                 ),
+                "corrections_template_path": _materialize_selected_path(
+                    emit_corrections_file, analyze.get("corrections_template_path")
+                ),
             }
 
         def _run_backend(one_backend: str) -> Dict[str, object]:
             one_ocr_text_output = _derive_path(ocr_text_output, one_backend, ".txt")
             one_report = _derive_path(save_analyze_report, one_backend, ".json")
             one_missing = _derive_path(emit_missing_file, one_backend, ".csv")
+            one_corrections = _derive_path(
+                emit_corrections_file,
+                one_backend,
+                ".csv",
+            )
 
             ocr_result = self.extract_text_from_images(
                 image_input_path=image_input_path,
@@ -915,6 +1070,8 @@ class AirgapTransportLayer(object):
                 max_list=max_list,
                 save_report_path=one_report,
                 emit_missing_file=one_missing,
+                emit_corrections_file=one_corrections,
+                corrections_file=corrections_file,
             )
             score = self._analyze_score_tuple(analyze)
             return {
@@ -938,6 +1095,7 @@ class AirgapTransportLayer(object):
                         ocr_input_path=best["ocr_text_output"],
                         output_file=output_file,
                         strict_payload_chars=strict_payload_chars,
+                        corrections_file=corrections_file,
                     )
                     return {
                         "success": True,
@@ -967,6 +1125,9 @@ class AirgapTransportLayer(object):
                             "package_hash_resolved_count": best["analyze"].get("package_hash_resolved_count", 0),
                             "report_path": selected_paths["report_path"],
                             "missing_file_path": selected_paths["missing_file_path"],
+                            "corrections_template_path": selected_paths[
+                                "corrections_template_path"
+                            ],
                             "missing_chunk_retake_plan_sample": best["analyze"].get(
                                 "missing_chunk_retake_plan_sample", []
                             )[:20],
@@ -1015,6 +1176,9 @@ class AirgapTransportLayer(object):
                         "duplicate_conflict_count": a["analyze"].get("duplicate_conflict_count", 0),
                         "report_path": a["analyze"].get("report_path"),
                         "missing_file_path": a["analyze"].get("missing_file_path"),
+                        "corrections_template_path": a["analyze"].get(
+                            "corrections_template_path"
+                        ),
                         "missing_chunk_retake_plan_sample": a["analyze"].get(
                             "missing_chunk_retake_plan_sample", []
                         )[:20],
@@ -1031,6 +1195,7 @@ class AirgapTransportLayer(object):
                 "ocr_text_output": selected_paths["ocr_text_output"],
                 "report_path": selected_paths["report_path"],
                 "missing_file_path": selected_paths["missing_file_path"],
+                "corrections_template_path": selected_paths["corrections_template_path"],
                 "backends_compared": compare,
             }
 
@@ -1039,6 +1204,7 @@ class AirgapTransportLayer(object):
             ocr_input_path=best["ocr_text_output"],
             output_file=output_file,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
         selected_paths = _selected_output_paths(best)
         return {
@@ -1065,6 +1231,7 @@ class AirgapTransportLayer(object):
                 "package_hash_resolved_count": best["analyze"].get("package_hash_resolved_count", 0),
                 "report_path": selected_paths["report_path"],
                 "missing_file_path": selected_paths["missing_file_path"],
+                "corrections_template_path": selected_paths["corrections_template_path"],
                 "missing_chunk_retake_plan_sample": best["analyze"].get(
                     "missing_chunk_retake_plan_sample", []
                 )[:20],
@@ -1215,6 +1382,46 @@ class AirgapTransportLayer(object):
             require_raw_captures=require_raw_captures,
             update_corpus=update_corpus,
             update_kit_manifest=update_kit_manifest,
+        )
+
+    def package_capture_return(
+        self,
+        capture_corpus_file: str,
+        output_dir: str,
+        capture_root: str,
+        raw_capture_root: Optional[str] = None,
+        capture_metadata_manifest_file: Optional[str] = None,
+        capture_metadata: Optional[Dict[str, object]] = None,
+        kit_manifest_file: Optional[str] = None,
+        package_file: Optional[str] = None,
+        return_manifest_file: Optional[str] = None,
+        report_file: Optional[str] = None,
+        return_session_id: Optional[str] = None,
+        operator: Optional[str] = None,
+        returned_at_utc: Optional[str] = None,
+        require_captures: bool = True,
+        require_raw_captures: bool = False,
+        require_capture_provenance: bool = False,
+        require_all_case_labels: bool = True,
+    ) -> Dict[str, object]:
+        return _transport_certify.package_capture_return(
+            capture_corpus_file=capture_corpus_file,
+            output_dir=output_dir,
+            capture_root=capture_root,
+            raw_capture_root=raw_capture_root,
+            capture_metadata_manifest_file=capture_metadata_manifest_file,
+            capture_metadata=capture_metadata,
+            kit_manifest_file=kit_manifest_file,
+            package_file=package_file,
+            return_manifest_file=return_manifest_file,
+            report_file=report_file,
+            return_session_id=return_session_id,
+            operator=operator,
+            returned_at_utc=returned_at_utc,
+            require_captures=require_captures,
+            require_raw_captures=require_raw_captures,
+            require_capture_provenance=require_capture_provenance,
+            require_all_case_labels=require_all_case_labels,
         )
 
     def ingest_capture_corpus(
@@ -1432,6 +1639,11 @@ class AirgapTransportLayer(object):
         self,
         capture_corpus_file: str,
         output_dir: str,
+        capture_return_package_file: Optional[str] = None,
+        capture_return_package_report_file: Optional[str] = None,
+        require_capture_return_manifest: bool = False,
+        require_capture_return_file_inventory: bool = False,
+        require_capture_return_package_report: bool = False,
         capture_root: Optional[str] = None,
         raw_capture_root: Optional[str] = None,
         capture_medium: Optional[str] = None,
@@ -1467,6 +1679,7 @@ class AirgapTransportLayer(object):
         strict_payload_chars: bool = False,
         max_list: int = 200,
         kit_manifest_file: Optional[str] = None,
+        capture_return_extraction_report_file: Optional[str] = None,
         ingestion_report_file: Optional[str] = None,
         attachment_report_file: Optional[str] = None,
         validation_report_file: Optional[str] = None,
@@ -1484,6 +1697,11 @@ class AirgapTransportLayer(object):
             transport=self,
             capture_corpus_file=capture_corpus_file,
             output_dir=output_dir,
+            capture_return_package_file=capture_return_package_file,
+            capture_return_package_report_file=capture_return_package_report_file,
+            require_capture_return_manifest=require_capture_return_manifest,
+            require_capture_return_file_inventory=require_capture_return_file_inventory,
+            require_capture_return_package_report=require_capture_return_package_report,
             capture_root=capture_root,
             raw_capture_root=raw_capture_root,
             capture_medium=capture_medium,
@@ -1521,6 +1739,7 @@ class AirgapTransportLayer(object):
             strict_payload_chars=strict_payload_chars,
             max_list=max_list,
             kit_manifest_file=kit_manifest_file,
+            capture_return_extraction_report_file=capture_return_extraction_report_file,
             ingestion_report_file=ingestion_report_file,
             attachment_report_file=attachment_report_file,
             validation_report_file=validation_report_file,
@@ -1621,7 +1840,7 @@ class AirgapTransportLayer(object):
 
     def _build_parity_info(self, chunks: List[str], parity_group_size: int) -> Dict[str, object]:
         """
-        Build optional parity chunks over SAFE_BASE32 symbols.
+        Build optional parity chunks over the active 32-symbol payload alphabet.
         One parity chunk per group can recover one missing chunk in that group.
         """
         if parity_group_size <= 1 or not chunks:
@@ -1641,6 +1860,14 @@ class AirgapTransportLayer(object):
         groups = []
         entries = []
         group_id = 0
+        payload_alphabet = self.payload_alphabet
+        payload_char_to_val = {ch: idx for idx, ch in enumerate(payload_alphabet)}
+        parity_symbol_mode = (
+            "modular-sum"
+            if self.payload_alphabet_profile == OCR_SAFE_HUMAN_CORRECTABLE_PROFILE
+            else "xor"
+        )
+        payload_base = len(payload_alphabet)
         for start in range(0, len(chunks), group_size):
             data_indices = list(range(start, min(start + group_size, len(chunks))))
             if not data_indices:
@@ -1650,8 +1877,11 @@ class AirgapTransportLayer(object):
             for idx in data_indices:
                 payload = chunks[idx]
                 for pos, ch in enumerate(payload):
-                    parity_vals[pos] ^= SAFE_CHAR_TO_VAL[ch]
-            parity_payload = "".join(SAFE_BASE32_ALPHABET[val] for val in parity_vals)
+                    if parity_symbol_mode == "modular-sum":
+                        parity_vals[pos] = (parity_vals[pos] + payload_char_to_val[ch]) % payload_base
+                    else:
+                        parity_vals[pos] ^= payload_char_to_val[ch]
+            parity_payload = "".join(payload_alphabet[val] for val in parity_vals)
             parity_idx = index_base + group_id
             entries.append((parity_idx, parity_payload))
             groups.append(
@@ -1660,6 +1890,7 @@ class AirgapTransportLayer(object):
                     "data_chunk_indices": data_indices,
                     "parity_chunk_index": parity_idx,
                     "parity_len": len(parity_payload),
+                    "symbol_mode": parity_symbol_mode,
                 }
             )
             group_id += 1
@@ -1672,6 +1903,7 @@ class AirgapTransportLayer(object):
                 "group_count": len(groups),
                 "index_base": index_base,
                 "groups": groups,
+                "symbol_mode": parity_symbol_mode,
             },
         }
 
@@ -2280,6 +2512,7 @@ class AirgapTransportLayer(object):
         expected_len: int,
         expected_crc: str,
         raw_texts: List[str],
+        payload_alphabet_profile: str = "safe-base32-v1",
     ) -> str:
         return _transport_ocr_runtime.choose_payload_candidate(
             transport=self,
@@ -2287,6 +2520,7 @@ class AirgapTransportLayer(object):
             expected_len=expected_len,
             expected_crc=expected_crc,
             raw_texts=raw_texts,
+            payload_alphabet_profile=payload_alphabet_profile,
         )
 
     def _repair_payload_candidate_by_crc(
@@ -2439,12 +2673,19 @@ class AirgapTransportLayer(object):
                 best_unmatched = cand_unmatched
         return best_text
 
-    def _parse_ocr_chunks(self, manifest: Dict[str, object], ocr_input_path: str, strict_payload_chars: bool) -> Dict[str, object]:
+    def _parse_ocr_chunks(
+        self,
+        manifest: Dict[str, object],
+        ocr_input_path: str,
+        strict_payload_chars: bool,
+        corrections_file: Optional[str] = None,
+    ) -> Dict[str, object]:
         return _transport_parser.parse_ocr_chunks(
             transport=self,
             manifest=manifest,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def _parse_ocr_chunks_payload_only_manifest(
@@ -2452,12 +2693,14 @@ class AirgapTransportLayer(object):
         manifest: Dict[str, object],
         ocr_input_path: str,
         strict_payload_chars: bool,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_parser.parse_ocr_chunks_payload_only_manifest(
             transport=self,
             manifest=manifest,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def _parse_ocr_chunks_with_total(
@@ -2466,6 +2709,9 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         strict_payload_chars: bool,
         line_index_mode: str = "full",
+        payload_alphabet_profile: Optional[str] = None,
+        chunk_lengths: Optional[object] = None,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_parser.parse_ocr_chunks_with_total(
             transport=self,
@@ -2473,6 +2719,9 @@ class AirgapTransportLayer(object):
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
             line_index_mode=line_index_mode,
+            payload_alphabet_profile=payload_alphabet_profile,
+            chunk_lengths=chunk_lengths,
+            corrections_file=corrections_file,
         )
 
     def _choose_majority_metadata_value(self, label: str, votes: Dict[object, int]) -> Optional[object]:
@@ -2491,11 +2740,13 @@ class AirgapTransportLayer(object):
         self,
         ocr_input_path: str,
         strict_payload_chars: bool = False,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.verify_ocr_text_without_manifest(
             transport=self,
             ocr_input_path=ocr_input_path,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def _recover_artifact_without_manifest(
@@ -2503,12 +2754,14 @@ class AirgapTransportLayer(object):
         ocr_input_path: str,
         output_file: str,
         strict_payload_chars: bool = False,
+        corrections_file: Optional[str] = None,
     ) -> Dict[str, object]:
         return _transport_recover.recover_artifact_without_manifest(
             transport=self,
             ocr_input_path=ocr_input_path,
             output_file=output_file,
             strict_payload_chars=strict_payload_chars,
+            corrections_file=corrections_file,
         )
 
     def _build_missing_chunk_records(
@@ -2608,6 +2861,7 @@ class AirgapTransportLayer(object):
             font_fit_mode=self.font_fit_mode,
             line_separator=self.line_separator,
             render_sidecar=self.render_sidecar,
+            payload_alphabet_profile=self.payload_alphabet_profile,
             image_module=Image,
             image_draw_module=ImageDraw,
             image_font_module=ImageFont,

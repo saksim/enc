@@ -39,12 +39,15 @@ Transport subcommands are provided by the optional plugin surface:
 10. `ingest-capture-corpus`
 11. `attach-capture-corpus`
 12. `validate-capture-corpus`
-13. `certify-capture-evidence`
-14. `archive-evidence`
-15. `verify-evidence-archive`
-16. `replay-evidence-archive`
-17. `correct-capture-perspective`
-18. `certification-status`
+13. `package-capture-return`
+14. `certify-capture-evidence`
+15. `archive-evidence`
+16. `verify-evidence-archive`
+17. `replay-evidence-archive`
+18. `correct-capture-perspective`
+19. `archive-ocr-safe-evidence`
+20. `verify-ocr-safe-evidence-archive`
+21. `certification-status`
 
 ## 4. Quick Start
 
@@ -105,6 +108,70 @@ python .\soenc.py transport certify -o .\transport_cert --profile reliable-airga
 
 The basic suite records control, PNG re-encode, JPEG recompression, mild blur, mild contrast/brightness shift, and screenshot-like high-quality recompression. The stress suite adds generated-page resize down/up, small rotation, crop/margin loss, deterministic skew approximation, sparse noise, and print-scan-like approximation. Real camera photos, generic OCR fallback, and full physical print/scan degradation remain non-GA-certified unless a report explicitly measures and passes those cases.
 
+### 4.5.1 OCR-Safe Human-Correctable Profile
+
+When no real scan/photo corpus is available, use the OCR-safe profile to exercise the text repair path without relying on ambiguous glyphs at generation time:
+
+```powershell
+python .\soenc.py transport export -i .\artifact.bin -o .\airgap_ocr_safe --payload-alphabet-profile ocr-safe-human-correctable-v1 --no-sidecar
+```
+
+The profile emits only `12356789OAEFHJKMNPRUVWXY` in payload text and records `payload_alphabet_profile=ocr-safe-human-correctable-v1` plus the alphabet in manifests and reports. Decode normalizes hard-safe OCR confusions, expands ambiguous candidates, accepts a line only when exactly one candidate passes line CRC, and still requires final payload SHA256 before recovery succeeds.
+
+To produce replayable synthetic evidence for the OCR-safe confusion families, run:
+
+```powershell
+python .\soenc.py transport certify-ocr-confusion -o .\ocr_confusion_cert
+```
+
+This writes `synthetic_ocr_confusion_report.json` with schema `enc2sop-transport-ocr-safe-confusion-report/v1`. The suite injects `6/G/g`, `9/g/q`, `2/7/Z/z`, `O/0/o/Q/D`, `1/I/i/l/L`, `5/S/s`, `8/B/b`, whitespace insertion, dash/noise insertion, and line-break drift, records the canonical `required_confusion_cases[]` contract, then records per-case analyze/recovery outputs and final payload SHA256 verification. This proves deterministic synthetic text repair only; it is not real camera/photo, physical print-scan, or backend-specific OCR certification.
+
+Verify the saved synthetic report and referenced artifacts before handing it to launch/audit review:
+
+```powershell
+python .\soenc.py transport verify-ocr-confusion --report-file .\ocr_confusion_cert\synthetic_ocr_confusion_report.json --output-file .\ocr_confusion_cert\synthetic_ocr_confusion_verification_report.json
+```
+
+This writes `enc2sop-transport-ocr-safe-confusion-report-verification/v1`, re-checks the source report schema/profile/suite, payload and manifest SHA256 bindings, generated source-page text digests, mechanical mutation replay, per-case OCR text/analyze/recovered artifact digests, required confusion-family coverage, exact required-case-suite coverage, and final recovered payload SHA256 parity. It verifies replayability for synthetic OCR-safe text-confusion evidence only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+
+For unresolved or multi-pass OCR-safe lines, write a replayable operator template:
+
+```powershell
+python .\soenc.py transport analyze -m .\airgap_ocr_safe\PAYLOAD.manifest.json -t .\ocr_text.txt --strict-payload-chars --emit-corrections-template .\corrections_template.csv
+```
+
+The CSV columns are `page,line,raw_text,normalized_text,candidates,status,expected_crc,actual_crc,corrected_text`. Passing synthetic confusion tests or generated-page sidecar certification with this profile does not certify real camera/photo, physical print-scan, or backend-specific OCR readiness; those still require measured capture/backend evidence and matching `certification-status --require-certified-claim ...` gates.
+
+After an operator fills `corrected_text`, replay it into a versioned report:
+
+```powershell
+python .\soenc.py transport replay-corrections -m .\airgap_ocr_safe\PAYLOAD.manifest.json -t .\ocr_text.txt --apply-corrections-file .\corrections_template.csv -o .\recovered.bin --report-file .\transport_ocr_correction_replay_report.json --strict-payload-chars
+```
+
+`replay-corrections` writes `enc2sop-transport-ocr-correction-replay/v1`, records applied/invalid correction rows, rejects stale generated-template rows when their `raw_text`, `normalized_text`, `status`, or `actual_crc` no longer match the current unresolved OCR line, reports unused filled rows with row number, page, line, expected CRC, and corrected-text SHA256, and writes the recovered artifact only after final compressed/raw SHA256 checks pass and the correction replay itself is accepted with no invalid, unused, malformed, or still-required correction rows. Malformed correction CSVs, such as files missing `corrected_text`, now produce a failed replay report with `correction_file_valid=false`, a structured `correction_file_error`, and suppressed output. On failed replay it records `requested_output_file` plus `output_suppressed_reason`, and with unresolved current lines writes a refreshed retry template beside `--report-file` as `corrections_template_retry.csv` unless `--emit-corrections-template` is supplied. It preserves the same certification boundary: it proves text-correction replay for the supplied OCR text, not real camera, physical print-scan, or backend-specific OCR readiness.
+
+Verify the saved correction replay report before handing it to launch/audit review:
+
+```powershell
+python .\soenc.py transport verify-correction-replay --report-file .\transport_ocr_correction_replay_report.json --output-file .\transport_ocr_correction_replay_verification_report.json
+```
+
+`verify-correction-replay` writes `enc2sop-transport-ocr-correction-replay-verification/v1`, re-checks the replay report schema/profile, referenced manifest/OCR/correction files, correction CSV digest, mechanical replay result, final payload SHA256 state, and recovered-output or suppressed-output state. It verifies replayability for the specific correction handoff only and does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+
+Package OCR-safe synthetic and correction replay evidence for handoff:
+
+```powershell
+python .\soenc.py transport archive-ocr-safe-evidence --archive-file .\ocr_safe_evidence_archive.zip --manifest-file .\ocr_safe_evidence_archive_manifest.json --confusion-report-file .\ocr_confusion_cert\synthetic_ocr_confusion_report.json --correction-replay-report-file .\transport_ocr_correction_replay_report.json --require-confusion-report --require-correction-replay-report --require-source-report-verification
+```
+
+Verify the archive before audit or launch review:
+
+```powershell
+python .\soenc.py transport verify-ocr-safe-evidence-archive --archive-file .\ocr_safe_evidence_archive.zip --manifest-file .\ocr_safe_evidence_archive_manifest.json --output-file .\ocr_safe_evidence_archive_verification.json --require-confusion-report --require-correction-replay-report --require-source-report-verification
+```
+
+`archive-ocr-safe-evidence` writes `enc2sop-transport-ocr-safe-evidence-archive/v1` and packages the included report plus referenced payload, manifest, OCR text, correction CSV, output, source-page text, and case artifact files with SHA256/size inventory. With `--require-source-report-verification`, archive creation first reruns `verify-ocr-confusion` and/or `verify-correction-replay`, fails before writing the ZIP if any included source report is stale, records source-verification digest/size/path metadata in the archive manifest, and stores the full source-verification JSON as an archive member. `verify-ocr-safe-evidence-archive` writes `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`, checks ZIP member safety, external manifest envelope metadata (`archive_sha256`, `archive_size_bytes`, `archive_file`, `manifest_file`, and `embedded_manifest_sha256`), embedded/external manifest parity, file digests, manifest success and typed parameter gates, manifest summary file-count/total-size, report-count/report-role, and file-role parity, required report presence, source-verification manifest metadata and archived verifier JSON when requested, archive-relative replay-critical paths inside embedded reports, and replays the embedded confusion and correction reports from extracted archive bytes. This is still synthetic/testable OCR-safe evidence only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+
 ### 4.6 Certify OCR-Only Backends
 
 OCR-only certification is separate from the production sidecar path. It must be requested explicitly, must use a named OCR backend, and must run on pages exported without binary sidecar boxes:
@@ -137,7 +204,7 @@ If no real capture corpus exists yet, prepare a physical/lab capture kit first:
 python .\soenc.py transport prepare-capture-corpus -o .\capture_kit --classification lab --capture-medium print-scan --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata printer=example-printer --capture-metadata scanner=example-flatbed --capture-metadata dpi=300
 ```
 
-This writes `capture_kit_manifest.json`, `capture_corpus.json`, generated pages under `exports/*/pages`, empty drop directories under `captures/*`, and `instructions/NEXT_STEPS.md`. The kit is a replay contract only. It is not certification evidence until real photos/scans are placed in the matching `captures/*` directories and `certify --capture-corpus-file ... --capture-corpus-only` produces a passing `transport_reliability_report.json`.
+This writes `capture_kit_manifest.json`, `capture_corpus.json`, generated pages under `exports/*/pages`, empty drop directories under `captures/*`, `instructions/NEXT_STEPS.md`, `instructions/operator_capture_metadata_manifest_template.json`, and `instructions/operator_return_manifest_template.json`. Fill the metadata template with the real session, operator, capture timestamp, and scanner/camera/printer values before passing it to `ingest-capture-corpus` or `certify-capture-evidence` with `--capture-metadata-manifest-file`. If the operator returns a ZIP, rename the return template to `operator_return_manifest.json` at the ZIP root so extraction can bind the return package to the prepared corpus SHA256 and, when filled, the kit-manifest SHA256. The template now includes a required `capture_file_inventory`; replace the placeholders with every returned scan/photo package path plus its SHA256 and byte size so extraction can reject missing, extra, or drifted capture files. The kit and templates are a replay contract only. They are not certification evidence until real photos/scans are placed in the matching `captures/*` directories or ingested from an external return folder and `certify --capture-corpus-file ... --capture-corpus-only` produces a passing `transport_reliability_report.json`.
 
 For real camera perspective-correction evidence, stage raw-photo directories up front:
 
@@ -161,7 +228,21 @@ If a lab team or operator hands back an external folder tree instead of filling 
 python .\soenc.py transport ingest-capture-corpus --capture-corpus-file .\capture_kit\capture_corpus.json --capture-root .\lab_scans --kit-manifest-file .\capture_kit\capture_kit_manifest.json --capture-medium print-scan --capture-metadata scanner=example-flatbed --capture-metadata dpi=300 --require-captures
 ```
 
-For real camera runs, add `--raw-capture-root .\raw_photos --require-raw-captures --classification real --capture-medium camera-photo`. `ingest-capture-corpus` writes `transport_capture_corpus_ingestion_report.json` (`enc2sop-transport-capture-corpus-ingestion-report/v1`), updates `capture_corpus.json` case `image_path` and `raw_image_paths`, records per-file SHA256/size bindings, and refreshes the kit manifest. It is still not recovery certification; run `attach-capture-corpus`, `validate-capture-corpus`, and the gated certification/archive/status chain next.
+For real camera runs, add `--raw-capture-root .\raw_photos --require-raw-captures --classification real --capture-medium camera-photo`. For multi-case lab returns, fill the generated `instructions\operator_capture_metadata_manifest_template.json` and pass it with `--capture-metadata-manifest-file` instead of repeating many `--capture-metadata` flags. The metadata manifest schema is `enc2sop-transport-capture-metadata-manifest/v1` and can contain `capture_metadata_defaults` plus per-case `cases[].label` and `cases[].capture_metadata`; ingestion fails closed on manifest labels that do not match the prepared corpus unless `--allow-unmatched-labels` is used. `ingest-capture-corpus` writes `transport_capture_corpus_ingestion_report.json` (`enc2sop-transport-capture-corpus-ingestion-report/v1`), updates `capture_corpus.json` case `image_path`, `raw_image_paths`, and `capture_metadata`, records per-file SHA256/size bindings, and refreshes the kit manifest. It is still not recovery certification; run `attach-capture-corpus`, `validate-capture-corpus`, and the gated certification/archive/status chain next.
+
+If the lab returns a ZIP package instead of an extracted folder tree, the one-command pipeline can safely extract it before ingestion. The ZIP should contain `captures/<case-label>/...`, optional `raw_captures/<case-label>/...` for camera evidence, optionally `operator_capture_metadata_manifest.json`, and preferably `operator_return_manifest.json` at the package root:
+
+```powershell
+python .\soenc.py transport package-capture-return --capture-corpus-file .\capture_kit\capture_corpus.json --capture-root .\lab_scans -o .\operator_return_pkg --kit-manifest-file .\capture_kit\capture_kit_manifest.json --capture-metadata-manifest-file .\operator_capture_metadata_manifest.json --return-session-id example-session-001 --operator example-operator --require-capture-provenance
+```
+
+This writes `operator_return.zip`, `operator_return_manifest.json`, `operator_capture_metadata_manifest.json`, and `transport_capture_return_package_report.json` (`enc2sop-transport-capture-return-package/v1`). It computes the exact inventory SHA256 and byte sizes from the files on disk, so operators do not need to hand-fill those values. For camera packages, add `--raw-capture-root .\raw_photos --require-raw-captures`. Add `--require-capture-provenance` for any lab/real handoff that will later support a print-scan or camera claim; package creation then fails closed unless the packaged metadata manifest provides session, operator, timestamp, and scanner/camera/printer identity for every case. Package creation is still handoff integrity evidence only; it does not certify print-scan, camera, or OCR-only support.
+
+```powershell
+python .\soenc.py transport certify-capture-evidence --capture-corpus-file .\capture_kit\capture_corpus.json --capture-return-package-file .\operator_return_pkg\operator_return.zip --capture-return-package-report-file .\operator_return_pkg\transport_capture_return_package_report.json -o .\capture_pipeline --kit-manifest-file .\capture_kit\capture_kit_manifest.json --profile reliable-airgap-v1 --backend sidecar --capture-medium print-scan --require-capture-return-manifest --require-capture-return-file-inventory --require-capture-return-package-report --require-capture-provenance --require-physical-print-scan --capture-required-classification lab --require-certified-claim physical-print-scan
+```
+
+This writes `return_package\transport_capture_return_package_extraction_report.json` with schema `enc2sop-transport-capture-return-package-extraction/v1`, rejects unsafe ZIP members, records extracted file SHA256 values, validates the optional `enc2sop-transport-capture-return-manifest/v1` corpus/kit bindings and case labels, and validates manifest-declared capture/raw file inventory when present or required. For launch/lab handoffs, add `--require-capture-return-manifest`, `--require-capture-return-file-inventory`, and `--require-capture-return-package-report` so ingestion does not start unless the ZIP contains a validated return manifest, exact image inventory, and a matching package-assembly report. A required inventory fails closed when a listed image is missing, its SHA256 or size differs from ZIP bytes, a listed path is outside the expected case directory, or the ZIP includes an unlisted capture image. ZIP extraction and return-manifest validation are handoff evidence only; they do not certify print-scan, camera, or OCR-only support without the later measured claim gates.
 
 After the operator places photos or scans into the `captures/*` directories, refresh the capture corpus attachment record before certification:
 

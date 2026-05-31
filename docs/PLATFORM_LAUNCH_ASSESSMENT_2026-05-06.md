@@ -545,6 +545,111 @@ Current go-live gate note (2026-05-07):
   - Evidence archives now include and schema-check `capture_perspective_correction_report` files when the corpus references one.
   - Local evidence `.tmp_transport_camera_correction_20260527/` proves the correction-prep contract on a fixture raw image only.
   - This is preparation and replay evidence only; real camera perspective-correction remains uncertified until actual raw photos plus corrected recovery images pass attach, validation, certification, archive verification, and `certification-status --require-certified-claim real-camera-perspective-correction`.
+- As of 2026-05-28 (iteration 187), `ENC-P0-019` adds automated operator return-package assembly:
+  - `soenc transport package-capture-return` writes `enc2sop-transport-capture-return-package/v1`, `operator_return.zip`, `operator_return_manifest.json`, and `operator_capture_metadata_manifest.json`.
+  - The command computes exact SHA256 and byte-size inventory for capture and optional raw-camera files from populated return folders, binds the prepared capture corpus SHA256, and optionally binds the capture kit manifest SHA256.
+  - The resulting ZIP is directly consumable by `soenc transport certify-capture-evidence --capture-return-package-file`, whose extraction step validates the same manifest/inventory before ingestion.
+  - Local evidence `.tmp_transport_package_return_20260528/` proves the package/ingest/certify/archive/verify/replay/status plumbing on fixture scan bytes only.
+  - This is handoff integrity evidence only; actual physical print-scan, real camera perspective-correction, and OCR-only transfer remain uncertified until real captures/backend reports pass the matching claim gates.
+- As of 2026-05-29 (iteration 188), `ENC-P0-019` tightens operator return-package provenance preflight:
+  - `soenc transport package-capture-return --require-capture-provenance` now fails before ZIP creation unless the packaged metadata manifest binds every lab/real case to session, operator, timestamp, and scanner/camera/printer identity.
+  - `enc2sop-transport-capture-return-package/v1` reports include per-case `capture_provenance_evidence` and summary provenance gate state.
+  - This catches incomplete physical/camera handoffs earlier, but still does not certify any medium without measured recovery, verified archive replay, and the matching certification-status claim gate.
+- As of 2026-05-29 (iteration 189), `ENC-P0-019` adds strict return-package extraction gates for launch/lab handoff evidence:
+  - `soenc transport certify-capture-evidence --capture-return-package-file` now supports `--require-capture-return-manifest`, `--require-capture-return-file-inventory`, and `--require-capture-return-package-report`.
+  - When enabled, extraction fails before ingestion unless the ZIP contains a validated `enc2sop-transport-capture-return-manifest/v1`, exact capture/raw image SHA256+byte-size inventory, and a matching `enc2sop-transport-capture-return-package/v1` package-assembly report.
+  - This tightens ZIP handoff integrity only; transport-medium readiness still requires measured recovery, archive verification/replay, and a passing certification-status claim gate.
+- As of 2026-05-29 (iteration 190), `ENC-P0-019` implements the first OCR-safe human-correctable transfer slice:
+  - `ocr-safe-human-correctable-v1` uses restricted alphabet `12356789OAEFHJKMNPRUVWXY` and records the payload alphabet profile in manifests/reports.
+  - Decode-time repair maps hard-safe OCR confusions, expands ambiguous glyphs into candidates, accepts only the unique line candidate whose line CRC passes, and emits unresolved/multi-pass records to `corrections_template.csv`.
+  - Parser hardening covers separator-like payload confusions such as `|` and `!` so they can resolve through CRC instead of failing as malformed separators.
+  - Local evidence `.tmp_transport_ocr_safe_20260529/` proves generated-page sidecar certification with the OCR-safe profile; `.tmp_transport_ocr_safe_confusion_20260529/` proves synthetic text-confusion recovery with final payload SHA256 parity.
+  - This is synthetic/generated evidence only. Real camera/photo, physical print-scan, and backend-specific OCR transfer remain uncertified until actual capture/backend evidence passes the matching archive replay and certification-status claim gates.
+- As of 2026-05-29 (iteration 191), `ENC-P0-019` adds a replayable OCR-safe correction report:
+  - `soenc transport replay-corrections` consumes a filled `corrections_template.csv`, applies rows through line CRC candidate resolution, writes `enc2sop-transport-ocr-correction-replay/v1`, and writes the recovered artifact only after final compressed/raw SHA256 verification passes and the correction replay is accepted with no invalid, unused, or still-required correction rows.
+  - Local evidence `.tmp_transport_ocr_correction_replay_20260529/transport_ocr_correction_replay_report.json` applied `1` filled correction row and verified final payload SHA256 parity.
+  - This is correction-replay evidence only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer without real capture/backend evidence.
+- As of 2026-05-29 (iteration 192), `ENC-P0-019` hardens OCR-safe correction replay against stale generated templates:
+  - Filled correction rows produced by `corrections_template.csv` now fail closed when their `raw_text`, `normalized_text`, `status`, or `actual_crc` fields no longer match the current unresolved OCR line.
+  - Local evidence `.tmp_transport_ocr_stale_correction_replay_20260529/transport_ocr_stale_correction_replay_report.json` rejected a stale row with `correction_normalized_text_mismatch`.
+  - This improves replayability and operator error detection only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30, `ENC-P0-019` hardens OCR-safe replay output materialization:
+  - `soenc transport replay-corrections -o ...` now suppresses recovered artifact writes unless the final payload SHA256 verifies and the correction replay is accepted with no invalid, unused, or still-required correction rows.
+  - Failed replay reports record `requested_output_file` and `output_suppressed_reason`, preserving auditability without materializing a payload from an unaccepted correction CSV.
+  - This is correction-replay integrity only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (malformed correction file hardening), `ENC-P0-019` preserves replay evidence for structurally invalid OCR-safe correction CSVs:
+  - `soenc transport replay-corrections` now catches malformed filled correction files such as missing `corrected_text` and writes the normal `enc2sop-transport-ocr-correction-replay/v1` schema with `success=false`, `correction_file_valid=false`, structured `correction_file_error`, correction-file SHA256/size, and `output_suppressed_reason=correction_file_invalid` when an output path was requested.
+  - Local evidence `.tmp_transport_ocr_malformed_correction_replay_20260530/transport_ocr_malformed_correction_replay_report.json` proves the malformed CSV path leaves replayable failure evidence and does not write recovered bytes.
+  - This is operator correction handoff integrity only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (synthetic OCR confusion report), `ENC-P0-019` makes OCR-safe synthetic confusion evidence first-class:
+  - `soenc transport certify-ocr-confusion` now writes `enc2sop-transport-ocr-safe-confusion-report/v1`.
+  - The report covers `6/G/g`, `9/g/q`, `2/7/Z/z`, `O/0/o/Q/D`, `1/I/i/l/L`, `5/S/s`, `8/B/b`, whitespace insertion, dash/noise insertion, and line-break drift.
+  - Local evidence `.tmp_transport_ocr_confusion_cert_20260530/synthetic_ocr_confusion_report.json` passed `24/24` deterministic synthetic confusion cases with final payload SHA256 verified for every case.
+  - This is synthetic text-confusion evidence only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (synthetic OCR confusion report verification), `ENC-P0-019` makes synthetic OCR-safe confusion evidence replay-verifiable:
+  - `soenc transport verify-ocr-confusion` now writes `enc2sop-transport-ocr-safe-confusion-report-verification/v1`.
+  - The verifier checks the saved synthetic report schema/profile/suite, required confusion-family coverage, payload and manifest SHA256 bindings, generated source-page text digests, mechanical mutation replay, per-case OCR text/analyze/recovered artifact digests, and recovered payload SHA256 parity.
+  - Local evidence `.tmp_transport_ocr_confusion_verify_20260530/synthetic_ocr_confusion_verification_report.json` verified the generated synthetic report with `payload_verified=true`, `manifest_verified=true`, `verified_case_output_count=24`, and `failure_count=0`.
+  - This proves replayable integrity for synthetic OCR-safe text-confusion evidence only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (synthetic OCR confusion mutation provenance replay), `ENC-P0-019` tightens synthetic OCR-safe evidence replay:
+  - `soenc transport certify-ocr-confusion` now records generated source-page text path/SHA256/size/line-count inventory in the synthetic report.
+  - `soenc transport verify-ocr-confusion` now mechanically replays every declared synthetic mutation from verified source-page lines and fails closed on mutation metadata drift, OCR input drift, missing source text, or source text digest drift.
+  - Local evidence `.tmp_transport_ocr_confusion_mutation_verify_20260530/synthetic_ocr_confusion_verification_report.json` verified `source_page_texts_verified=true`, `mutation_replay_verified_count=24`, `verified_case_output_count=24`, and `failure_count=0`.
+  - This proves mutation-source provenance for synthetic OCR-safe text-confusion evidence only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (synthetic OCR confusion exact-suite replay), `ENC-P0-019` tightens synthetic OCR-safe report completeness:
+  - `soenc transport certify-ocr-confusion` now records the canonical `required_confusion_cases[]` suite with case name, family, mutation kind, and target/replacement or insertion metadata.
+  - `soenc transport verify-ocr-confusion` now fails closed if a required synthetic case is missing, duplicated, unknown, or assigned to the wrong family, so family-level coverage cannot mask an omitted substitution.
+  - Local evidence `.tmp_transport_ocr_confusion_case_suite_verify_20260530/synthetic_ocr_confusion_verification_report.json` verified `payload_verified=true`, `manifest_verified=true`, `source_page_texts_verified=true`, `mutation_replay_verified_count=24`, `verified_case_output_count=24`, `failure_count=0`, and `24` required cases.
+  - This proves exact synthetic case-suite replayability only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (correction replay report verification), `ENC-P0-019` makes OCR-safe correction replay evidence independently replay-verifiable:
+  - `soenc transport verify-correction-replay` now writes `enc2sop-transport-ocr-correction-replay-verification/v1`.
+  - The verifier checks the saved correction replay report schema/profile, referenced manifest/OCR/correction files, correction CSV SHA256/size, re-executed correction replay outcome, final payload SHA256 state, and recovered-output or suppressed-output state.
+  - Local evidence `.tmp_transport_ocr_correction_verify_20260530/transport_ocr_correction_replay_verification_report.json` verified `manifest_verified=true`, `ocr_input_verified=true`, `corrections_file_verified=true`, `correction_replay_reexecuted=true`, `final_payload_sha256_verified=true`, `output_file_verified=true`, and `failure_count=0`.
+  - This proves correction-report replayability only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-30 (OCR-safe evidence archive verification), `ENC-P0-019` packages synthetic OCR-safe evidence for replay handoff:
+  - `soenc transport archive-ocr-safe-evidence` now writes `enc2sop-transport-ocr-safe-evidence-archive/v1` and embeds a manifest in the ZIP while optionally writing a matching external manifest.
+  - `soenc transport verify-ocr-safe-evidence-archive` now writes `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`, rejects unsafe/duplicate/missing ZIP members, checks embedded/external manifest parity, verifies SHA256/size inventory, and replays the embedded OCR-safe confusion and/or correction replay reports.
+  - Local evidence `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive_verification.json` verified a required synthetic confusion report archive with `verified_file_count=90`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This proves replayable archive integrity for synthetic OCR-safe text evidence only; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe source-report archive gate), `ENC-P0-019` adds a fail-closed pre-archive replay gate for OCR-safe handoff archives:
+  - `soenc transport archive-ocr-safe-evidence --require-source-report-verification` now reruns `verify-ocr-confusion` and/or `verify-correction-replay` before writing the ZIP and fails closed if any included source report is stale or non-replayable.
+  - Archive manifests record `source_verification_required=true` plus the successful verifier schema, source report SHA256, failure count, archive member path, SHA256, and size for each included report.
+  - `soenc transport verify-ocr-safe-evidence-archive --require-source-report-verification` now fails closed unless that pre-archive source-verification metadata exists, matches the archived report source SHA256, and is backed by the archived verifier JSON member.
+  - Local evidence `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive_verification.json` verified `source_report_verification_required_by_manifest=true`, `source_report_verification_count=1`, `verified_file_count=91`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe evidence handoff replayability only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe archive summary-role parity), `ENC-P0-019` tightens OCR-safe evidence archive summary integrity:
+  - `soenc transport verify-ocr-safe-evidence-archive` now recomputes file role counts from `manifest.files[]` and fails closed if `summary.roles` is missing, malformed, or drifts from the actual file inventory.
+  - Verification reports now expose `summary_roles_verified` and `verified_roles` so archive handoffs can prove the role-count summary is replayable, not merely descriptive.
+  - Local evidence `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive_verification.json` verified `verified_file_count=91`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe archive report-inventory parity), `ENC-P0-019` tightens OCR-safe evidence archive report summary integrity:
+  - `soenc transport archive-ocr-safe-evidence` now records `summary.report_roles` beside `summary.report_count`.
+  - `soenc transport verify-ocr-safe-evidence-archive` recomputes report counts from `manifest.reports[]` and fails closed if `summary.report_count` or `summary.report_roles` is missing, malformed, or drifted.
+  - Verification reports now expose `report_count`, `verified_report_count`, `summary_report_count_verified`, `summary_report_roles_verified`, and `verified_report_roles` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive_verification.json` verified `report_count=1`, `verified_report_count=1`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `verified_file_count=91`, `summary_roles_verified=true`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe archive file-inventory parity), `ENC-P0-019` tightens OCR-safe evidence archive file-count and byte-size summary integrity:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires `summary.file_count` and `summary.total_size_bytes` to be integer-typed, non-negative, and exactly replayed from `manifest.files[]` plus archive payload bytes.
+  - Verification reports now expose `verified_total_size_bytes`, `summary_file_count_verified`, and `summary_total_size_verified` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive_verification.json` verified `file_count=91`, `verified_file_count=91`, `verified_total_size_bytes=330676`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_roles_verified=true`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe archive manifest contract parity), `ENC-P0-019` tightens OCR-safe evidence archive manifest success and gate integrity:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires `manifest.success=true`, requires typed boolean archive parameter gates, and fails closed when a CLI-required confusion, correction-replay, or source-verification gate was not also required by the archived manifest.
+  - Verification reports now expose `archive_success_verified`, `archive_parameters_verified`, and `archive_parameter_gates` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive_verification.json` verified `archive_success_verified=true`, `archive_parameters_verified=true`, `archive_parameter_gates.require_confusion_report=true`, `archive_parameter_gates.require_source_report_verification=true`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive manifest replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe external-manifest envelope parity), `ENC-P0-019` tightens OCR-safe archive handoff integrity when an external manifest file is supplied:
+  - `soenc transport verify-ocr-safe-evidence-archive --manifest-file ...` now requires the external manifest to bind canonical archive SHA256, archive byte size, archive filename, manifest filename, and embedded-manifest SHA256 before reporting `external_manifest_verified=true`.
+  - Verification fails closed on missing, malformed, or drifted external envelope fields even when the embedded archive report still replays.
+  - Verification reports now expose `external_manifest_supplied`, `external_manifest_verified`, `archive_size_bytes`, `manifest_file`, and `embedded_manifest_sha256` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive_verification.json` verified `external_manifest_verified=true`, `archive_size_bytes=80729`, `embedded_manifest_sha256=e1fca8f2c05000c838bd6b2f173fff1254b10ecf370746b07d486047f267928b`, `verified_file_count=91`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe external-manifest replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe archived-report path binding), `ENC-P0-019` tightens OCR-safe archive replay integrity for embedded report paths:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires replay-critical paths inside archived OCR-safe reports to be safe archive-relative members before embedded report replay is accepted.
+  - Verification fails closed on absolute, traversal, unsafe, missing, or undeclared archived report paths instead of allowing verifier fallback to operator-local filesystem paths.
+  - Verification reports now expose `archived_report_paths_verified` and `archived_report_path_binding_count` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive_verification.json` verified `archived_report_paths_verified=true`, `archived_report_path_binding_count=89`, `verified_file_count=91`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archived-report replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
 - As of 2026-05-10 (iteration 22), `ENC-P0-016` adds fail-closed CI-context binding for archived promotion evidence:
   - `collect-promotion-evidence` now records `github_context` in `promotion_evidence.json`.
   - `soenc verify-promotion-artifacts` now supports `--require-ci-context-match` to enforce evidence/run identity consistency:

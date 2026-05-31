@@ -43,6 +43,7 @@ def _sidecar_candidate_payload(
     bit_count: int,
     payload_len: int,
     threshold: int,
+    payload_alphabet_profile: str = "safe-base32-v1",
 ):
     bits = []
     samples = []
@@ -69,7 +70,11 @@ def _sidecar_candidate_payload(
     if not samples:
         return "", (1.0, 0, 0)
 
-    payload = protocol.bits_to_safe_payload("".join(bits), payload_len)
+    payload = protocol.bits_to_payload_for_profile(
+        "".join(bits),
+        payload_len,
+        payload_alphabet_profile,
+    )
     if not payload:
         return "", (1.0, 0, 0)
 
@@ -181,6 +186,9 @@ def decode_sidecar_payload(
 
     gray = image.convert("L")
     expected_crc = str(line_meta.get("expected_crc", "")).strip().upper()
+    payload_alphabet_profile = str(
+        line_meta.get("payload_alphabet_profile") or "safe-base32-v1"
+    )
     try:
         chunk_idx = int(line_meta.get("chunk_index", -1))
     except Exception:
@@ -230,6 +238,7 @@ def decode_sidecar_payload(
                         bit_count=bit_count,
                         payload_len=payload_len,
                         threshold=threshold,
+                        payload_alphabet_profile=payload_alphabet_profile,
                     )
                     if not payload:
                         continue
@@ -304,6 +313,7 @@ def decode_manifest_guided_sidecar_payload(
     image,
     band: Dict[str, int],
     payload_len: int,
+    payload_alphabet_profile: str = "safe-base32-v1",
 ) -> str:
     if payload_len <= 0:
         return ""
@@ -366,7 +376,11 @@ def decode_manifest_guided_sidecar_payload(
             if contrast < 80:
                 continue
 
-            payload = protocol.bits_to_safe_payload("".join(bits), payload_len)
+            payload = protocol.bits_to_payload_for_profile(
+                "".join(bits),
+                payload_len,
+                payload_alphabet_profile,
+            )
             if not payload:
                 continue
             balance_penalty = abs(dark_ratio - 0.5)
@@ -408,6 +422,9 @@ def ocr_manifest_guided_page_sidecar(
             image=image,
             band=band,
             payload_len=payload_len,
+            payload_alphabet_profile=str(
+                manifest.get("payload_alphabet_profile") or "safe-base32-v1"
+            ),
         )
         if not payload:
             raise ValueError(
@@ -435,20 +452,63 @@ def choose_payload_candidate(
     expected_len: int,
     expected_crc: str,
     raw_texts: List[str],
+    payload_alphabet_profile: str = "safe-base32-v1",
 ) -> str:
     candidates = []
     seen = set()
+    profile = str(payload_alphabet_profile or "safe-base32-v1").strip().lower()
+    payload_alphabet = protocol.payload_alphabet_for_profile(profile)
 
     for raw in raw_texts:
-        normalized = protocol.normalize_payload(protocol.normalize_ocr_line(raw))
-        safe = "".join(ch for ch in normalized if ch in protocol.SAFE_BASE32_ALPHABET)
-        if not safe:
-            continue
+        raw_payloads = [str(raw or "")]
+        preserved = protocol.normalize_protocol_signature(
+            protocol.normalize_ocr_line_preserve_case(str(raw or ""))
+        )
+        for pattern in (
+            protocol.LINE_PATTERN,
+            protocol.LINE_PATTERN_NOCRC,
+            protocol.LINE_PATTERN_NOSEP,
+            protocol.LINE_PATTERN_NOSEP_NOCRC,
+            protocol.CHUNK_PATTERN,
+            protocol.CHUNK_PATTERN_NOCRC,
+            protocol.CHUNK_PATTERN_FALLBACK,
+            protocol.CHUNK_PATTERN_FALLBACK_NOCRC,
+            protocol.PAYLOAD_WITH_CRC_PATTERN,
+            protocol.PAYLOAD_WITH_CRC_FALLBACK_PATTERN,
+        ):
+            match = pattern.match(preserved)
+            if not match:
+                continue
+            for group in reversed(match.groups()):
+                if isinstance(group, str) and any(ch.isalpha() or ch.isdigit() for ch in group):
+                    raw_payloads.append(group)
+                    break
 
-        variants = [safe]
-        if expected_len > 0 and len(safe) > expected_len:
-            for start in range(0, len(safe) - expected_len + 1):
-                variants.append(safe[start : start + expected_len])
+        if profile == protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
+            variants = []
+            for raw_payload in raw_payloads:
+                candidate_info = protocol.ocr_safe_payload_candidates(raw_payload)
+                if candidate_info.get("unexpected_chars") or candidate_info.get(
+                    "candidate_limit_exceeded"
+                ):
+                    continue
+                for candidate in candidate_info.get("candidates", []) or []:
+                    candidate = str(candidate)
+                    if expected_len > 0 and len(candidate) > expected_len:
+                        for start in range(0, len(candidate) - expected_len + 1):
+                            variants.append(candidate[start : start + expected_len])
+                    else:
+                        variants.append(candidate)
+        else:
+            normalized = protocol.normalize_payload(protocol.normalize_ocr_line(raw))
+            safe = "".join(ch for ch in normalized if ch in payload_alphabet)
+            if not safe:
+                continue
+
+            variants = [safe]
+            if expected_len > 0 and len(safe) > expected_len:
+                for start in range(0, len(safe) - expected_len + 1):
+                    variants.append(safe[start : start + expected_len])
 
         for candidate in variants:
             if candidate in seen:
@@ -534,7 +594,6 @@ def ocr_structured_page_tesseract(
 
     image = image_module.open(str(image_path)).convert("L")
     data_lines = []
-    payload_whitelist = protocol.SAFE_BASE32_ALPHABET
     for item in raw_lines:
         if not isinstance(item, dict) or item.get("kind") != "data":
             continue
@@ -546,6 +605,10 @@ def ocr_structured_page_tesseract(
         except Exception:
             continue
         expected_crc = str(item.get("expected_crc", ""))
+        payload_alphabet_profile = str(
+            item.get("payload_alphabet_profile") or "safe-base32-v1"
+        )
+        payload_whitelist = protocol.payload_alphabet_for_profile(payload_alphabet_profile)
         payload_box = item.get("payload_box")
         line_box = item.get("line_box")
         payload = decode_sidecar_payload(
@@ -568,6 +631,7 @@ def ocr_structured_page_tesseract(
                 expected_len=payload_len,
                 expected_crc=expected_crc,
                 raw_texts=[payload_raw],
+                payload_alphabet_profile=payload_alphabet_profile,
             )
         if not payload and isinstance(line_box, list) and len(line_box) == 4:
             line_raw = transport._ocr_image_crop_tesseract(
@@ -583,6 +647,7 @@ def ocr_structured_page_tesseract(
                 expected_len=payload_len,
                 expected_crc=expected_crc,
                 raw_texts=[line_raw],
+                payload_alphabet_profile=payload_alphabet_profile,
             )
         if not payload and isinstance(payload_box, list) and len(payload_box) == 4:
             payload_raw_wide = transport._ocr_image_crop_tesseract(
@@ -603,6 +668,7 @@ def ocr_structured_page_tesseract(
                 expected_len=payload_len,
                 expected_crc=expected_crc,
                 raw_texts=[payload_raw_wide],
+                payload_alphabet_profile=payload_alphabet_profile,
             )
 
         data_lines.append(
@@ -645,6 +711,9 @@ def ocr_structured_page_easyocr(
             continue
 
         expected_crc = str(item.get("expected_crc", ""))
+        payload_alphabet_profile = str(
+            item.get("payload_alphabet_profile") or "safe-base32-v1"
+        )
         payload_box = item.get("payload_box")
         line_box = item.get("line_box")
         payload = decode_sidecar_payload(
@@ -668,6 +737,7 @@ def ocr_structured_page_easyocr(
                 expected_len=payload_len,
                 expected_crc=expected_crc,
                 raw_texts=[payload_raw],
+                payload_alphabet_profile=payload_alphabet_profile,
             )
         if not payload and isinstance(line_box, list) and len(line_box) == 4:
             line_raw = ocr_image_crop_easyocr(
@@ -684,6 +754,7 @@ def ocr_structured_page_easyocr(
                 expected_len=payload_len,
                 expected_crc=expected_crc,
                 raw_texts=[line_raw],
+                payload_alphabet_profile=payload_alphabet_profile,
             )
         if not payload and isinstance(payload_box, list) and len(payload_box) == 4:
             payload_raw_wide = ocr_image_crop_easyocr(
@@ -705,6 +776,7 @@ def ocr_structured_page_easyocr(
                 expected_len=payload_len,
                 expected_crc=expected_crc,
                 raw_texts=[payload_raw_wide],
+                payload_alphabet_profile=payload_alphabet_profile,
             )
 
         data_lines.append(

@@ -41,7 +41,11 @@ def load_font(size: int, image_font_module):
         return image_font_module.load_default()
 
 
-def _parse_render_data_line(text: str, fallback_line_no: int) -> Optional[Dict[str, object]]:
+def _parse_render_data_line(
+    text: str,
+    fallback_line_no: int,
+    payload_alphabet_profile: str = "safe-base32-v1",
+) -> Optional[Dict[str, object]]:
     if not text or text.startswith("@"):
         return None
 
@@ -88,7 +92,8 @@ def _parse_render_data_line(text: str, fallback_line_no: int) -> Optional[Dict[s
             "expected_crc": protocol.normalize_hex_token(str(payload_with_crc_fb.group(3))),
         }
 
-    if all(ch in protocol.SAFE_BASE32_ALPHABET for ch in text):
+    payload_alphabet = protocol.payload_alphabet_for_profile(payload_alphabet_profile)
+    if all(ch in payload_alphabet for ch in text):
         return {
             "mode": "payload",
             "page_no": 0,
@@ -98,6 +103,10 @@ def _parse_render_data_line(text: str, fallback_line_no: int) -> Optional[Dict[s
             "expected_crc": "",
         }
     return None
+
+
+def _payload_bits(payload: str, payload_alphabet_profile: str) -> str:
+    return protocol.payload_to_bits_for_profile(payload, payload_alphabet_profile)
 
 
 def render_page(
@@ -112,6 +121,7 @@ def render_page(
     font_fit_mode: str,
     line_separator: str,
     render_sidecar: bool,
+    payload_alphabet_profile: str = "safe-base32-v1",
     image_module,
     image_draw_module,
     image_font_module,
@@ -122,7 +132,13 @@ def render_page(
 
     parsed_render_lines: List[Optional[Dict[str, object]]] = []
     for idx, line in enumerate(lines, 1):
-        parsed_render_lines.append(_parse_render_data_line(line, idx))
+        parsed_render_lines.append(
+            _parse_render_data_line(
+                line,
+                idx,
+                payload_alphabet_profile=payload_alphabet_profile,
+            )
+        )
 
     data_lines = [line for idx, line in enumerate(lines) if parsed_render_lines[idx] is not None]
     control_lines = [line for idx, line in enumerate(lines) if parsed_render_lines[idx] is None]
@@ -226,7 +242,7 @@ def render_page(
                 prefix = ""
             prefix_bbox = draw.textbbox((x, y), prefix, font=line_font)
             payload_bbox = draw.textbbox((prefix_bbox[2], y), payload, font=line_font)
-            sidecar_bits = protocol.safe_payload_to_bits(payload)
+            sidecar_bits = _payload_bits(payload, payload_alphabet_profile)
             sidecar_rows = int(
                 math.ceil(float(len(sidecar_bits)) / float(protocol.SIDECAR_BITS_PER_ROW))
             )
@@ -273,6 +289,9 @@ def render_page(
                     "line_no": line_no,
                     "chunk_index": chunk_idx,
                     "payload_len": len(payload),
+                    "payload_alphabet_profile": str(
+                        payload_alphabet_profile or "safe-base32-v1"
+                    ),
                     "expected_crc": str(parsed_line.get("expected_crc", "")),
                     "font_size": int(data_font_size),
                     "bit_count": len(sidecar_bits),

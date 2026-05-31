@@ -3699,7 +3699,7 @@ Rationale:
 ### CARD `ENC-P0-019`
 
 - Status: `in_progress`
-- Goal: add distortion corpus and certification gates for realistic cross-medium transport degradation
+- Goal: add distortion/capture certification gates and an OCR-safe human-correctable transfer profile for realistic cross-medium transport degradation
 - Type: product reliability + acceptance testing
 - Depends on: `ENC-P0-017`
 - Product scope:
@@ -3710,14 +3710,39 @@ Rationale:
   - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`
 - Deliverables:
   - deterministic distortion suite for compression, resize, rotation, crop, blur, contrast, brightness, perspective, noise, screenshot-like degradation, and print-scan-like degradation
+  - `ocr-safe-human-correctable-v1` alphabet/profile support that avoids ambiguous glyphs at generation time instead of relying on OCR guesswork after the fact
+  - OCR/text normalization with hard-safe mappings, ambiguous candidate expansion, line-CRC candidate resolution, and full-payload SHA256 final validation
+  - operator correction template/report for lines that cannot be resolved uniquely by CRC
+  - synthetic OCR confusion suite that can exercise OCR-like substitutions without requiring real photos before feature development continues
   - report fields that bind distortion parameters to recovery outcomes
   - threshold checks for selected launch profiles
   - documented limits for generic OCR fallback
 - Acceptance:
   - certification can run a bounded local distortion suite deterministically
+  - `ocr-safe-human-correctable-v1` generation emits only the canonical safe alphabet and records that profile in manifests/reports
+  - OCR/text recovery normalizes safe confusions, explores ambiguous candidates, accepts only candidates that satisfy line CRC, and rejects or routes unresolved lines to a correction template
+  - synthetic OCR confusion tests cover the high-risk glyph families before real photos/scans are available
   - `transport_reliability_report.json` records per-distortion pass/fail and aggregate success rates
   - failures include enough detail to decide whether stronger FEC is required
   - generic OCR fallback is not treated as GA-ready unless measured thresholds pass.
+- Current core direction (2026-05-29):
+  - Real photos/scans are not a prerequisite for implementing the next feature slice. They are required only before the product can claim real camera/photo, physical print-scan, or backend-specific OCR production certification.
+  - Local implementation should continue or harden `ocr-safe-human-correctable-v1` when no actual capture corpus is available.
+  - Generation must use a restricted canonical alphabet so the renderer never emits most known-confusing glyphs. Proposed v1 alphabet:
+    - `12356789OAEFHJKMNPRUVWXY`
+    - excluded by default: `0`, `4`, `B`, `C`, `D`, `G`, `I`, `L`, `Q`, `S`, `T`, `Z`, and all lowercase letters.
+  - Decode-time normalization must be layered:
+    - hard-safe mappings where the canonical alphabet excludes the competing glyph: `0/o/O/Q/D -> O`, `I/i/l/L/|/! -> 1`, `S/s/$ -> 5`, `B/b -> 8`, `G -> 6`, `4 -> A`.
+    - ambiguous candidate mappings where one OCR shape can plausibly represent multiple canonical symbols: `g -> {6,9}`, `q -> {O,9}`, `Z/z -> {2,7}`. If `T` or `C` are ever reintroduced into a later alphabet profile, `T/7` and `C/G/6` must move into candidate resolution instead of hard replacement.
+    - all other unexpected glyphs must be reported, not silently dropped.
+  - Candidate resolution must be mechanical, not visual guessing:
+    - generate candidate normalized lines,
+    - accept a line only when exactly one candidate passes line CRC,
+    - emit all unresolved or multi-pass lines into a correction template,
+    - require final payload SHA256 before any recovery result is counted as success.
+  - Correction artifacts should be operator-friendly and replayable, for example `corrections_template.csv` with `page,line,raw_text,normalized_text,candidates,status,expected_crc,actual_crc,corrected_text`.
+  - Synthetic confusion tests should inject OCR-like substitutions such as `6/G/g`, `9/g/q`, `2/7/Z/z`, `O/0/o/Q/D`, `1/I/i/l/L`, `5/S/s`, `8/B/b`, whitespace insertion, dash/noise insertion, and line breaks. This proves the algorithmic repair loop without claiming real-camera readiness.
+  - Product claim boundary remains unchanged: passing synthetic confusion tests can make the feature usable and testable, but real photos/scans or real backend OCR corpora are still required before any real camera, physical print-scan, or backend-specific OCR claim is `production-certified`.
 - Notes (2026-05-25, iteration 156):
   - Added deterministic generated-page distortion support to `soenc transport certify` / `qrcode_helper.py certify`.
   - New CLI options:
@@ -4484,6 +4509,676 @@ Rationale:
     - run the one-command pipeline against actual physical print-scan captures with `--require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
     - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
     - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 182):
+  - Added a versioned operator capture metadata manifest for lab/real capture ingestion:
+    - schema: `enc2sop-transport-capture-metadata-manifest/v1`.
+    - CLI flag: `--capture-metadata-manifest-file` on `soenc transport ingest-capture-corpus` and `soenc transport certify-capture-evidence`.
+    - compatibility API parameters on `AirgapTransportLayer.ingest_capture_corpus(...)` and `certify_capture_evidence_pipeline(...)`.
+  - Behavior:
+    - the manifest can declare `capture_metadata_defaults` and per-case `cases[].capture_metadata` keyed by prepared corpus `label`.
+    - ingestion merges existing case metadata, manifest defaults, manifest per-case metadata, then CLI `--capture-metadata` overrides.
+    - ingestion reports and kit manifests record the metadata-manifest path/SHA256, per-case match state, matched/unmatched label counts, and fail closed with `unexpected_capture_metadata_manifest_labels` unless unmatched labels are explicitly allowed.
+  - Certification boundary:
+    - this removes manual JSON edits for real/lab provenance handoff and makes `--require-capture-provenance` easier to satisfy from an operator return package.
+    - it is still ingestion/provenance binding only; it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive replay, and certification-status claim gates.
+  - Verification:
+    - focused tests cover manifest merge order, unmatched manifest labels, CLI parser/command wiring, and one-command pipeline propagation.
+  - Remaining product scope:
+    - run the one-command pipeline against actual physical print-scan captures with `--capture-metadata-manifest-file --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --capture-metadata-manifest-file --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 183):
+  - Added a generated operator metadata-manifest template to prepared capture kits:
+    - `soenc transport prepare-capture-corpus` now writes `instructions/operator_capture_metadata_manifest_template.json` using schema `enc2sop-transport-capture-metadata-manifest/v1`.
+    - `capture_kit_manifest.json` records `capture_metadata_manifest_template_file`, `capture_metadata_manifest_template_sha256`, and summary `capture_metadata_manifest_template_ready=true`.
+    - the template includes one row per prepared case label plus fill-in provenance fields for session, operator, timestamp, and scanner/camera/printer metadata based on the declared medium.
+  - Certification boundary:
+    - the template is handoff/provenance input only; unchanged placeholders still fail the existing `--require-capture-provenance` gate.
+    - no physical print-scan, real-camera, or OCR-only claim is certified until real captures are ingested, recovered, archived, replayed, and passed through `certification-status --require-certified-claim`.
+  - Verification:
+    - focused prepare-kit/metadata-manifest tests cover template generation, schema, case-label parity, kit-manifest SHA256 binding, and CLI-visible paths.
+  - Remaining product scope:
+    - fill the generated template during an actual lab/scanner or camera run and execute `certify-capture-evidence --capture-metadata-manifest-file ...` with the intended medium claim gate.
+    - archive/verify/replay the resulting real measured evidence before updating any optional transport launch claim.
+- Notes (2026-05-28, iteration 184):
+  - Added safe operator/lab return ZIP ingestion for the one-command capture evidence pipeline:
+    - CLI flag: `soenc transport certify-capture-evidence --capture-return-package-file`.
+    - compatibility API parameter: `AirgapTransportLayer.certify_capture_evidence_pipeline(..., capture_return_package_file=...)`.
+    - extraction report schema: `enc2sop-transport-capture-return-package-extraction/v1`.
+  - Behavior:
+    - packages may contain `captures/<case-label>/...`, optional `raw_captures/<case-label>/...`, and an optional metadata manifest such as `operator_capture_metadata_manifest.json`.
+    - extraction fails closed on unsafe ZIP member paths, traversal, absolute paths, duplicate members, or symlink entries.
+    - extraction records package SHA256, extracted file SHA256/size values, discovered capture roots, raw roots, and metadata-manifest path, then feeds the existing ingestion/attachment/validation/certification/archive/replay/status chain.
+  - Certification boundary:
+    - ZIP extraction is handoff and hash-binding evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without the measured recovery report, archive replay, and `certification-status --require-certified-claim ...` gate for that exact claim.
+  - Verification:
+    - focused API and CLI tests cover successful return-package extraction through the full pipeline and fail-closed unsafe ZIP paths.
+    - parser/delegation tests cover the new CLI options and facade parameters.
+  - Remaining product scope:
+    - run the return-package path against actual physical print-scan captures with `--capture-return-package-file --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `raw_captures/`, `--require-raw-captures`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 185):
+  - Added an optional return-package identity manifest contract for lab/operator ZIP handoff:
+    - schema: `enc2sop-transport-capture-return-manifest/v1`.
+    - `soenc transport prepare-capture-corpus` now writes `instructions/operator_return_manifest_template.json` alongside the metadata template.
+    - `capture_kit_manifest.json` records `capture_return_manifest_template_file`, `capture_return_manifest_template_sha256`, and summary `capture_return_manifest_template_ready=true`.
+  - Behavior:
+    - operator/lab ZIP packages may include `operator_return_manifest.json`, `capture_return_manifest.json`, or `metadata/operator_return_manifest.json`.
+    - return-package extraction validates the manifest schema, required prepared `capture_corpus_sha256`, optional `capture_kit_manifest_sha256`, and unique known corpus case labels when present.
+    - `certify-capture-evidence` records `capture_return_manifest_file` and summary `capture_return_manifest_validated`; extraction fails closed before ingestion on corpus/kit digest mismatch.
+  - Certification boundary:
+    - return-manifest validation is package identity evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive replay, and `certification-status --require-certified-claim ...`.
+  - Local fixture evidence:
+    - `.tmp_transport_return_manifest_20260528_b\operator_return.zip` includes fixture captures, `operator_capture_metadata_manifest.json`, and `operator_return_manifest.json`.
+    - `.tmp_transport_return_manifest_20260528_b\pipeline\return_package\transport_capture_return_package_extraction_report.json` records `capture_return_manifest_validated=true`.
+    - `.tmp_transport_return_manifest_20260528_b\pipeline\transport_capture_certification_pipeline_report.json` completed `9/9` fixture steps, archive replay mismatch count `0`, and status claim gate passed for fixture `physical-print-scan`.
+    - this is fixture plumbing/identity evidence only, not real scanner/camera certification.
+  - Verification:
+    - focused tests cover return-template generation, successful return-package manifest validation, fail-closed corpus digest mismatch, and CLI-visible template paths.
+  - Remaining product scope:
+    - run the return-package path against actual physical print-scan captures with a filled `operator_return_manifest.json`, `--require-capture-provenance`, `--require-physical-print-scan`, and `--require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with `operator_return_manifest.json`, `raw_captures/`, `--require-raw-captures`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 186):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`).
+  - Goal: tighten lab/operator ZIP handoff evidence so a return package can prove exact capture-file inventory before ingestion, without broadening any transport certification claim.
+  - Added required per-file inventory support to `enc2sop-transport-capture-return-manifest/v1`:
+    - `soenc transport prepare-capture-corpus` now writes `capture_file_inventory.required=true` plus per-case `capture_files[]` placeholders in `instructions/operator_return_manifest_template.json`.
+    - raw-photo `raw_capture_files[]` placeholders are included only for cases that staged raw capture paths.
+    - return-package extraction validates listed capture/raw image package paths, expected case directories, supported image suffixes, SHA256, and byte size.
+    - when inventory is declared or required, extraction fails closed if the ZIP contains unlisted capture/raw image files.
+    - when inventory is required, extraction also fails closed if any listed image omits SHA256 or byte size.
+    - extraction reports now expose `capture_return_manifest_file_inventory_*` summary fields and a normalized `capture_return_manifest.file_inventory.files[]` record set.
+  - Certification boundary:
+    - file-inventory validation is handoff integrity evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive replay, and `certification-status --require-certified-claim ...`.
+  - Verification:
+    - focused return-package/prepare-kit tests cover successful SHA/size-bound inventory validation, fail-closed unlisted capture images, generated template inventory placeholders, and existing unsafe ZIP/corpus mismatch paths.
+    - syntax validation passed with `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py`.
+  - Remaining product scope:
+    - run the return-package path against actual physical print-scan captures with a filled `operator_return_manifest.json` containing exact file inventory, `--require-capture-provenance`, `--require-physical-print-scan`, and `--require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with exact `capture_files[]` and `raw_capture_files[]`, `--require-raw-captures`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 187):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` still reports an invalid keyring token for github.com account `saksim`).
+  - Goal: remove manual return-package inventory editing from the real/lab capture handoff while preserving strict extraction and certification boundaries.
+  - Added `soenc transport package-capture-return`:
+    - schema: `enc2sop-transport-capture-return-package/v1`.
+    - assembles `operator_return.zip` from a populated capture folder tree using the prepared corpus case labels.
+    - writes `operator_return_manifest.json` with schema `enc2sop-transport-capture-return-manifest/v1`.
+    - computes exact per-file SHA256 and byte size for `capture_files[]` and optional `raw_capture_files[]`.
+    - includes `operator_capture_metadata_manifest.json`, either from `--capture-metadata-manifest-file` or generated from repeated `--capture-metadata` values.
+    - supports optional raw-photo roots, kit-manifest SHA256 binding, return session/operator metadata, fail-closed missing-capture checks, and unmatched-label detection.
+  - Certification boundary:
+    - package assembly is handoff integrity evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without the existing `certify-capture-evidence` measurement, archive verification/replay, and `certification-status --require-certified-claim ...` gates.
+  - Local fixture evidence:
+    - `.tmp_transport_package_return_20260528\return_package\operator_return.zip`
+    - `.tmp_transport_package_return_20260528\return_package\operator_return_manifest.json`
+    - `.tmp_transport_package_return_20260528\return_package\transport_capture_return_package_report.json`
+    - `.tmp_transport_package_return_20260528\pipeline\transport_capture_certification_pipeline_report.json`
+    - fixture pipeline completed with return-package extraction, inventory validation, archive replay, and status claim gate for fixture `physical-print-scan`; this proves package/pipeline plumbing only, not real scanner/camera readiness.
+  - Verification:
+    - focused package-return tests cover API success through the pipeline, fail-closed missing captures, CLI ZIP creation, CLI parser visibility, facade delegation, and syntax compilation.
+  - Remaining product scope:
+    - run `package-capture-return` against actual physical print-scan captures and feed the ZIP into `certify-capture-evidence --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with `--raw-capture-root --require-raw-captures --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 188):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: catch incomplete lab/operator provenance at return-package assembly time, before ZIP handoff and before the longer certification pipeline starts.
+  - Added `--require-capture-provenance` to `soenc transport package-capture-return`:
+    - the API/CLI now evaluates the packaged `operator_capture_metadata_manifest.json` per prepared case.
+    - when required, package assembly fails before writing `operator_return.zip` unless each lab/real case has capture session, operator, timestamp, and scanner/camera/printer identity metadata.
+    - the `enc2sop-transport-capture-return-package/v1` report records `capture_provenance_evidence[]`, `summary.capture_provenance_required`, `summary.capture_provenance_passed`, and `summary.capture_provenance_evidence_count`.
+  - Certification boundary:
+    - this is earlier handoff/provenance validation only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without the existing measured recovery report, verified/replayed archive, and `certification-status --require-certified-claim ...` gate.
+  - Local fixture evidence:
+    - `.tmp_transport_package_provenance_20260529\return_package\transport_capture_return_package_report.json`
+    - `.tmp_transport_package_provenance_20260529\return_package\operator_return.zip`
+    - `.tmp_transport_package_provenance_20260529\pipeline\transport_capture_certification_pipeline_report.json`
+    - fixture package assembly passed with `capture_provenance_passed=true`; fixture pipeline completed with archive replay `mismatch_count=0`.
+    - this proves package-time provenance gating and replay plumbing only, not real scanner/camera readiness.
+  - Verification:
+    - focused package-return tests cover passing provenance, fail-closed missing provenance, CLI parser visibility, facade delegation, and CLI package creation with `--require-capture-provenance`.
+    - syntax validation passed for `enc2sop/transport/certify.py`, `enc2sop/transport/cli.py`, and `qrcode_helper.py`.
+    - full transport suite passed: `158 passed, 1 expected duplicate-ZIP-member warning`.
+    - promotion suite passed: `95 passed, 1 skipped`.
+    - mainline suite passed: `85 passed, 6 skipped`.
+  - Remaining product scope:
+    - run `package-capture-return --require-capture-provenance` against actual physical print-scan captures and feed the ZIP into `certify-capture-evidence --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with `--raw-capture-root --require-raw-captures --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 189):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make launch/lab ZIP handoff evidence fail closed before ingestion unless the package proves validated return identity, exact file inventory, and package-assembly provenance.
+  - Added strict non-default return-package extraction gates to `soenc transport certify-capture-evidence`:
+    - `--require-capture-return-manifest` requires a validated `enc2sop-transport-capture-return-manifest/v1` in the ZIP.
+    - `--require-capture-return-file-inventory` requires the return manifest to declare and validate exact capture/raw image SHA256 and byte-size inventory.
+    - `--require-capture-return-package-report` requires `--capture-return-package-report-file` and validates it against the ZIP, prepared corpus, kit manifest, metadata manifest, and return manifest.
+    - pipeline reports now expose the required/validated states for those gates in `parameters` and `summary`.
+  - Certification boundary:
+    - this is ZIP handoff integrity/provenance validation only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Local fixture evidence:
+    - focused tests require all three strict gates on a fixture package and verify the pipeline succeeds only when manifest, inventory, and package report all validate.
+    - negative tests prove ingestion is skipped when the package report is required but missing, or when the return manifest/inventory gates are required but missing.
+  - Verification:
+    - focused parser/API tests cover strict gate flags, success propagation, fail-closed missing report, and fail-closed missing return manifest/inventory.
+  - Remaining product scope:
+    - run `package-capture-return --require-capture-provenance` against actual physical print-scan captures and feed the ZIP into `certify-capture-evidence --capture-return-package-report-file ... --require-capture-return-manifest --require-capture-return-file-inventory --require-capture-return-package-report --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with strict return-package gates, `--require-raw-captures`, `--require-capture-provenance`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 190):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: implement and harden the `ocr-safe-human-correctable-v1` path so OCR/text recovery can move forward without waiting for real scans.
+  - Added restricted payload alphabet/profile support across generation, manifests, rendering, sidecar decode, parity, recovery, analysis, and CLI wiring:
+    - profile: `ocr-safe-human-correctable-v1`.
+    - canonical alphabet: `12356789OAEFHJKMNPRUVWXY`.
+    - manifests/reports record `payload_alphabet_profile` and `alphabet`.
+    - `export`, `estimate`, `certify`, and `prepare-capture-corpus` expose `--payload-alphabet-profile`.
+  - Added OCR-safe decode repair:
+    - hard-safe mappings include `0/o/O/Q/D -> O`, `I/i/l/L/|/! -> 1`, `S/s/$ -> 5`, `B/b -> 8`, `G -> 6`, and `4 -> A`.
+    - ambiguous mappings `g -> {6,9}`, `q -> {O,9}`, and `Z/z -> {2,7}` become candidates.
+    - parser accepts only the unique candidate whose reconstructed line passes line CRC.
+    - unexpected glyphs, missing line CRC, unresolved candidates, and multi-pass candidates emit correction records instead of being silently dropped.
+  - Added replayable correction artifact support:
+    - `analyze --emit-corrections-template` and `recover-images --emit-corrections-template` can write `corrections_template.csv`.
+    - CSV columns: `page,line,raw_text,normalized_text,candidates,status,expected_crc,actual_crc,corrected_text`.
+  - Hardened OCR-safe structured-line parsing so separator-like payload confusions such as `|` and `!` are handled through CRC candidate resolution instead of being rejected by separator regexes.
+  - Synthetic/local evidence:
+    - `.tmp_transport_ocr_safe_20260529/transport_reliability_report.json` passed generated-page sidecar certification with `payload_alphabet_profile=ocr-safe-human-correctable-v1`, profile `reliable-airgap-v1`, `1/1` cases passed, and `profile_certified=true`.
+    - `.tmp_transport_ocr_safe_confusion_20260529/synthetic_confusion_summary.json` passed synthetic OCR text repair with hard/ambiguous substitutions, whitespace/dash insertion, separator-like `|`/`!` substitutions, line-break drift, `correction_required_count=0`, and restored payload SHA256 parity.
+  - Verification:
+    - focused OCR-safe tests cover restricted alphabet roundtrip, high-risk confusion families, line-CRC resolution, separator-like `1` confusions, correction-template output, CLI visibility, facade delegation, and syntax compilation.
+    - split transport suite passed after the line-break drift parser hardening: `tests/test_transport_certify.py` => `88 passed, 1 expected duplicate-ZIP-member warning`; `tests/test_qrcode_helper_sidecar.py` => `36 passed`; `tests/test_transport_modules.py` => `41 passed, 13 subtests passed`.
+    - promotion suite passed: `95 passed, 1 skipped`.
+    - mainline suite passed: `85 passed, 6 skipped`.
+  - Certification boundary:
+    - this makes the OCR-safe profile usable/testable and gives synthetic repair evidence.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - harden operator UX around invalid/mismatched correction rows and extend persisted synthetic confusion/replay evidence where useful.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 191):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` still reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: close the operator replay gap for `ocr-safe-human-correctable-v1` by turning filled correction templates into replayable SHA-verified evidence.
+  - Added `soenc transport replay-corrections` and compatibility API `AirgapTransportLayer.replay_ocr_corrections(...)`:
+    - consumes a filled `corrections_template.csv` via `--apply-corrections-file`.
+    - requires `payload_alphabet_profile=ocr-safe-human-correctable-v1`.
+    - applies corrected rows through existing line-CRC candidate resolution.
+    - writes optional recovered output only after compressed/raw SHA256 and raw-size checks pass.
+    - writes report schema `enc2sop-transport-ocr-correction-replay/v1`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_correction_replay_20260529/transport_ocr_correction_replay_report.json`.
+    - result: filled correction replay applied `1` correction row, restored the payload, and set `final_payload_sha256_verified=true`.
+  - Verification:
+    - focused tests cover CLI visibility, direct API replay report/output, CLI report/output, compatibility facade delegation, and the existing correction-template/analyze path.
+  - Certification boundary:
+    - this makes filled correction templates replayable and auditable for synthetic/operator text correction.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - harden operator UX for invalid/mismatched correction rows and persist broader synthetic replay/confusion evidence where useful.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 192):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so stale generated correction templates cannot be silently applied to changed OCR text.
+  - Added stricter filled-row validation for generated `corrections_template.csv` rows:
+    - `_load_operator_corrections` now preserves optional `raw_text`, `normalized_text`, `status`, and `actual_crc` fields from the template.
+    - replay application fails closed with explicit invalid-row reasons when those fields no longer match the current unresolved OCR line.
+    - minimal hand-authored CSVs remain compatible because these fields are enforced only when present.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_stale_correction_replay_20260529/transport_ocr_stale_correction_replay_report.json`.
+    - result: a filled generated-template row with drifted `normalized_text` was rejected with `correction_normalized_text_mismatch`; recovery success remained false.
+  - Verification:
+    - focused OCR-safe correction tests passed, including stale `raw_text`, `normalized_text`, `status`, and `actual_crc` mismatch cases.
+  - Certification boundary:
+    - this improves correction-template replay integrity and operator error detection only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, iteration 193):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so extra filled operator CSV rows cannot be counted silently or leave operators without row-level diagnostics.
+  - Added unused filled-row provenance to correction replay:
+    - `_load_operator_corrections` now records SHA256 for every filled `corrected_text` value and preserves filled-row row/page/line/expected-CRC identity.
+    - `_correction_replay_summary` reports `unused_count` and `unused_sample` for filled CSV rows that were neither applied nor invalidated.
+    - `soenc transport replay-corrections` reports top-level `unused_filled_correction_rows_sample` and continues to keep replay `success=false` when unused filled rows remain, even if final payload SHA256 verification succeeds.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_unused_correction_replay_20260530_iter193/transport_ocr_unused_correction_replay_report.json`.
+    - result: payload bytes were restored and `final_payload_sha256_verified=true`, but replay stayed `success=false` because one filled correction row was unused; report included `unused_count=1` and row number/page/line/expected-CRC/corrected-text-SHA256 provenance.
+  - Verification:
+    - focused OCR-safe correction replay tests passed, including unused-row sample assertions.
+    - syntax validation passed for `enc2sop/transport/parser.py`, `enc2sop/transport/recover.py`, `enc2sop/transport/cli.py`, and `qrcode_helper.py`.
+  - Certification boundary:
+    - this improves operator correction replay auditability and fail-closed behavior only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, output materialization hardening):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so `-o/--output-file` cannot materialize recovered bytes from an unaccepted filled correction CSV, even when final payload SHA256 verification happens to pass.
+  - Added fail-closed replay output materialization:
+    - `soenc transport replay-corrections` now writes the recovered artifact only when overall replay `success=true`.
+    - If final payload SHA256 verifies but correction replay has invalid, unused, or still-required rows, the report keeps `success=false`, records `requested_output_file`, sets `output_file=null`, and records `output_suppressed_reason=correction_replay_not_accepted`.
+    - If final payload SHA256 does not verify and an output path was requested, the report records `output_suppressed_reason=final_payload_sha256_not_verified`.
+  - Verification scope:
+    - added focused regression coverage proving unused filled rows suppress output despite `final_payload_sha256_verified=true`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_output_suppression_20260530/transport_ocr_output_suppression_report.json`.
+    - result: final payload SHA256 verified, replay stayed `success=false` because one filled CSV correction row was unused, `output_file=null`, `output_suppressed_reason=correction_replay_not_accepted`, and the requested output artifact was not written.
+  - Certification boundary:
+    - this improves correction-replay integrity and operator handoff safety only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, malformed correction file hardening):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so structurally malformed operator CSVs leave replayable failure evidence and cannot materialize recovered bytes.
+  - Added schema-valid malformed correction-file failure reports:
+    - `soenc transport replay-corrections` catches `CorrectionFileError` before parsing recovery lines.
+    - failed reports still use schema `enc2sop-transport-ocr-correction-replay/v1`.
+    - reports include correction-file SHA256/size, `correction_file_valid=false`, structured `correction_file_error`, `correction_replay.invalid_sample`, `final_payload_sha256_verified=false`, and `output_suppressed_reason=correction_file_invalid` when `-o/--output-file` was requested.
+    - successful replay reports now explicitly include `correction_file_valid=true` and `correction_file_error=null`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_malformed_correction_replay_20260530/transport_ocr_malformed_correction_replay_report.json`.
+    - result: replay rejected a malformed correction CSV missing `corrected_text`, wrote the failed replay report, and did not create the requested output artifact.
+  - Verification:
+    - focused OCR-safe correction replay tests passed, including malformed CSV report/output suppression assertions.
+    - syntax validation passed for `enc2sop/transport/recover.py`, `enc2sop/transport/parser.py`, `enc2sop/transport/cli.py`, and `qrcode_helper.py` with redirected pycache.
+    - split transport module suite passed: `tests/test_transport_modules.py` => `49 passed, 17 subtests passed`.
+    - broader transport verification passed in split form: `tests/test_transport_certify.py` => `88 passed, 1 expected duplicate-ZIP-member warning`; `tests/test_qrcode_helper_sidecar.py` => `36 passed`.
+    - promotion suite passed: `95 passed, 1 skipped`.
+    - mainline suite passed: `85 passed, 6 skipped`.
+  - Certification boundary:
+    - this improves correction-file handoff replayability and fail-closed output behavior only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, synthetic OCR confusion certification report):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: turn the required `ocr-safe-human-correctable-v1` synthetic OCR confusion coverage into a first-class replayable report instead of relying only on unit-test behavior or ad hoc local JSON.
+  - Added `soenc transport certify-ocr-confusion`:
+    - writes schema `enc2sop-transport-ocr-safe-confusion-report/v1`.
+    - generates a deterministic OCR-safe payload with alphabet `12356789OAEFHJKMNPRUVWXY`.
+    - exports sidecar-free text pages by default, injects synthetic OCR confusions, runs `analyze` plus recovery for each case, and verifies final payload SHA256 for every passing case.
+    - covers `6/G/g`, `9/g/q`, `2/7/Z/z`, `O/0/o/Q/D`, `1/I/i/l/L`, `5/S/s`, `8/B/b`, whitespace insertion, dash/noise insertion, and line-break drift.
+    - records per-case mutation provenance, OCR input path, analyze report path, recovered output path, warning reasons, and final SHA verification state.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_cert_20260530/synthetic_ocr_confusion_report.json`.
+    - result: `24/24` synthetic confusion cases passed, `missing_confusion_families=[]`, final payload SHA256 verified for every case, payload SHA256 `587f36636a80662fac4ea439d8369fe1a1fd59a7e5e70a99a98162d6d5eed547`.
+  - Verification:
+    - focused command/report tests passed for parser surface, direct API report generation, CLI report generation, and qrcode_helper delegation.
+    - manual CLI evidence generation passed with `python .\soenc.py transport certify-ocr-confusion -o .tmp_transport_ocr_confusion_cert_20260530 --payload-size 256 --seed 20260530`.
+  - Certification boundary:
+    - this is synthetic text-confusion certification for the OCR-safe profile only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep any additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, synthetic OCR confusion report verification):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make the first-class `ocr-safe-human-correctable-v1` synthetic confusion report independently replay-verifiable before launch/audit handoff.
+  - Added `soenc transport verify-ocr-confusion`:
+    - writes schema `enc2sop-transport-ocr-safe-confusion-report-verification/v1`.
+    - verifies the saved synthetic confusion report schema, suite, payload alphabet profile, alphabet, and required confusion-family coverage.
+    - verifies payload file SHA256/size, manifest SHA256 and selected manifest/report field parity, per-case OCR text/analyze/recovered artifact SHA256/size values, analyze report success/count parity, and recovered payload SHA256 parity for every successful case.
+    - fails closed on tampered recovered output, missing artifacts, schema/profile drift, missing required confusion families, or failed source report state unless `--allow-failed-report` is explicitly used.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_verify_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_confusion_verify_20260530/synthetic_ocr_confusion_verification_report.json`.
+    - result: verification succeeded with `payload_verified=true`, `manifest_verified=true`, `verified_case_output_count=24`, `failure_count=0`, and all required confusion families covered.
+  - Verification:
+    - focused verifier tests passed for parser surface, direct report verification, CLI verification, qrcode_helper delegation, and tamper failure detection.
+    - manual CLI evidence generation passed with `python .\soenc.py transport certify-ocr-confusion -o .tmp_transport_ocr_confusion_verify_20260530 --report-file .tmp_transport_ocr_confusion_verify_20260530\synthetic_ocr_confusion_report.json --payload-size 256 --seed 20260530`.
+    - manual CLI verification passed with `python .\soenc.py transport verify-ocr-confusion --report-file .tmp_transport_ocr_confusion_verify_20260530\synthetic_ocr_confusion_report.json --output-file .tmp_transport_ocr_confusion_verify_20260530\synthetic_ocr_confusion_verification_report.json`.
+  - Certification boundary:
+    - this proves replayable integrity for synthetic OCR-safe text-confusion evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, synthetic OCR confusion mutation provenance replay):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` synthetic confusion evidence so verification proves each reported confusion was mechanically injected from the generated source-page text, not only that the final recovered payload matches.
+  - Updated `soenc transport certify-ocr-confusion`:
+    - records source generated page-text inventory in the report (`source_page_text_count`, `source_page_texts[]`) with path, SHA256, byte size, and line count.
+    - writes synthetic OCR input bytes with deterministic LF newlines so saved OCR input digests are stable across Windows/Linux verification.
+  - Updated `soenc transport verify-ocr-confusion`:
+    - verifies source page-text SHA256/size/line-count records before case replay.
+    - mechanically replays the declared synthetic mutation for every case from the verified source lines.
+    - fails closed on mutation metadata drift, OCR input drift, missing source text, or source text digest drift.
+    - reports `source_page_texts_verified` and `mutation_replay_verified_count`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_mutation_verify_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_confusion_mutation_verify_20260530/synthetic_ocr_confusion_verification_report.json`.
+    - result: verification succeeded with `payload_verified=true`, `manifest_verified=true`, `source_page_texts_verified=true`, `mutation_replay_verified_count=24`, `verified_case_output_count=24`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_confusion"` => `7 passed, 51 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py tests/test_transport_certify.py -k "ocr_safe_confusion or replay_corrections or ocr_safe"` => `20 passed, 126 deselected, 17 subtests passed`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI evidence generation and verification passed with the `.tmp_transport_ocr_confusion_mutation_verify_20260530` artifacts above.
+  - Certification boundary:
+    - this proves replayable mutation provenance for synthetic OCR-safe text-confusion evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, synthetic OCR confusion exact-suite replay):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` synthetic confusion evidence so family-level coverage cannot hide an omitted or drifted required substitution case.
+  - Updated `soenc transport certify-ocr-confusion`:
+    - records canonical `required_confusion_cases[]` entries with case name, family, mutation kind, and target/replacement or insertion metadata.
+  - Updated `soenc transport verify-ocr-confusion`:
+    - verifies the exact required case-suite contract before accepting a report.
+    - fails closed when a required case is missing, duplicated, unknown, or assigned to the wrong family.
+    - still verifies payload/manifest/source text digests, mechanical mutation replay, per-case artifacts, and recovered payload SHA256 parity.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_case_suite_verify_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_confusion_case_suite_verify_20260530/synthetic_ocr_confusion_verification_report.json`.
+    - result: verification succeeded with `payload_verified=true`, `manifest_verified=true`, `source_page_texts_verified=true`, `mutation_replay_verified_count=24`, `verified_case_output_count=24`, `failure_count=0`, and `24` required cases.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_confusion"` => `8 passed, 51 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "requires_exact_case_suite or verification_checks_artifacts"` => `2 passed, 57 deselected`.
+    - manual CLI evidence generation and verification passed with the `.tmp_transport_ocr_confusion_case_suite_verify_20260530` artifacts above.
+  - Certification boundary:
+    - this proves exact synthetic case-suite replayability for OCR-safe text-confusion evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, correction replay report verification):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay evidence so a saved `enc2sop-transport-ocr-correction-replay/v1` report can be independently rechecked before launch/audit handoff.
+  - Added `soenc transport verify-correction-replay`:
+    - writes schema `enc2sop-transport-ocr-correction-replay-verification/v1`.
+    - verifies the saved replay report schema/profile/alphabet, referenced manifest/OCR/correction files, correction CSV SHA256/size, re-executed correction replay summary, final payload SHA256 state, and recovered-output or suppressed-output state.
+    - supports `--allow-failed-report` for replayable failure reports while failing closed by default when the source replay report is not successful.
+  - Added compatibility API `AirgapTransportLayer.verify_ocr_correction_replay_report(...)` and focused CLI/parser/delegation/report/tamper tests.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_correction_verify_20260530/transport_ocr_correction_replay_report.json`.
+    - `.tmp_transport_ocr_correction_verify_20260530/transport_ocr_correction_replay_verification_report.json`.
+    - result: verification succeeded with `manifest_verified=true`, `ocr_input_verified=true`, `corrections_file_verified=true`, `correction_replay_reexecuted=true`, `final_payload_sha256_verified=true`, `output_file_verified=true`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_replay_corrections or verify_correction_replay or replay_corrections"` => `12 passed, 51 deselected, 4 subtests passed`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe"` => `23 passed, 40 deselected, 17 subtests passed`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI replay and verification passed with the `.tmp_transport_ocr_correction_verify_20260530` artifacts above.
+    - `python -m pytest -q tests/test_transport_certify.py -k "ocr_safe or certification_status"` printed `6 passed, 82 deselected` after `494.84s`, but the shell wrapper timed out after output completion, so it is recorded as non-clean wrapper evidence.
+  - Certification boundary:
+    - this proves correction-replay report integrity for OCR-safe synthetic/operator text correction only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, OCR-safe evidence archive verification):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: package `ocr-safe-human-correctable-v1` synthetic confusion and correction replay evidence into a replayable handoff archive that can be independently verified before launch/audit review.
+  - Added `soenc transport archive-ocr-safe-evidence`:
+    - writes schema `enc2sop-transport-ocr-safe-evidence-archive/v1`.
+    - includes a required embedded `ocr_safe_evidence_archive_manifest.json` and optional external manifest.
+    - supports `--confusion-report-file`, `--correction-replay-report-file`, `--require-confusion-report`, and `--require-correction-replay-report`.
+    - rewrites included report paths to archive-relative paths and packages referenced payload, manifest, OCR text, correction CSV, output, source-page text, and case artifact files with SHA256/size inventory.
+  - Added `soenc transport verify-ocr-safe-evidence-archive`:
+    - writes schema `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - verifies ZIP member safety, duplicate/extra/missing members, embedded/external manifest parity, archive SHA256, per-file SHA256/size inventory, and required report presence.
+    - extracts archived bytes to a temporary replay root and reruns `verify-ocr-confusion` and/or `verify-correction-replay` against the embedded, archive-relative reports.
+  - Added compatibility APIs `AirgapTransportLayer.archive_ocr_safe_evidence(...)` and `AirgapTransportLayer.verify_ocr_safe_evidence_archive(...)`, plus focused CLI/parser/delegation/archive/tamper tests.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_archive_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive_verification.json`.
+    - result: `soenc transport certify-ocr-confusion` passed `24/24` deterministic synthetic confusion cases; `archive-ocr-safe-evidence --require-confusion-report` produced a `90`-file archive with SHA256 `9d16a121deff171f9060a66d2042dab741c5e07d73fc727a2724a9a7746509d3`; `verify-ocr-safe-evidence-archive --require-confusion-report` succeeded with `confusion_report_verified=true`, `verified_file_count=90`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive or qrcode_helper_ocr_safe_archive or cli_aliases"` => `5 passed, 62 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe"` printed `27 passed, 40 deselected, 17 subtests passed` after `241.78s`, but the shell wrapper timed out after output completion, so it is recorded as non-clean wrapper evidence.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI certification, archive creation, and archive verification passed with the `.tmp_transport_ocr_safe_archive_20260530` artifacts above.
+  - Certification boundary:
+    - this proves replayable archive integrity for synthetic OCR-safe text-confusion and correction-replay evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe source-report archive gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no usable token-backed execution is available).
+  - Goal: make OCR-safe evidence archives fail closed before packaging when an included synthetic confusion or correction replay source report is stale/non-replayable.
+  - Added `--require-source-report-verification` to `soenc transport archive-ocr-safe-evidence`:
+    - reruns `verify-ocr-confusion` for included synthetic confusion reports and `verify-correction-replay` for included correction replay reports before ZIP creation.
+    - fails before writing the archive if any source report verification fails.
+    - records `source_verification_required=true` plus verifier schema, source report SHA256, success, and failure count in the archive manifest for each included report.
+  - Added `--require-source-report-verification` to `soenc transport verify-ocr-safe-evidence-archive`:
+    - fails closed unless the archive manifest records successful pre-archive source-report verification metadata.
+    - checks the recorded source-verification report SHA256 against the source report SHA256 recorded in the archive manifest.
+  - Updated compatibility APIs, CLI wiring, parser/delegation/archive tests, QRCODE_AIRGAP_MANUAL.md, USAGE_MANUAL.md, the product roadmap, platform assessment, and the next-iteration handoff.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verify_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verify_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verify_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verify_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: source-report verification was required before archive creation, the manifest recorded `source_verification.success=true` and `failure_count=0`, and archive verification succeeded with `source_report_verification_required_by_manifest=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `verified_file_count=90`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive or cli_aliases"` => `9 passed, 62 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_source_verify_20260531` artifacts above.
+  - Certification boundary:
+    - this proves pre-archive replay binding and archive replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archived source-verifier binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make `--require-source-report-verification` evidence replayable from the OCR-safe archive itself, not only summarized in archive manifest metadata.
+  - Hardened `soenc transport archive-ocr-safe-evidence --require-source-report-verification`:
+    - includes the full `verify-ocr-confusion` or `verify-correction-replay` JSON result as an archive member.
+    - records source-verification archive path, SHA256, and byte size in each archive manifest report entry.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive --require-source-report-verification`:
+    - fails closed unless the source-verification archive member exists.
+    - checks source-verification member SHA256/size against both manifest report metadata and manifest file inventory.
+    - parses the archived verifier JSON and checks schema, success, failure count, and source report SHA256 parity.
+  - Added focused regression coverage:
+    - source-verification report is archived and digest-bound.
+    - archive verification fails when the source-verification member is missing.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive manifest includes `synthetic_ocr_confusion_source_verification.json` as role `ocr_safe_confusion_source_verification_report`; archive verification succeeded with `verified_file_count=91`, `source_report_verification_required_by_manifest=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `10 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_source_verify_archive_20260531` artifacts above.
+  - Certification boundary:
+    - this proves archived source-verifier replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive summary-role parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive summary metadata replayable by binding `summary.roles` to the actual manifest file inventory.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - recomputes file-role counts from `manifest.files[]`.
+    - fails closed with `summary_roles_missing_or_invalid`, `summary_role_count_invalid`, or `summary_roles_mismatch` when `summary.roles` is absent, malformed, or drifts from the file inventory.
+    - emits `summary_roles_verified` and `verified_roles` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only the embedded manifest `summary.roles` count changed fails verification while the embedded report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `verified_file_count=91`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `66ebb112523d6cb937ec8f424c44585c753396df20ad3d579331f16013b623dc`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `11 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - `python -m pytest -q tests/test_transport_modules.py` => `74 passed, 17 subtests passed`.
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `python -m pytest -q tests/test_transport_certify.py` => `88 passed, 1 expected duplicate-ZIP-member warning`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_summary_roles_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive summary-role replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive report-inventory parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive report summary metadata replayable by binding `summary.report_count` and `summary.report_roles` to the actual `reports[]` inventory.
+  - Hardened `soenc transport archive-ocr-safe-evidence`:
+    - writes `summary.report_roles` beside existing `summary.report_count`.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - recomputes report counts from `manifest.reports[]`.
+    - fails closed with `summary_report_count_missing_or_invalid`, `summary_report_count_mismatch`, `summary_report_roles_missing_or_invalid`, `summary_report_role_count_invalid`, or `summary_report_roles_mismatch` when summary report metadata is absent, malformed, or drifted.
+    - emits `report_count`, `verified_report_count`, `summary_report_count_verified`, `summary_report_roles_verified`, and `verified_report_roles` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only embedded manifest `summary.report_count` and `summary.report_roles` changed fails verification while the embedded synthetic report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_roles_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `report_count=1`, `verified_report_count=1`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `verified_file_count=91`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `d3b01b7218a3e885ddb9294ba7e82a3649553a907eaa4b469903718f606ab987`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `12 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - `python -m pytest -q tests/test_transport_modules.py` => `75 passed, 17 subtests passed`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_report_roles_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive report-inventory summary replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive file-inventory parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive file summary metadata replayable by binding `summary.file_count` and `summary.total_size_bytes` to the actual `files[]` inventory and archived bytes.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires `summary.file_count` to be integer-typed, non-negative, and equal `len(manifest.files)`.
+    - requires `summary.total_size_bytes` to be integer-typed, non-negative, and equal the sum of verified archived member byte sizes.
+    - fails closed with `summary_file_count_missing_or_invalid`, `summary_file_count_mismatch`, `summary_total_size_missing_or_invalid`, or `summary_total_size_mismatch` when summary file metadata is absent, malformed, or drifted.
+    - emits `verified_total_size_bytes`, `summary_file_count_verified`, and `summary_total_size_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only embedded manifest `summary.file_count` and `summary.total_size_bytes` changed fails verification while the embedded synthetic report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `file_count=91`, `verified_file_count=91`, `verified_total_size_bytes=330676`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_roles_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `e09197f85ae58ac068ee8d33ed53804ca2b6dccf7c18f83d9be9d0ce51822935`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `13 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_file_inventory_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive file-inventory summary replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive manifest-contract parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive manifest success and parameter gates replayable so a verifier-required confusion, correction-replay, or source-verification gate cannot be silently weakened in the archived manifest while embedded reports still replay.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires `manifest.success=true`.
+    - requires `parameters.require_confusion_report`, `parameters.require_correction_replay_report`, and `parameters.require_source_report_verification` to be typed booleans.
+    - fails closed with `confusion_report_not_required_by_archive`, `correction_replay_report_not_required_by_archive`, or `source_report_verification_not_required_by_archive` when the verifier CLI requires a gate that the archived manifest did not require at packaging time.
+    - emits `archive_success_verified`, `archive_parameters_verified`, and `archive_parameter_gates` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive whose embedded manifest changes `success`, weakens a required report gate into a non-boolean value, or removes source-verification requirement fails verification even though the embedded synthetic report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_success_verified=true`, `archive_parameters_verified=true`, `archive_parameter_gates={"require_confusion_report": true, "require_correction_replay_report": false, "require_source_report_verification": true}`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `f7f03ae4c847f242fc2d25186734e58edeb3530eadce63e1b3d778098a090911`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `14 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_manifest_contract_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive manifest success/parameter replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe external-manifest envelope parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive external manifest handoffs fail closed on envelope drift, so an out-of-ZIP manifest cannot point at the wrong archive/manifest pair while embedded OCR-safe reports still replay.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive --manifest-file ...`:
+    - requires canonical external `archive_sha256` and parity with the verified ZIP bytes.
+    - requires integer/non-negative external `archive_size_bytes` and parity with the verified ZIP byte size.
+    - requires external `archive_file` basename parity with the supplied archive path.
+    - requires external `manifest_file` basename parity with the supplied manifest path.
+    - requires canonical external `embedded_manifest_sha256` and parity with the embedded manifest member bytes.
+    - marks `external_manifest_verified=false` on any external envelope or embedded/external body-parity drift, while still reporting embedded report replay results separately.
+    - emits `external_manifest_supplied`, `external_manifest_verified`, `archive_size_bytes`, `manifest_file`, and `embedded_manifest_sha256` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving a tampered external manifest with drifted archive SHA, archive size, archive filename, manifest filename, and missing embedded-manifest SHA fails verification while the embedded synthetic confusion report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `external_manifest_supplied=true`, `external_manifest_verified=true`, `archive_size_bytes=80729`, `embedded_manifest_sha256=e1fca8f2c05000c838bd6b2f173fff1254b10ecf370746b07d486047f267928b`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `bf8c1f93c533f415c54a9d34279287f6e8985a04033b5a3c37156337f19ac9b9`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "external_manifest_envelope_drift or ocr_safe_archive"` => `15 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_external_manifest_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe external-manifest envelope replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archived-report path binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive replay fail closed when an embedded report still points at operator-local absolute paths or unsafe paths instead of declared archive members.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - checks replay-critical paths inside archived `synthetic_ocr_confusion_report.json` and `transport_ocr_correction_replay_report.json` before embedded report replay.
+    - requires archived report paths for payload, manifest, OCR input, analyze report, recovered output, source-page text, correction CSV, and recovered correction output to be safe archive-relative members when those artifacts are replay-critical.
+    - fails closed with `archived_report_path_not_archive_relative`, `archived_report_path_missing`, or `archived_report_path_member_missing` instead of letting report verification fall back to the local filesystem.
+    - emits `archived_report_paths_verified` and `archived_report_path_binding_count` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving a tampered archive whose embedded report paths are changed back to absolute local paths fails verification even after the archive manifest digests are updated to match the tampered report bytes.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archived_report_paths_verified=true`, `archived_report_path_binding_count=89`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `b0fe04b90136c8fd3ca0b1b3872e8dce3d668079e68d7a14d0562cb327a2d1c2`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `16 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_archive_paths_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archived-report path replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
 
 ### CARD `ENC-P0-013`
 

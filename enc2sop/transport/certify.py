@@ -36,6 +36,11 @@ CAPTURE_CORPUS_INGESTION_REPORT_SCHEMA = (
     "enc2sop-transport-capture-corpus-ingestion-report/v1"
 )
 CAPTURE_METADATA_MANIFEST_SCHEMA = "enc2sop-transport-capture-metadata-manifest/v1"
+CAPTURE_RETURN_PACKAGE_EXTRACTION_SCHEMA = (
+    "enc2sop-transport-capture-return-package-extraction/v1"
+)
+CAPTURE_RETURN_PACKAGE_SCHEMA = "enc2sop-transport-capture-return-package/v1"
+CAPTURE_RETURN_MANIFEST_SCHEMA = "enc2sop-transport-capture-return-manifest/v1"
 DEFAULT_PAYLOAD_SIZES = [128, 4096]
 DIGITAL_SIDECAR_PROFILE = "digital-sidecar-v1"
 RELIABLE_AIRGAP_PROFILE = "reliable-airgap-v1"
@@ -55,6 +60,21 @@ SUPPORTED_CAPTURE_MEDIA = ["unspecified", "camera-photo", "print-scan", "mixed"]
 SUPPORTED_CERTIFICATION_BACKENDS = ["sidecar", "auto", "tesseract", "easyocr", "external"]
 OCR_ONLY_CERTIFICATION_BACKENDS = ["tesseract", "easyocr", "external"]
 CAPTURE_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+CAPTURE_RETURN_METADATA_MANIFEST_CANDIDATES = [
+    "operator_capture_metadata_manifest.json",
+    "capture_metadata_manifest.json",
+    "capture_metadata.json",
+    "metadata/operator_capture_metadata_manifest.json",
+    "metadata/capture_metadata_manifest.json",
+    "instructions/operator_capture_metadata_manifest_template.json",
+]
+CAPTURE_RETURN_MANIFEST_CANDIDATES = [
+    "operator_return_manifest.json",
+    "capture_return_manifest.json",
+    "return_manifest.json",
+    "metadata/operator_return_manifest.json",
+    "metadata/capture_return_manifest.json",
+]
 OCR_ONLY_KIT_PROFILE = "ocr-only-backend-v1"
 SUPPORTED_PERSPECTIVE_CORRECTION_MODES = ["copy", "normalize", "four-point"]
 CAPTURE_PROVENANCE_SESSION_KEYS = (
@@ -1519,6 +1539,31 @@ def _capture_provenance_evidence(
     }
 
 
+def _capture_metadata_manifest_template_defaults(
+    capture_metadata: Dict[str, object],
+    capture_medium: str,
+) -> Dict[str, object]:
+    defaults = dict(capture_metadata or {})
+    medium_value = _normalize_capture_medium(capture_medium)
+    if medium_value != "unspecified":
+        defaults.setdefault("capture_medium", medium_value)
+    defaults.setdefault("capture_session_id", "")
+    defaults.setdefault("operator", "")
+    defaults.setdefault("captured_at_utc", "")
+    if medium_value in ("print-scan", "mixed"):
+        defaults.setdefault("printer", "")
+        defaults.setdefault("scanner", "")
+        defaults.setdefault("dpi", "")
+        if "scanner" not in capture_metadata:
+            defaults.setdefault("scanner_model", "")
+        if "printer" not in capture_metadata:
+            defaults.setdefault("printer_model", "")
+    if medium_value in ("camera-photo", "mixed"):
+        defaults.setdefault("camera", "")
+        defaults.setdefault("camera_model", "")
+    return defaults
+
+
 def _capture_physical_print_scan_evidence(
     classification: str,
     capture_medium: str,
@@ -1750,6 +1795,951 @@ def _capture_subdir_names(label: str, suffixes: Iterable[str] = ()) -> Set[str]:
         names.add("{}{}".format(label, suffix_text))
         names.add("{}{}".format(slug, suffix_text))
     return names
+
+
+def _safe_join_under(base_dir: Path, relative_name: str) -> Optional[Path]:
+    target = (base_dir / relative_name).resolve()
+    try:
+        target.relative_to(base_dir.resolve())
+    except ValueError:
+        return None
+    return target
+
+
+def _is_sha256_hex(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
+
+
+def _safe_extract_capture_return_package(
+    *,
+    package_file: str,
+    output_dir: Path,
+    expected_capture_corpus_file: Optional[str] = None,
+    expected_kit_manifest_file: Optional[str] = None,
+    expected_capture_return_package_report_file: Optional[str] = None,
+    require_capture_return_manifest: bool = False,
+    require_capture_return_file_inventory: bool = False,
+    require_capture_return_package_report: bool = False,
+    report_file: Optional[str] = None,
+) -> Dict[str, object]:
+    package_path = Path(str(package_file)).resolve()
+    if not package_path.exists() or not package_path.is_file():
+        raise ValueError("capture return package file does not exist: {}".format(package_path))
+
+    extract_dir = (output_dir / "operator_return_package").resolve()
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    report_path = _resolve_output_path(
+        report_file,
+        output_dir,
+        "transport_capture_return_package_extraction_report.json",
+    ).resolve()
+
+    failures: List[Dict[str, object]] = []
+    extracted_files: List[Dict[str, object]] = []
+    member_names: List[str] = []
+    member_counts: Counter = Counter()
+    directory_member_count = 0
+
+    def add_failure(code: str, message: str, **details: object) -> None:
+        record: Dict[str, object] = {"code": code, "message": message}
+        record.update(details)
+        failures.append(record)
+
+    try:
+        with zipfile.ZipFile(str(package_path), "r") as archive:
+            infos = archive.infolist()
+            member_names = [info.filename for info in infos]
+            member_counts = Counter(member_names)
+            safe_infos: List[zipfile.ZipInfo] = []
+            for name, count in member_counts.items():
+                if count != 1:
+                    add_failure(
+                        "duplicate_package_member",
+                        "capture return package contains a duplicate member path",
+                        package_path=name,
+                        count=count,
+                    )
+            for info in infos:
+                file_type = (info.external_attr >> 16) & 0o170000
+                if file_type == 0o120000:
+                    add_failure(
+                        "package_member_is_symlink",
+                        "capture return package member is a symlink",
+                        package_path=info.filename,
+                    )
+                    continue
+                if _is_safe_archive_directory_member(info.filename):
+                    directory_member_count += 1
+                    target_dir = _safe_join_under(extract_dir, info.filename.rstrip("/"))
+                    if target_dir is None:
+                        add_failure(
+                            "unsafe_package_extraction_path",
+                            "capture return package directory would extract outside output directory",
+                            package_path=info.filename,
+                        )
+                    continue
+                if not _is_safe_archive_member(info.filename):
+                    add_failure(
+                        "unsafe_package_member",
+                        "capture return package member path is not a safe relative file path",
+                        package_path=info.filename,
+                    )
+                    continue
+                target = _safe_join_under(extract_dir, info.filename)
+                if target is None:
+                    add_failure(
+                        "unsafe_package_extraction_path",
+                        "capture return package member would extract outside output directory",
+                        package_path=info.filename,
+                    )
+                    continue
+                safe_infos.append(info)
+            if not failures:
+                for info in safe_infos:
+                    target = _safe_join_under(extract_dir, info.filename)
+                    if target is None:
+                        add_failure(
+                            "unsafe_package_extraction_path",
+                            "capture return package member would extract outside output directory",
+                            package_path=info.filename,
+                        )
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    payload = archive.read(info)
+                    target.write_bytes(payload)
+                    extracted_files.append(
+                        {
+                            "package_path": info.filename,
+                            "path": str(target),
+                            "sha256": _sha256_bytes(payload),
+                            "size_bytes": len(payload),
+                        }
+                    )
+    except zipfile.BadZipFile:
+        add_failure("package_unreadable", "capture return package is not a readable ZIP file")
+
+    capture_root = extract_dir / "captures"
+    raw_capture_root = extract_dir / "raw_captures"
+    if not capture_root.exists() or not capture_root.is_dir():
+        capture_root = extract_dir / "capture_root"
+    if not raw_capture_root.exists() or not raw_capture_root.is_dir():
+        raw_capture_root = extract_dir / "raw_capture_root"
+    if not capture_root.exists() or not capture_root.is_dir():
+        add_failure(
+            "capture_root_missing",
+            "capture return package must contain a captures/ or capture_root/ directory",
+        )
+
+    metadata_manifest_path: Optional[Path] = None
+    for candidate in CAPTURE_RETURN_METADATA_MANIFEST_CANDIDATES:
+        path = extract_dir / candidate
+        if path.exists() and path.is_file():
+            metadata_manifest_path = path.resolve()
+            break
+
+    expected_corpus_path: Optional[Path] = None
+    expected_corpus_sha256: Optional[str] = None
+    expected_corpus_case_labels: Set[str] = set()
+    if expected_capture_corpus_file is not None and str(expected_capture_corpus_file).strip():
+        expected_corpus_path = Path(str(expected_capture_corpus_file)).resolve()
+        expected_corpus_sha256 = _sha256_file(expected_corpus_path)
+        if expected_corpus_path.exists() and expected_corpus_path.is_file():
+            try:
+                expected_corpus = _load_json(expected_corpus_path)
+                raw_expected_cases = expected_corpus.get("cases", [])
+                if isinstance(raw_expected_cases, list):
+                    for index, raw_case in enumerate(raw_expected_cases, 1):
+                        if isinstance(raw_case, dict):
+                            expected_corpus_case_labels.add(
+                                _normalize_label(
+                                    raw_case.get("label"),
+                                    "capture_{:04d}".format(index),
+                                )
+                            )
+            except Exception:
+                expected_corpus_case_labels = set()
+
+    expected_kit_path: Optional[Path] = None
+    expected_kit_sha256: Optional[str] = None
+    if expected_kit_manifest_file is not None and str(expected_kit_manifest_file).strip():
+        expected_kit_path = Path(str(expected_kit_manifest_file)).resolve()
+        expected_kit_sha256 = _sha256_file(expected_kit_path)
+
+    expected_package_report_path: Optional[Path] = None
+    expected_package_report_sha256: Optional[str] = None
+    package_report: Optional[Dict[str, object]] = None
+    package_report_validated = False
+    package_report_required = bool(require_capture_return_package_report)
+    if (
+        expected_capture_return_package_report_file is not None
+        and str(expected_capture_return_package_report_file).strip()
+    ):
+        package_report_required = True
+        expected_package_report_path = Path(
+            str(expected_capture_return_package_report_file)
+        ).resolve()
+        if not expected_package_report_path.exists() or not expected_package_report_path.is_file():
+            add_failure(
+                "capture_return_package_report_missing",
+                "capture return package report file does not exist",
+                path=str(expected_package_report_path),
+            )
+        else:
+            expected_package_report_sha256 = _sha256_file(expected_package_report_path)
+            try:
+                package_report = _load_json(expected_package_report_path)
+                report_schema = str(package_report.get("schema") or "").strip()
+                if report_schema != CAPTURE_RETURN_PACKAGE_SCHEMA:
+                    add_failure(
+                        "capture_return_package_report_schema_mismatch",
+                        "capture return package report schema is not supported",
+                        expected_schema=CAPTURE_RETURN_PACKAGE_SCHEMA,
+                        observed_schema=report_schema or "<missing>",
+                    )
+                if not bool(package_report.get("success")):
+                    add_failure(
+                        "capture_return_package_report_not_successful",
+                        "capture return package report must be successful",
+                    )
+                report_package_sha256 = str(package_report.get("package_sha256") or "").strip()
+                if not report_package_sha256:
+                    add_failure(
+                        "capture_return_package_report_package_sha256_missing",
+                        "capture return package report must record package_sha256",
+                    )
+                elif report_package_sha256 != _sha256_file(package_path):
+                    add_failure(
+                        "capture_return_package_report_package_sha256_mismatch",
+                        "capture return package report does not match the supplied ZIP",
+                        expected_sha256=report_package_sha256,
+                        observed_sha256=_sha256_file(package_path),
+                    )
+                report_package_size = package_report.get("package_size_bytes")
+                if report_package_size in (None, ""):
+                    add_failure(
+                        "capture_return_package_report_package_size_missing",
+                        "capture return package report must record package_size_bytes",
+                    )
+                else:
+                    try:
+                        report_package_size_int = int(report_package_size)
+                    except (TypeError, ValueError):
+                        add_failure(
+                            "capture_return_package_report_package_size_invalid",
+                            "capture return package report package_size_bytes is not an integer",
+                            observed_size=report_package_size,
+                        )
+                    else:
+                        if report_package_size_int != package_path.stat().st_size:
+                            add_failure(
+                                "capture_return_package_report_package_size_mismatch",
+                                "capture return package report size does not match the supplied ZIP",
+                                expected_size_bytes=report_package_size_int,
+                                observed_size_bytes=package_path.stat().st_size,
+                            )
+                report_corpus_sha256 = str(
+                    package_report.get("capture_corpus_sha256") or ""
+                ).strip()
+                if expected_corpus_sha256 is not None:
+                    if not report_corpus_sha256:
+                        add_failure(
+                            "capture_return_package_report_corpus_sha256_missing",
+                            "capture return package report must bind the prepared capture corpus",
+                        )
+                    elif report_corpus_sha256 != expected_corpus_sha256:
+                        add_failure(
+                            "capture_return_package_report_corpus_sha256_mismatch",
+                            "capture return package report does not match the prepared corpus",
+                            expected_sha256=expected_corpus_sha256,
+                            observed_sha256=report_corpus_sha256,
+                        )
+                report_kit_sha256 = str(
+                    package_report.get("capture_kit_manifest_sha256") or ""
+                ).strip()
+                if expected_kit_sha256 is not None:
+                    if not report_kit_sha256:
+                        add_failure(
+                            "capture_return_package_report_kit_sha256_missing",
+                            "capture return package report must bind the prepared capture kit manifest",
+                        )
+                    elif report_kit_sha256 != expected_kit_sha256:
+                        add_failure(
+                            "capture_return_package_report_kit_sha256_mismatch",
+                            "capture return package report does not match the prepared capture kit",
+                            expected_sha256=expected_kit_sha256,
+                            observed_sha256=report_kit_sha256,
+                        )
+            except Exception as exc:
+                add_failure(
+                    "capture_return_package_report_unreadable",
+                    "capture return package report is not readable JSON",
+                    error=str(exc),
+                )
+    elif package_report_required:
+        add_failure(
+            "capture_return_package_report_required",
+            "capture return package report is required for this extraction gate",
+        )
+
+    return_manifest_path: Optional[Path] = None
+    for candidate in CAPTURE_RETURN_MANIFEST_CANDIDATES:
+        path = extract_dir / candidate
+        if path.exists() and path.is_file():
+            return_manifest_path = path.resolve()
+            break
+
+    return_manifest: Optional[Dict[str, object]] = None
+    return_manifest_case_labels: List[str] = []
+    return_manifest_file_inventory: List[Dict[str, object]] = []
+    return_manifest_capture_file_paths: Set[str] = set()
+    return_manifest_raw_file_paths: Set[str] = set()
+    return_manifest_file_inventory_declared = False
+    return_manifest_file_inventory_required = False
+    return_manifest_file_inventory_validated = False
+    return_manifest_validated = False
+    if return_manifest_path is not None:
+        try:
+            return_manifest = _load_json(return_manifest_path)
+            schema = str(return_manifest.get("schema") or "").strip()
+            if schema != CAPTURE_RETURN_MANIFEST_SCHEMA:
+                add_failure(
+                    "capture_return_manifest_schema_mismatch",
+                    "capture return manifest schema is not supported",
+                    expected_schema=CAPTURE_RETURN_MANIFEST_SCHEMA,
+                    observed_schema=schema or "<missing>",
+                )
+            raw_corpus_sha256 = str(return_manifest.get("capture_corpus_sha256") or "").strip()
+            if expected_corpus_sha256 is not None:
+                if not raw_corpus_sha256:
+                    add_failure(
+                        "capture_return_manifest_corpus_sha256_missing",
+                        "capture return manifest must bind the prepared capture corpus SHA256",
+                    )
+                elif raw_corpus_sha256 != expected_corpus_sha256:
+                    add_failure(
+                        "capture_return_manifest_corpus_sha256_mismatch",
+                        "capture return manifest does not match the prepared capture corpus",
+                        expected_sha256=expected_corpus_sha256,
+                        observed_sha256=raw_corpus_sha256,
+                    )
+            raw_kit_sha256 = str(return_manifest.get("capture_kit_manifest_sha256") or "").strip()
+            if expected_kit_sha256 is not None and raw_kit_sha256:
+                if raw_kit_sha256 != expected_kit_sha256:
+                    add_failure(
+                        "capture_return_manifest_kit_sha256_mismatch",
+                        "capture return manifest does not match the prepared capture kit manifest",
+                        expected_sha256=expected_kit_sha256,
+                        observed_sha256=raw_kit_sha256,
+                    )
+            raw_cases = return_manifest.get("cases", [])
+            if raw_cases is None:
+                raw_cases = []
+            if not isinstance(raw_cases, list):
+                add_failure(
+                    "capture_return_manifest_cases_invalid",
+                    "capture return manifest cases must be a list",
+                )
+            else:
+                raw_inventory_settings = return_manifest.get("capture_file_inventory", {})
+                if raw_inventory_settings in (None, ""):
+                    raw_inventory_settings = {}
+                if isinstance(raw_inventory_settings, dict):
+                    return_manifest_file_inventory_required = bool(
+                        raw_inventory_settings.get("required")
+                    )
+                else:
+                    add_failure(
+                        "capture_return_manifest_file_inventory_invalid",
+                        "capture return manifest file inventory settings must be an object",
+                    )
+                if bool(return_manifest.get("require_capture_file_inventory")):
+                    return_manifest_file_inventory_required = True
+
+                extracted_by_package_path = {
+                    str(item.get("package_path")): item
+                    for item in extracted_files
+                    if item.get("package_path")
+                }
+
+                def expected_prefixes_for(
+                    raw_case: Dict[str, object],
+                    label: str,
+                    role: str,
+                ) -> List[str]:
+                    field_name = (
+                        "expected_raw_capture_directory"
+                        if role == "raw_capture"
+                        else "expected_capture_directory"
+                    )
+                    raw_expected_dir = str(raw_case.get(field_name) or "").strip()
+                    if raw_expected_dir:
+                        expected_dir = raw_expected_dir.replace("\\", "/").rstrip("/")
+                        if expected_dir != raw_expected_dir.rstrip("/") or not _is_safe_archive_directory_member(
+                            "{}/".format(expected_dir)
+                        ):
+                            add_failure(
+                                "capture_return_manifest_expected_directory_invalid",
+                                "capture return manifest expected directory is not a safe package path",
+                                label=label,
+                                role=role,
+                                expected_directory=raw_expected_dir,
+                            )
+                            return []
+                        return ["{}/".format(expected_dir)]
+                    root_names = (
+                        ["raw_captures", "raw_capture_root"]
+                        if role == "raw_capture"
+                        else ["captures", "capture_root"]
+                    )
+                    return [
+                        "{}/{}/".format(root_name, subdir_name)
+                        for root_name in root_names
+                        for subdir_name in _capture_subdir_names(label)
+                    ]
+
+                def parse_manifest_file_entries(
+                    raw_case: Dict[str, object],
+                    label: str,
+                    case_index: int,
+                    field_name: str,
+                    role: str,
+                ) -> List[Dict[str, object]]:
+                    nonlocal return_manifest_file_inventory_declared
+                    raw_entries = raw_case.get(field_name, [])
+                    if raw_entries in (None, ""):
+                        raw_entries = []
+                    if not isinstance(raw_entries, list):
+                        add_failure(
+                            "capture_return_manifest_file_entries_invalid",
+                            "capture return manifest file entries must be a list",
+                            label=label,
+                            field=field_name,
+                        )
+                        return []
+                    if raw_entries:
+                        return_manifest_file_inventory_declared = True
+
+                    expected_prefixes = expected_prefixes_for(raw_case, label, role)
+                    parsed: List[Dict[str, object]] = []
+                    for entry_index, raw_entry in enumerate(raw_entries, 1):
+                        if isinstance(raw_entry, str):
+                            raw_path = raw_entry
+                            expected_sha256 = ""
+                            expected_size: object = None
+                        elif isinstance(raw_entry, dict):
+                            raw_path = str(
+                                raw_entry.get("path")
+                                or raw_entry.get("package_path")
+                                or raw_entry.get("archive_path")
+                                or ""
+                            )
+                            expected_sha256 = str(raw_entry.get("sha256") or "").strip().lower()
+                            expected_size = raw_entry.get("size_bytes")
+                        else:
+                            add_failure(
+                                "capture_return_manifest_file_entry_invalid",
+                                "capture return manifest file entry must be a string path or object",
+                                label=label,
+                                field=field_name,
+                                case_index=case_index,
+                                entry_index=entry_index,
+                            )
+                            continue
+
+                        package_path = str(raw_path or "").strip()
+                        normalized_path = package_path.replace("\\", "/")
+                        if package_path != normalized_path or not _is_safe_archive_member(normalized_path):
+                            add_failure(
+                                "capture_return_manifest_file_path_invalid",
+                                "capture return manifest file path is not a safe package member",
+                                label=label,
+                                field=field_name,
+                                package_path=package_path,
+                            )
+                            continue
+                        if Path(normalized_path).suffix.lower() not in CAPTURE_IMAGE_SUFFIXES:
+                            add_failure(
+                                "capture_return_manifest_file_suffix_unsupported",
+                                "capture return manifest file path does not use a supported capture image suffix",
+                                label=label,
+                                field=field_name,
+                                package_path=normalized_path,
+                            )
+                            continue
+                        if expected_prefixes and not any(
+                            normalized_path.startswith(prefix) for prefix in expected_prefixes
+                        ):
+                            add_failure(
+                                "capture_return_manifest_file_directory_mismatch",
+                                "capture return manifest file path is outside the expected case directory",
+                                label=label,
+                                role=role,
+                                package_path=normalized_path,
+                                expected_prefixes=expected_prefixes,
+                            )
+                            continue
+                        if return_manifest_file_inventory_required and not expected_sha256:
+                            add_failure(
+                                "capture_return_manifest_file_sha256_missing",
+                                "required capture return manifest file inventory must include SHA256",
+                                label=label,
+                                field=field_name,
+                                package_path=normalized_path,
+                            )
+                            continue
+                        if expected_sha256 and not _is_sha256_hex(expected_sha256):
+                            add_failure(
+                                "capture_return_manifest_file_sha256_invalid",
+                                "capture return manifest file SHA256 is not canonical",
+                                label=label,
+                                field=field_name,
+                                package_path=normalized_path,
+                            )
+                            continue
+
+                        expected_size_int: Optional[int] = None
+                        if return_manifest_file_inventory_required and expected_size in (None, ""):
+                            add_failure(
+                                "capture_return_manifest_file_size_missing",
+                                "required capture return manifest file inventory must include byte size",
+                                label=label,
+                                field=field_name,
+                                package_path=normalized_path,
+                            )
+                            continue
+                        if expected_size not in (None, ""):
+                            try:
+                                expected_size_int = int(expected_size)
+                            except (TypeError, ValueError):
+                                add_failure(
+                                    "capture_return_manifest_file_size_invalid",
+                                    "capture return manifest file size is not an integer",
+                                    label=label,
+                                    field=field_name,
+                                    package_path=normalized_path,
+                                )
+                                continue
+                            if expected_size_int < 0:
+                                add_failure(
+                                    "capture_return_manifest_file_size_invalid",
+                                    "capture return manifest file size must be non-negative",
+                                    label=label,
+                                    field=field_name,
+                                    package_path=normalized_path,
+                                )
+                                continue
+
+                        if normalized_path in return_manifest_capture_file_paths or normalized_path in return_manifest_raw_file_paths:
+                            add_failure(
+                                "capture_return_manifest_file_duplicate",
+                                "capture return manifest file inventory contains a duplicate package path",
+                                label=label,
+                                field=field_name,
+                                package_path=normalized_path,
+                            )
+                            continue
+
+                        extracted_record = extracted_by_package_path.get(normalized_path)
+                        if extracted_record is None:
+                            add_failure(
+                                "capture_return_manifest_file_missing",
+                                "capture return manifest file is missing from the package",
+                                label=label,
+                                field=field_name,
+                                package_path=normalized_path,
+                            )
+                        else:
+                            observed_sha256 = str(extracted_record.get("sha256") or "")
+                            observed_size = int(extracted_record.get("size_bytes") or 0)
+                            if expected_sha256 and observed_sha256 != expected_sha256:
+                                add_failure(
+                                    "capture_return_manifest_file_sha256_mismatch",
+                                    "capture return manifest file SHA256 does not match package bytes",
+                                    label=label,
+                                    field=field_name,
+                                    package_path=normalized_path,
+                                    expected_sha256=expected_sha256,
+                                    observed_sha256=observed_sha256,
+                                )
+                            if expected_size_int is not None and observed_size != expected_size_int:
+                                add_failure(
+                                    "capture_return_manifest_file_size_mismatch",
+                                    "capture return manifest file size does not match package bytes",
+                                    label=label,
+                                    field=field_name,
+                                    package_path=normalized_path,
+                                    expected_size_bytes=expected_size_int,
+                                    observed_size_bytes=observed_size,
+                                )
+
+                        record = {
+                            "case_label": label,
+                            "role": role,
+                            "package_path": normalized_path,
+                            "sha256": expected_sha256 or (
+                                extracted_record.get("sha256")
+                                if isinstance(extracted_record, dict)
+                                else None
+                            ),
+                            "size_bytes": (
+                                expected_size_int
+                                if expected_size_int is not None
+                                else (
+                                    extracted_record.get("size_bytes")
+                                    if isinstance(extracted_record, dict)
+                                    else None
+                                )
+                            ),
+                        }
+                        parsed.append(record)
+                        return_manifest_file_inventory.append(record)
+                        if role == "raw_capture":
+                            return_manifest_raw_file_paths.add(normalized_path)
+                        else:
+                            return_manifest_capture_file_paths.add(normalized_path)
+                    return parsed
+
+                seen_manifest_labels: Set[str] = set()
+                for index, raw_case in enumerate(raw_cases, 1):
+                    if not isinstance(raw_case, dict):
+                        add_failure(
+                            "capture_return_manifest_case_invalid",
+                            "capture return manifest case must be an object",
+                            case_index=index,
+                        )
+                        continue
+                    label = _normalize_label(raw_case.get("label"), "")
+                    if not label:
+                        add_failure(
+                            "capture_return_manifest_case_label_missing",
+                            "capture return manifest case label is required",
+                            case_index=index,
+                        )
+                        continue
+                    if label in seen_manifest_labels:
+                        add_failure(
+                            "capture_return_manifest_case_label_duplicate",
+                            "capture return manifest case labels must be unique",
+                            label=label,
+                        )
+                        continue
+                    if expected_corpus_case_labels and label not in expected_corpus_case_labels:
+                        add_failure(
+                            "capture_return_manifest_case_label_unknown",
+                            "capture return manifest case label does not belong to the prepared corpus",
+                            label=label,
+                        )
+                        continue
+                    seen_manifest_labels.add(label)
+                    return_manifest_case_labels.append(label)
+                    capture_entries = parse_manifest_file_entries(
+                        raw_case,
+                        label,
+                        index,
+                        "capture_files",
+                        "capture",
+                    )
+                    parse_manifest_file_entries(
+                        raw_case,
+                        label,
+                        index,
+                        "raw_capture_files",
+                        "raw_capture",
+                    )
+                    if return_manifest_file_inventory_required and not capture_entries:
+                        add_failure(
+                            "capture_return_manifest_case_capture_files_missing",
+                            "capture return manifest file inventory is required but case lists no capture files",
+                            label=label,
+                        )
+
+                actual_capture_image_paths = {
+                    str(item.get("package_path"))
+                    for item in extracted_files
+                    if str(item.get("package_path") or "").split("/", 1)[0]
+                    in {"captures", "capture_root"}
+                    and Path(str(item.get("package_path") or "")).suffix.lower()
+                    in CAPTURE_IMAGE_SUFFIXES
+                }
+                actual_raw_image_paths = {
+                    str(item.get("package_path"))
+                    for item in extracted_files
+                    if str(item.get("package_path") or "").split("/", 1)[0]
+                    in {"raw_captures", "raw_capture_root"}
+                    and Path(str(item.get("package_path") or "")).suffix.lower()
+                    in CAPTURE_IMAGE_SUFFIXES
+                }
+                if return_manifest_file_inventory_required or return_manifest_file_inventory_declared:
+                    return_manifest_file_inventory_declared = True
+                    for missing_package_path in sorted(
+                        actual_capture_image_paths - return_manifest_capture_file_paths
+                    ):
+                        add_failure(
+                            "capture_return_manifest_unlisted_capture_file",
+                            "capture return manifest file inventory omits a capture image from the package",
+                            package_path=missing_package_path,
+                        )
+                    for missing_package_path in sorted(
+                        actual_raw_image_paths - return_manifest_raw_file_paths
+                    ):
+                        add_failure(
+                            "capture_return_manifest_unlisted_raw_capture_file",
+                            "capture return manifest file inventory omits a raw capture image from the package",
+                            package_path=missing_package_path,
+                        )
+                    if not any(
+                        str(item.get("code", "")).startswith("capture_return_manifest_file_")
+                        or str(item.get("code", "")).startswith("capture_return_manifest_unlisted_")
+                        or str(item.get("code", ""))
+                        == "capture_return_manifest_case_capture_files_missing"
+                        for item in failures
+                    ):
+                        return_manifest_file_inventory_validated = True
+            if not any(
+                str(item.get("code", "")).startswith("capture_return_manifest_")
+                for item in failures
+            ) and schema == CAPTURE_RETURN_MANIFEST_SCHEMA:
+                return_manifest_validated = True
+        except Exception as exc:
+            add_failure(
+                "capture_return_manifest_unreadable",
+                "capture return manifest is not readable JSON",
+                error=str(exc),
+            )
+    if bool(require_capture_return_manifest):
+        if return_manifest_path is None:
+            add_failure(
+                "capture_return_manifest_required",
+                "capture return manifest is required for this extraction gate",
+            )
+        elif not bool(return_manifest_validated):
+            add_failure(
+                "capture_return_manifest_not_validated",
+                "capture return manifest must validate before ingestion",
+            )
+    if bool(require_capture_return_file_inventory):
+        if return_manifest_path is None:
+            add_failure(
+                "capture_return_manifest_file_inventory_required",
+                "capture return file inventory requires a capture return manifest",
+            )
+        elif not bool(return_manifest_file_inventory_declared):
+            add_failure(
+                "capture_return_manifest_file_inventory_required",
+                "capture return manifest must declare exact capture file inventory",
+            )
+        elif not bool(return_manifest_file_inventory_validated):
+            add_failure(
+                "capture_return_manifest_file_inventory_not_validated",
+                "capture return manifest file inventory must validate before ingestion",
+            )
+
+    if isinstance(package_report, dict):
+        report_return_manifest_sha256 = str(
+            package_report.get("capture_return_manifest_sha256") or ""
+        ).strip()
+        if report_return_manifest_sha256:
+            observed_return_manifest_sha256 = (
+                _sha256_file(return_manifest_path)
+                if return_manifest_path is not None
+                else None
+            )
+            if observed_return_manifest_sha256 != report_return_manifest_sha256:
+                add_failure(
+                    "capture_return_package_report_return_manifest_sha256_mismatch",
+                    "capture return package report does not match the extracted return manifest",
+                    expected_sha256=report_return_manifest_sha256,
+                    observed_sha256=observed_return_manifest_sha256,
+                )
+        else:
+            add_failure(
+                "capture_return_package_report_return_manifest_sha256_missing",
+                "capture return package report must record capture_return_manifest_sha256",
+            )
+        report_metadata_manifest_sha256 = str(
+            package_report.get("capture_metadata_manifest_sha256") or ""
+        ).strip()
+        if report_metadata_manifest_sha256:
+            observed_metadata_manifest_sha256 = (
+                _sha256_file(metadata_manifest_path)
+                if metadata_manifest_path is not None
+                else None
+            )
+            if observed_metadata_manifest_sha256 != report_metadata_manifest_sha256:
+                add_failure(
+                    "capture_return_package_report_metadata_manifest_sha256_mismatch",
+                    "capture return package report does not match the extracted metadata manifest",
+                    expected_sha256=report_metadata_manifest_sha256,
+                    observed_sha256=observed_metadata_manifest_sha256,
+                )
+        else:
+            add_failure(
+                "capture_return_package_report_metadata_manifest_sha256_missing",
+                "capture return package report must record capture_metadata_manifest_sha256",
+            )
+        if not any(
+            str(item.get("code", "")).startswith("capture_return_package_report_")
+            for item in failures
+        ):
+            package_report_validated = True
+
+    report = {
+        "schema": CAPTURE_RETURN_PACKAGE_EXTRACTION_SCHEMA,
+        "generated_at_utc": protocol.utc_now_iso(),
+        "success": not failures,
+        "package_file": str(package_path),
+        "package_sha256": _sha256_file(package_path),
+        "package_size_bytes": package_path.stat().st_size,
+        "extraction_dir": str(extract_dir),
+        "capture_root": str(capture_root.resolve()) if capture_root.exists() else None,
+        "raw_capture_root": (
+            str(raw_capture_root.resolve()) if raw_capture_root.exists() else None
+        ),
+        "capture_metadata_manifest_file": (
+            str(metadata_manifest_path) if metadata_manifest_path is not None else None
+        ),
+        "capture_return_manifest_file": (
+            str(return_manifest_path) if return_manifest_path is not None else None
+        ),
+        "capture_return_manifest_sha256": (
+            _sha256_file(return_manifest_path) if return_manifest_path is not None else None
+        ),
+        "expected_capture_corpus_file": (
+            str(expected_corpus_path) if expected_corpus_path is not None else None
+        ),
+        "expected_capture_corpus_sha256": expected_corpus_sha256,
+        "expected_capture_corpus_case_labels": sorted(expected_corpus_case_labels),
+        "expected_capture_kit_manifest_file": (
+            str(expected_kit_path) if expected_kit_path is not None else None
+        ),
+        "expected_capture_kit_manifest_sha256": expected_kit_sha256,
+        "expected_capture_return_package_report_file": (
+            str(expected_package_report_path)
+            if expected_package_report_path is not None
+            else None
+        ),
+        "expected_capture_return_package_report_sha256": expected_package_report_sha256,
+        "summary": {
+            "member_count": len(member_names),
+            "directory_member_count": directory_member_count,
+            "extracted_file_count": len(extracted_files),
+            "failure_count": len(failures),
+            "capture_root_found": bool(capture_root.exists() and capture_root.is_dir()),
+            "raw_capture_root_found": bool(
+                raw_capture_root.exists() and raw_capture_root.is_dir()
+            ),
+            "capture_metadata_manifest_found": metadata_manifest_path is not None,
+            "capture_return_manifest_found": return_manifest_path is not None,
+            "capture_return_manifest_required": bool(require_capture_return_manifest),
+            "capture_return_manifest_validated": bool(return_manifest_validated),
+            "capture_return_manifest_case_count": len(return_manifest_case_labels),
+            "capture_return_manifest_file_inventory_declared": bool(
+                return_manifest_file_inventory_declared
+            ),
+            "capture_return_manifest_file_inventory_gate_required": bool(
+                require_capture_return_file_inventory
+            ),
+            "capture_return_manifest_file_inventory_required": bool(
+                return_manifest_file_inventory_required
+            ),
+            "capture_return_manifest_file_inventory_validated": bool(
+                return_manifest_file_inventory_validated
+            ),
+            "capture_return_package_report_provided": expected_package_report_path is not None,
+            "capture_return_package_report_required": bool(package_report_required),
+            "capture_return_package_report_found": bool(
+                expected_package_report_path is not None
+                and expected_package_report_path.exists()
+                and expected_package_report_path.is_file()
+            ),
+            "capture_return_package_report_validated": bool(package_report_validated),
+            "capture_return_manifest_capture_file_count": len(
+                return_manifest_capture_file_paths
+            ),
+            "capture_return_manifest_raw_file_count": len(return_manifest_raw_file_paths),
+            "duplicate_member_count": sum(
+                int(count) - 1 for count in member_counts.values() if int(count) > 1
+            ),
+        },
+        "capture_return_manifest": {
+            "schema": (
+                str(return_manifest.get("schema") or "").strip()
+                if isinstance(return_manifest, dict)
+                else None
+            ),
+            "case_labels": return_manifest_case_labels,
+            "capture_corpus_sha256": (
+                return_manifest.get("capture_corpus_sha256")
+                if isinstance(return_manifest, dict)
+                else None
+            ),
+            "capture_kit_manifest_sha256": (
+                return_manifest.get("capture_kit_manifest_sha256")
+                if isinstance(return_manifest, dict)
+                else None
+            ),
+            "validated": bool(return_manifest_validated),
+            "file_inventory": {
+                "declared": bool(return_manifest_file_inventory_declared),
+                "required": bool(return_manifest_file_inventory_required),
+                "validated": bool(return_manifest_file_inventory_validated),
+                "capture_file_count": len(return_manifest_capture_file_paths),
+                "raw_file_count": len(return_manifest_raw_file_paths),
+                "files": return_manifest_file_inventory,
+            },
+        },
+        "capture_return_package_report": {
+            "file": (
+                str(expected_package_report_path)
+                if expected_package_report_path is not None
+                else None
+            ),
+            "sha256": expected_package_report_sha256,
+            "schema": (
+                str(package_report.get("schema") or "").strip()
+                if isinstance(package_report, dict)
+                else None
+            ),
+            "validated": bool(package_report_validated),
+            "package_sha256": (
+                package_report.get("package_sha256")
+                if isinstance(package_report, dict)
+                else None
+            ),
+            "capture_corpus_sha256": (
+                package_report.get("capture_corpus_sha256")
+                if isinstance(package_report, dict)
+                else None
+            ),
+            "capture_kit_manifest_sha256": (
+                package_report.get("capture_kit_manifest_sha256")
+                if isinstance(package_report, dict)
+                else None
+            ),
+            "capture_return_manifest_sha256": (
+                package_report.get("capture_return_manifest_sha256")
+                if isinstance(package_report, dict)
+                else None
+            ),
+            "capture_metadata_manifest_sha256": (
+                package_report.get("capture_metadata_manifest_sha256")
+                if isinstance(package_report, dict)
+                else None
+            ),
+        },
+        "files": extracted_files,
+        "failures": failures,
+        "certification_boundary": (
+            "This extracts and hash-records an operator return package only. It does "
+            "not certify any transport medium; certification still requires ingestion, "
+            "attachment lineage, measured recovery, archive replay, and claim gates."
+        ),
+    }
+    _write_json(report_path, report)
+    report["report_file"] = str(report_path)
+    report["report_sha256"] = _sha256_file(report_path)
+    return report
 
 
 def _replace_case_image_path(
@@ -2425,6 +3415,7 @@ def ingest_capture_corpus(
                 "capture_images": _relative_digest_records(capture_paths, corpus_base),
                 "raw_images": _relative_digest_records(raw_paths, corpus_base),
                 "capture_metadata_manifest_case_matched": bool(manifest_case),
+                "capture_metadata": dict(merged_case_metadata),
                 "capture_metadata_keys": sorted(str(key) for key in merged_case_metadata.keys()),
                 "failure_reasons": case_failures,
                 "ready_for_attachment": not case_failures and bool(capture_paths),
@@ -2606,6 +3597,541 @@ def ingest_capture_corpus(
         _write_json(manifest_path, kit_manifest)
         report["updated_files"].append(str(manifest_path))
 
+    _write_json(report_path, report)
+    return report
+
+
+def _resolve_optional_existing_file(
+    raw_path: Optional[str],
+    base_dir: Path,
+    field_name: str,
+) -> Optional[Path]:
+    if raw_path is None or str(raw_path).strip() == "":
+        return None
+    path = Path(str(raw_path))
+    if path.is_absolute():
+        resolved = path.resolve()
+    else:
+        cwd_candidate = path.resolve()
+        resolved = cwd_candidate if cwd_candidate.exists() else (base_dir / path).resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError("{} does not exist or is not a file: {}".format(field_name, resolved))
+    return resolved
+
+
+def _metadata_manifest_payload_for_return_package(
+    *,
+    capture_metadata_manifest_file: Optional[str],
+    corpus_base: Path,
+    capture_metadata: Optional[Dict[str, object]],
+    cases: List[Dict[str, object]],
+) -> Dict[str, object]:
+    manifest_path = _resolve_optional_existing_file(
+        capture_metadata_manifest_file,
+        corpus_base,
+        "capture_metadata_manifest_file",
+    )
+    if manifest_path is not None:
+        manifest = _load_json(manifest_path)
+        schema = str(manifest.get("schema") or "").strip()
+        if schema != CAPTURE_METADATA_MANIFEST_SCHEMA:
+            raise ValueError(
+                "capture metadata manifest schema must be {}, got {}".format(
+                    CAPTURE_METADATA_MANIFEST_SCHEMA,
+                    schema or "<missing>",
+                )
+            )
+        return manifest
+
+    normalized_metadata = _normalize_capture_corpus_metadata(capture_metadata or {})
+    return {
+        "schema": CAPTURE_METADATA_MANIFEST_SCHEMA,
+        "capture_metadata_defaults": normalized_metadata,
+        "cases": [
+            {
+                "label": str(case.get("label") or ""),
+                "capture_metadata": {},
+            }
+            for case in cases
+        ],
+        "generated_by": "soenc transport package-capture-return",
+        "certification_boundary": (
+            "This metadata manifest is packaged provenance input only. It does not "
+            "certify any transport medium without measured recovery and claim gates."
+        ),
+    }
+
+
+def _metadata_manifest_case_metadata(
+    metadata_manifest: Dict[str, object],
+    label: str,
+) -> Dict[str, object]:
+    defaults = _normalize_capture_corpus_metadata(
+        metadata_manifest.get("capture_metadata_defaults", metadata_manifest.get("metadata_defaults"))
+    )
+    if "capture_medium" in metadata_manifest and "capture_medium" not in defaults:
+        defaults["capture_medium"] = metadata_manifest.get("capture_medium")
+    elif "medium" in metadata_manifest and "capture_medium" not in defaults:
+        defaults["capture_medium"] = metadata_manifest.get("medium")
+
+    case_metadata: Dict[str, object] = {}
+    raw_cases = metadata_manifest.get("cases", [])
+    if isinstance(raw_cases, list):
+        for raw_case in raw_cases:
+            if not isinstance(raw_case, dict):
+                continue
+            case_label = _normalize_label(raw_case.get("label"), "")
+            if case_label != label:
+                continue
+            case_metadata = _normalize_capture_corpus_metadata(
+                raw_case.get("capture_metadata", raw_case.get("metadata"))
+            )
+            if "capture_medium" in raw_case and "capture_medium" not in case_metadata:
+                case_metadata["capture_medium"] = raw_case.get("capture_medium")
+            elif "medium" in raw_case and "capture_medium" not in case_metadata:
+                case_metadata["capture_medium"] = raw_case.get("medium")
+            break
+
+    merged = dict(defaults)
+    merged.update(case_metadata)
+    return merged
+
+
+def _return_package_capture_file_record(
+    *,
+    source_path: Path,
+    package_path: str,
+) -> Dict[str, object]:
+    return {
+        "path": package_path,
+        "sha256": _sha256_file(source_path),
+        "size_bytes": source_path.stat().st_size,
+    }
+
+
+def package_capture_return(
+    capture_corpus_file: str,
+    output_dir: str,
+    capture_root: str,
+    raw_capture_root: Optional[str] = None,
+    capture_metadata_manifest_file: Optional[str] = None,
+    capture_metadata: Optional[Dict[str, object]] = None,
+    kit_manifest_file: Optional[str] = None,
+    package_file: Optional[str] = None,
+    return_manifest_file: Optional[str] = None,
+    report_file: Optional[str] = None,
+    return_session_id: Optional[str] = None,
+    operator: Optional[str] = None,
+    returned_at_utc: Optional[str] = None,
+    require_captures: bool = True,
+    require_raw_captures: bool = False,
+    require_capture_provenance: bool = False,
+    require_all_case_labels: bool = True,
+) -> Dict[str, object]:
+    """Assemble an operator return ZIP with a filled exact capture-file inventory."""
+
+    corpus_path = Path(str(capture_corpus_file)).resolve()
+    if not corpus_path.exists() or not corpus_path.is_file():
+        raise ValueError("capture corpus file does not exist: {}".format(corpus_path))
+    corpus_base = corpus_path.parent
+    corpus = _load_json(corpus_path)
+    schema = str(corpus.get("schema") or "").strip()
+    if schema != CAPTURE_CORPUS_SCHEMA:
+        raise ValueError(
+            "capture corpus schema must be {}, got {}".format(
+                CAPTURE_CORPUS_SCHEMA,
+                schema or "<missing>",
+            )
+        )
+    raw_cases = corpus.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("capture corpus cases must be a non-empty list")
+
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    package_path = _resolve_output_path(package_file, out_dir, "operator_return.zip").resolve()
+    return_manifest_path = _resolve_output_path(
+        return_manifest_file,
+        out_dir,
+        "operator_return_manifest.json",
+    ).resolve()
+    report_path = _resolve_output_path(
+        report_file,
+        out_dir,
+        "transport_capture_return_package_report.json",
+    ).resolve()
+
+    capture_root_path = _resolve_existing_path_cwd_or_base(
+        capture_root,
+        corpus_base,
+        "capture_root",
+    )
+    if not capture_root_path.exists() or not capture_root_path.is_dir():
+        raise ValueError("capture_root must be an existing directory: {}".format(capture_root_path))
+    raw_capture_root_path: Optional[Path] = None
+    if raw_capture_root is not None and str(raw_capture_root).strip():
+        raw_capture_root_path = _resolve_existing_path_cwd_or_base(
+            raw_capture_root,
+            corpus_base,
+            "raw_capture_root",
+        )
+        if not raw_capture_root_path.exists() or not raw_capture_root_path.is_dir():
+            raise ValueError(
+                "raw_capture_root must be an existing directory: {}".format(raw_capture_root_path)
+            )
+
+    kit_path = _resolve_optional_existing_file(
+        kit_manifest_file,
+        corpus_base,
+        "kit_manifest_file",
+    )
+    metadata_manifest = _metadata_manifest_payload_for_return_package(
+        capture_metadata_manifest_file=capture_metadata_manifest_file,
+        corpus_base=corpus_base,
+        capture_metadata=capture_metadata,
+        cases=[case for case in raw_cases if isinstance(case, dict)],
+    )
+
+    failures: List[Dict[str, object]] = []
+
+    def add_failure(code: str, message: str, **details: object) -> None:
+        record: Dict[str, object] = {"code": code, "message": message}
+        record.update(details)
+        failures.append(record)
+
+    package_entries: List[Dict[str, object]] = []
+    return_cases: List[Dict[str, object]] = []
+    expected_capture_names: Set[str] = set()
+    expected_raw_capture_names: Set[str] = set()
+    seen_labels: Set[str] = set()
+    capture_image_count = 0
+    raw_capture_image_count = 0
+    cases_with_captures = 0
+    cases_with_raw_captures = 0
+    capture_provenance_evidence_records: List[Dict[str, object]] = []
+    capture_provenance_passed_count = 0
+
+    def add_package_entry(source_path: Path, archive_path: str, role: str) -> None:
+        if not _is_safe_archive_member(archive_path):
+            add_failure(
+                "package_archive_path_invalid",
+                "generated package archive path is not safe",
+                archive_path=archive_path,
+            )
+            return
+        package_entries.append(
+            {
+                "role": role,
+                "source_path": str(source_path),
+                "archive_path": archive_path,
+                "sha256": _sha256_file(source_path),
+                "size_bytes": source_path.stat().st_size,
+            }
+        )
+
+    for index, raw_case in enumerate(raw_cases, 1):
+        if not isinstance(raw_case, dict):
+            add_failure(
+                "capture_case_invalid",
+                "capture corpus case must be an object",
+                case_index=index,
+            )
+            continue
+        label = _normalize_label(raw_case.get("label"), "capture_{:04d}".format(index))
+        if label in seen_labels:
+            add_failure(
+                "capture_case_label_duplicate",
+                "capture corpus labels must be unique",
+                label=label,
+            )
+            continue
+        seen_labels.add(label)
+        expected_capture_names.update(_capture_subdir_names(label))
+        expected_raw_capture_names.update(_capture_subdir_names(label, suffixes=("__raw", "-raw", "_raw")))
+
+        capture_source = _capture_subdir_path(capture_root_path, label)
+        capture_paths: List[Path] = []
+        if capture_source is None:
+            add_failure(
+                "capture_label_directory_missing",
+                "capture root does not contain a directory or image for this case",
+                label=label,
+            )
+        else:
+            capture_paths = _collect_capture_images_recursive(capture_source, corpus_base)
+            if not capture_paths:
+                add_failure(
+                    "capture_images_missing",
+                    "capture case has no supported capture image files",
+                    label=label,
+                )
+        if bool(require_captures) and not capture_paths:
+            if not any(
+                failure.get("code") == "capture_images_missing"
+                and failure.get("label") == label
+                for failure in failures
+            ):
+                add_failure(
+                    "capture_images_missing",
+                    "capture images are required for every case",
+                    label=label,
+                )
+
+        raw_source = None
+        raw_paths: List[Path] = []
+        if raw_capture_root_path is not None:
+            raw_source = _capture_subdir_path(
+                raw_capture_root_path,
+                label,
+                suffixes=("__raw", "-raw", "_raw"),
+            )
+            if raw_source is None:
+                add_failure(
+                    "raw_capture_label_directory_missing",
+                    "raw capture root does not contain a directory or image for this case",
+                    label=label,
+                )
+            else:
+                raw_paths = _collect_capture_images_recursive(raw_source, corpus_base)
+                if not raw_paths:
+                    add_failure(
+                        "raw_capture_images_missing",
+                        "raw capture case has no supported image files",
+                        label=label,
+                    )
+        if bool(require_raw_captures) and not raw_paths:
+            if not any(
+                failure.get("code") == "raw_capture_images_missing"
+                and failure.get("label") == label
+                for failure in failures
+            ):
+                add_failure(
+                    "raw_capture_images_missing",
+                    "raw camera capture images are required for every case",
+                    label=label,
+                )
+
+        capture_records = []
+        for source in capture_paths:
+            archive_path = "captures/{}/{}".format(label, source.name)
+            capture_records.append(
+                _return_package_capture_file_record(
+                    source_path=source,
+                    package_path=archive_path,
+                )
+            )
+            add_package_entry(source, archive_path, "capture")
+        raw_records = []
+        for source in raw_paths:
+            archive_path = "raw_captures/{}/{}".format(label, source.name)
+            raw_records.append(
+                _return_package_capture_file_record(
+                    source_path=source,
+                    package_path=archive_path,
+                )
+            )
+            add_package_entry(source, archive_path, "raw_capture")
+
+        if capture_records:
+            cases_with_captures += 1
+            capture_image_count += len(capture_records)
+        if raw_records:
+            cases_with_raw_captures += 1
+            raw_capture_image_count += len(raw_records)
+
+        return_case: Dict[str, object] = {
+            "label": label,
+            "expected_capture_directory": "captures/{}".format(label),
+            "capture_files": capture_records,
+        }
+        if raw_records or raw_capture_root_path is not None or bool(require_raw_captures):
+            return_case["expected_raw_capture_directory"] = "raw_captures/{}".format(label)
+            return_case["raw_capture_files"] = raw_records
+        return_cases.append(return_case)
+
+        case_classification = str(
+            raw_case.get("classification") or corpus.get("classification") or ""
+        ).strip().lower()
+        case_medium = _normalize_capture_medium(
+            raw_case.get(
+                "capture_medium",
+                raw_case.get("medium", corpus.get("capture_medium", corpus.get("medium"))),
+            )
+        )
+        merged_metadata = _metadata_manifest_case_metadata(metadata_manifest, label)
+        if case_medium == "unspecified":
+            case_medium = _capture_medium_from_metadata(merged_metadata)
+        provenance_evidence = _capture_provenance_evidence(
+            classification=case_classification,
+            capture_medium=case_medium,
+            capture_metadata=merged_metadata,
+            required=bool(require_capture_provenance),
+        )
+        capture_provenance_evidence_records.append(provenance_evidence)
+        if bool(provenance_evidence.get("evidence_passed")):
+            capture_provenance_passed_count += 1
+        if not bool(provenance_evidence.get("strict_gate_passed", True)):
+            add_failure(
+                "capture_provenance_missing",
+                "capture metadata manifest does not satisfy required capture provenance",
+                label=label,
+                status=provenance_evidence.get("status"),
+            )
+
+    unmatched_capture_entries = []
+    for child in sorted(capture_root_path.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir() and not (child.is_file() and child.suffix.lower() in CAPTURE_IMAGE_SUFFIXES):
+            continue
+        if child.name not in expected_capture_names:
+            unmatched_capture_entries.append(str(child.resolve()))
+    unmatched_raw_entries = []
+    if raw_capture_root_path is not None:
+        for child in sorted(raw_capture_root_path.iterdir(), key=lambda item: item.name.lower()):
+            if not child.is_dir() and not (child.is_file() and child.suffix.lower() in CAPTURE_IMAGE_SUFFIXES):
+                continue
+            if child.name not in expected_raw_capture_names:
+                unmatched_raw_entries.append(str(child.resolve()))
+    if bool(require_all_case_labels):
+        for entry in unmatched_capture_entries:
+            add_failure(
+                "unexpected_capture_label_entry",
+                "capture root contains an entry that does not match a prepared case label",
+                path=entry,
+            )
+        for entry in unmatched_raw_entries:
+            add_failure(
+                "unexpected_raw_capture_label_entry",
+                "raw capture root contains an entry that does not match a prepared case label",
+                path=entry,
+            )
+
+    generated_at_utc = protocol.utc_now_iso()
+    return_manifest = {
+        "schema": CAPTURE_RETURN_MANIFEST_SCHEMA,
+        "generated_at_utc": generated_at_utc,
+        "generated_by": "soenc transport package-capture-return",
+        "capture_corpus_file": str(corpus_path),
+        "capture_corpus_sha256": _sha256_file(corpus_path),
+        "capture_kit_manifest_file": str(kit_path) if kit_path is not None else None,
+        "capture_kit_manifest_sha256": (
+            _sha256_file(kit_path) if kit_path is not None else ""
+        ),
+        "return_session_id": str(return_session_id or "").strip(),
+        "operator": str(operator or "").strip(),
+        "returned_at_utc": str(returned_at_utc or generated_at_utc).strip(),
+        "capture_package_layout": {
+            "capture_root": "captures/",
+            "raw_capture_root": "raw_captures/",
+            "metadata_manifest": "operator_capture_metadata_manifest.json",
+        },
+        "capture_file_inventory": {
+            "required": True,
+            "capture_file_count": capture_image_count,
+            "raw_capture_file_count": raw_capture_image_count,
+        },
+        "cases": return_cases,
+        "certification_boundary": (
+            "This manifest binds the returned ZIP file inventory to a prepared capture "
+            "corpus. It is package identity evidence only; certification still requires "
+            "ingestion, measured recovery, archive replay, and a matching claim gate."
+        ),
+    }
+    return_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(return_manifest_path, return_manifest)
+
+    metadata_manifest_path = out_dir / "operator_capture_metadata_manifest.json"
+    _write_json(metadata_manifest_path, metadata_manifest)
+
+    add_package_entry(return_manifest_path, "operator_return_manifest.json", "return_manifest")
+    add_package_entry(
+        metadata_manifest_path,
+        "operator_capture_metadata_manifest.json",
+        "capture_metadata_manifest",
+    )
+
+    duplicate_archive_paths = [
+        archive_path
+        for archive_path, count in Counter(
+            str(entry.get("archive_path")) for entry in package_entries
+        ).items()
+        if count > 1
+    ]
+    for archive_path in duplicate_archive_paths:
+        add_failure(
+            "duplicate_package_archive_path",
+            "return package would contain duplicate archive paths",
+            archive_path=archive_path,
+        )
+
+    if not failures:
+        package_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(str(package_path), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for entry in sorted(package_entries, key=lambda item: str(item.get("archive_path"))):
+                archive.write(str(entry["source_path"]), str(entry["archive_path"]))
+
+    report = {
+        "schema": CAPTURE_RETURN_PACKAGE_SCHEMA,
+        "generated_at_utc": generated_at_utc,
+        "success": not failures,
+        "capture_corpus_file": str(corpus_path),
+        "capture_corpus_sha256": _sha256_file(corpus_path),
+        "capture_root": str(capture_root_path),
+        "raw_capture_root": str(raw_capture_root_path) if raw_capture_root_path else None,
+        "capture_metadata_manifest_file": str(metadata_manifest_path),
+        "capture_metadata_manifest_sha256": _sha256_file(metadata_manifest_path),
+        "capture_return_manifest_file": str(return_manifest_path),
+        "capture_return_manifest_sha256": _sha256_file(return_manifest_path),
+        "capture_kit_manifest_file": str(kit_path) if kit_path is not None else None,
+        "capture_kit_manifest_sha256": (
+            _sha256_file(kit_path) if kit_path is not None else None
+        ),
+        "package_file": str(package_path) if not failures else None,
+        "package_sha256": (
+            _sha256_file(package_path) if not failures and package_path.exists() else None
+        ),
+        "package_size_bytes": (
+            package_path.stat().st_size if not failures and package_path.exists() else None
+        ),
+        "parameters": {
+            "require_captures": bool(require_captures),
+            "require_raw_captures": bool(require_raw_captures),
+            "require_capture_provenance": bool(require_capture_provenance),
+            "require_all_case_labels": bool(require_all_case_labels),
+            "return_session_id": str(return_session_id or "").strip(),
+            "operator": str(operator or "").strip(),
+        },
+        "summary": {
+            "case_count": len(return_cases),
+            "cases_with_captures": cases_with_captures,
+            "cases_with_raw_captures": cases_with_raw_captures,
+            "capture_file_count": capture_image_count,
+            "raw_capture_file_count": raw_capture_image_count,
+            "capture_provenance_required": bool(require_capture_provenance),
+            "capture_provenance_passed": bool(
+                (not require_capture_provenance)
+                or (
+                    len(capture_provenance_evidence_records) == len(return_cases)
+                    and capture_provenance_passed_count == len(return_cases)
+                )
+            ),
+            "capture_provenance_evidence_count": capture_provenance_passed_count,
+            "package_entry_count": len(package_entries),
+            "unmatched_capture_entry_count": len(unmatched_capture_entries),
+            "unmatched_raw_capture_entry_count": len(unmatched_raw_entries),
+            "failure_count": len(failures),
+        },
+        "unmatched_capture_entries": unmatched_capture_entries,
+        "unmatched_raw_capture_entries": unmatched_raw_entries,
+        "capture_provenance_evidence": capture_provenance_evidence_records,
+        "package_entries": package_entries,
+        "failures": failures,
+        "report_file": str(report_path),
+        "certification_boundary": (
+            "This packages operator/lab return files and writes exact SHA256 inventory "
+            "for later fail-closed extraction. It does not certify physical print-scan, "
+            "real camera, or OCR-only transfer by itself."
+        ),
+    }
     _write_json(report_path, report)
     return report
 
@@ -4006,6 +5532,7 @@ def _extract_recovery_metrics(recover_result: Optional[Dict[str, object]]) -> Di
             "line_warning_count": None,
             "page_crc_error_count": None,
             "duplicate_conflict_count": None,
+            "correction_required_count": None,
         }
     analyze = recover_result.get("analyze")
     if not isinstance(analyze, dict):
@@ -4016,6 +5543,7 @@ def _extract_recovery_metrics(recover_result: Optional[Dict[str, object]]) -> Di
         "line_warning_count": analyze.get("line_warning_count"),
         "page_crc_error_count": analyze.get("page_crc_error_count"),
         "duplicate_conflict_count": analyze.get("duplicate_conflict_count"),
+        "correction_required_count": analyze.get("correction_required_count"),
         "parity_recovered_count": analyze.get("parity_recovered_count"),
         "package_hash_resolved_count": analyze.get("package_hash_resolved_count"),
     }
@@ -4174,6 +5702,12 @@ def _build_case_record(
             "line_crc_mode": export_result.get("line_crc_mode") if isinstance(export_result, dict) else None,
             "line_index_mode": export_result.get("line_index_mode") if isinstance(export_result, dict) else None,
             "metadata_level": export_result.get("metadata_level") if isinstance(export_result, dict) else None,
+            "payload_alphabet_profile": (
+                export_result.get("payload_alphabet_profile")
+                if isinstance(export_result, dict)
+                else None
+            ),
+            "alphabet": export_result.get("alphabet") if isinstance(export_result, dict) else None,
             "redundancy_copies": export_result.get("redundancy_copies") if isinstance(export_result, dict) else None,
             "interleave_enabled": export_result.get("interleave_enabled") if isinstance(export_result, dict) else None,
             "parity_enabled": export_result.get("parity_enabled") if isinstance(export_result, dict) else None,
@@ -4252,6 +5786,8 @@ def _build_capture_export_result(
         "line_crc_mode": manifest.get("line_crc_mode"),
         "line_index_mode": manifest.get("line_index_mode"),
         "metadata_level": manifest.get("metadata_level"),
+        "payload_alphabet_profile": manifest.get("payload_alphabet_profile"),
+        "alphabet": manifest.get("alphabet"),
         "redundancy_copies": manifest.get("redundancy_copies"),
         "interleave_enabled": manifest.get("interleave_enabled"),
         "parity_enabled": bool(parity.get("enabled")) if parity else None,
@@ -4753,6 +6289,103 @@ def prepare_capture_corpus_kit(
     corpus_path = _resolve_output_path(corpus_file, out_dir, "capture_corpus.json")
     _write_json(corpus_path, corpus_payload)
 
+    metadata_template_path = instructions_dir / "operator_capture_metadata_manifest_template.json"
+    metadata_template_defaults = _capture_metadata_manifest_template_defaults(
+        capture_metadata_normalized,
+        capture_medium_value,
+    )
+    metadata_template_cases = []
+    for case in cases:
+        case_metadata = {
+            "label": case["label"],
+            "capture_metadata": {},
+        }
+        if ocr_backend_value:
+            case_metadata["ocr_only_backend"] = ocr_backend_value
+        metadata_template_cases.append(case_metadata)
+    metadata_template_payload = {
+        "schema": CAPTURE_METADATA_MANIFEST_SCHEMA,
+        "capture_metadata_defaults": metadata_template_defaults,
+        "cases": metadata_template_cases,
+        "instructions": [
+            "Fill capture_session_id, operator, captured_at_utc, and the scanner/camera/printer metadata before ingestion.",
+            "Pass this file to ingest-capture-corpus or certify-capture-evidence with --capture-metadata-manifest-file.",
+            "This metadata manifest is provenance input only; certification still requires measured recovery, archive replay, and a matching claim gate.",
+        ],
+        "certification_boundary": (
+            "This template binds operator/session/device metadata by case label only after "
+            "the operator fills real values and ingestion records its SHA256. It does not "
+            "certify any transport medium by itself."
+        ),
+    }
+    _write_json(metadata_template_path, metadata_template_payload)
+    metadata_template_sha256 = _sha256_file(metadata_template_path)
+
+    return_manifest_template_path = instructions_dir / "operator_return_manifest_template.json"
+    return_manifest_template_payload = {
+        "schema": CAPTURE_RETURN_MANIFEST_SCHEMA,
+        "capture_corpus_file": _safe_relative_path(corpus_path.resolve(), out_dir.resolve()),
+        "capture_corpus_sha256": _sha256_file(corpus_path),
+        "capture_kit_manifest_file": "capture_kit_manifest.json",
+        "capture_kit_manifest_sha256": "",
+        "return_session_id": "",
+        "operator": "",
+        "returned_at_utc": "",
+        "capture_package_layout": {
+            "capture_root": "captures/",
+            "raw_capture_root": "raw_captures/",
+            "metadata_manifest": "operator_capture_metadata_manifest.json",
+        },
+        "capture_file_inventory": {
+            "required": True,
+            "description": (
+                "List every returned capture image and raw camera image by package path. "
+                "Fill SHA256 and size_bytes after the lab/operator ZIP is assembled so extraction "
+                "can reject missing, extra, or byte-drifted evidence files."
+            ),
+        },
+        "cases": [
+            {
+                "label": case["label"],
+                "expected_capture_directory": "captures/{}".format(case["label"]),
+                "expected_raw_capture_directory": "raw_captures/{}".format(case["label"]),
+                "capture_files": [
+                    {
+                        "path": "captures/{}/<returned-scan-or-corrected-photo>.png".format(
+                            case["label"]
+                        ),
+                        "sha256": "",
+                        "size_bytes": "",
+                    }
+                ],
+                "raw_capture_files": [
+                    {
+                        "path": "raw_captures/{}/<returned-raw-camera-photo>.jpg".format(
+                            case["label"]
+                        ),
+                        "sha256": "",
+                        "size_bytes": "",
+                    }
+                ] if case.get("raw_image_paths") else [],
+            }
+            for case in cases
+        ],
+        "instructions": [
+            "Rename this file to operator_return_manifest.json before packaging the lab/operator ZIP.",
+            "Leave capture_corpus_sha256 unchanged; it binds the returned ZIP to the prepared corpus.",
+            "Optionally fill capture_kit_manifest_sha256 after the kit manifest is finalized.",
+            "Put returned scans/photos under captures/<case-label>/ and raw camera photos under raw_captures/<case-label>/.",
+            "Replace capture_files/raw_capture_files placeholders with every returned image path, SHA256, and byte size; remove raw_capture_files when the run is not a camera/raw-photo run.",
+        ],
+        "certification_boundary": (
+            "This return manifest binds a lab/operator ZIP to a prepared corpus and optional "
+            "kit manifest. It is package identity evidence only; certification still requires "
+            "ingestion, recovery, archive replay, and a matching claim gate."
+        ),
+    }
+    _write_json(return_manifest_template_path, return_manifest_template_payload)
+    return_manifest_template_sha256 = _sha256_file(return_manifest_template_path)
+
     instructions_path = instructions_dir / "NEXT_STEPS.md"
     attach_command = (
         "python .\\soenc.py transport attach-capture-corpus "
@@ -4789,16 +6422,18 @@ def prepare_capture_corpus_kit(
                 "1. Print or display each generated page set under `exports/*/pages`.",
                 "2. Place the corresponding corrected camera photos or scan images into each matching `captures/*` directory.",
                 "3. Keep the corpus classification honest: `lab` for controlled scanner/bench runs, `real` for real camera/operator runs.",
-                "4. For physical print-scan evidence, set each corpus case `capture_medium` to `print-scan` and record `printer`, `scanner`, and `dpi` in `capture_metadata`.",
-                "5. For real camera perspective-correction evidence, keep raw uncorrected photos in `captures/*__raw`, corrected recovery images in the matching `captures/*` directory, and require the camera gate.",
-                "6. For OCR-only evidence, keep this kit sidecar-free and require the named OCR backend during certification.",
-                "7. From the repository root, bind the files currently in the capture directories:",
+                "4. Fill `instructions/operator_capture_metadata_manifest_template.json` with the real capture session, operator, timestamp, and scanner/camera/printer metadata; pass it with `--capture-metadata-manifest-file` during ingestion or the one-command pipeline.",
+                "5. If returning a ZIP package, rename `instructions/operator_return_manifest_template.json` to `operator_return_manifest.json` at the package root so extraction can bind the return to this prepared corpus.",
+                "6. For physical print-scan evidence, set each corpus case `capture_medium` to `print-scan` and record `printer`, `scanner`, and `dpi` in capture metadata.",
+                "7. For real camera perspective-correction evidence, keep raw uncorrected photos in `captures/*__raw`, corrected recovery images in the matching `captures/*` directory, and require the camera gate.",
+                "8. For OCR-only evidence, keep this kit sidecar-free and require the named OCR backend during certification.",
+                "9. From the repository root, bind the files currently in the capture directories:",
                 "",
                 "```powershell",
                 attach_command,
                 "```",
                 "",
-                "8. Run certification from the repository root. Add `--require-distinct-capture-images` and `--require-capture-attachment-report` when claiming physical/lab capture evidence:",
+                "10. Run certification from the repository root. Add `--require-distinct-capture-images` and `--require-capture-attachment-report` when claiming physical/lab capture evidence:",
                 "",
                 "```powershell",
                 certify_command,
@@ -4833,6 +6468,10 @@ def prepare_capture_corpus_kit(
         "output_dir": str(out_dir),
         "corpus_file": str(corpus_path),
         "instructions_file": str(instructions_path),
+        "capture_metadata_manifest_template_file": str(metadata_template_path),
+        "capture_metadata_manifest_template_sha256": metadata_template_sha256,
+        "capture_return_manifest_template_file": str(return_manifest_template_path),
+        "capture_return_manifest_template_sha256": return_manifest_template_sha256,
         "parameters": {
             "seed": int(seed),
             "payload_sizes": sizes,
@@ -4846,6 +6485,8 @@ def prepare_capture_corpus_kit(
             "include_raw_capture_dirs": bool(include_raw_capture_dirs),
             "perspective_correction_method": perspective_method or None,
             "ocr_only_backend": ocr_backend_value or None,
+            "capture_metadata_manifest_template_schema": CAPTURE_METADATA_MANIFEST_SCHEMA,
+            "capture_return_manifest_template_schema": CAPTURE_RETURN_MANIFEST_SCHEMA,
         },
         "summary": {
             "case_count": len(cases),
@@ -4860,6 +6501,8 @@ def prepare_capture_corpus_kit(
             "operator_captures_present": 0,
             "operator_raw_captures_present": 0,
             "ocr_only_backend": ocr_backend_value or None,
+            "capture_metadata_manifest_template_ready": True,
+            "capture_return_manifest_template_ready": True,
         },
         "certification_boundary": (
             "This kit stages generated source pages and a capture manifest only; "
@@ -5213,6 +6856,25 @@ def _is_safe_archive_member(name: object) -> bool:
     if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
         return False
     if normalized.endswith("/"):
+        return False
+    if ":" in normalized.split("/", 1)[0]:
+        return False
+    path = Path(normalized)
+    if path.is_absolute():
+        return False
+    return all(part not in ("", ".", "..") for part in normalized.split("/"))
+
+
+def _is_safe_archive_directory_member(name: object) -> bool:
+    text = str(name or "")
+    if not text or text != text.strip():
+        return False
+    if not text.endswith("/"):
+        return False
+    normalized = text[:-1].replace("\\", "/")
+    if normalized + "/" != text:
+        return False
+    if not normalized or normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
         return False
     if ":" in normalized.split("/", 1)[0]:
         return False
@@ -7228,6 +8890,11 @@ def certify_capture_evidence_pipeline(
     capture_corpus_file: str,
     output_dir: str,
     *,
+    capture_return_package_file: Optional[str] = None,
+    capture_return_package_report_file: Optional[str] = None,
+    require_capture_return_manifest: bool = False,
+    require_capture_return_file_inventory: bool = False,
+    require_capture_return_package_report: bool = False,
     capture_root: Optional[str] = None,
     raw_capture_root: Optional[str] = None,
     capture_medium: Optional[str] = None,
@@ -7263,6 +8930,7 @@ def certify_capture_evidence_pipeline(
     strict_payload_chars: bool = False,
     max_list: int = 200,
     kit_manifest_file: Optional[str] = None,
+    capture_return_extraction_report_file: Optional[str] = None,
     ingestion_report_file: Optional[str] = None,
     attachment_report_file: Optional[str] = None,
     validation_report_file: Optional[str] = None,
@@ -7283,6 +8951,15 @@ def certify_capture_evidence_pipeline(
         raise ValueError("capture corpus file does not exist: {}".format(corpus_path))
 
     out_dir = Path(str(output_dir)).resolve()
+    raw_kit_manifest = str(kit_manifest_file or "").strip()
+    resolved_kit_manifest_file: Optional[str] = None
+    if raw_kit_manifest:
+        kit_candidate = Path(raw_kit_manifest)
+        if not kit_candidate.is_absolute():
+            cwd_candidate = kit_candidate.resolve()
+            kit_candidate = cwd_candidate if cwd_candidate.exists() else corpus_path.parent / kit_candidate
+        resolved_kit_manifest_file = str(kit_candidate.resolve())
+    return_package_dir = out_dir / "return_package"
     ingest_dir = out_dir / "ingest"
     attach_dir = out_dir / "attach"
     validate_dir = out_dir / "validate"
@@ -7294,6 +8971,9 @@ def certify_capture_evidence_pipeline(
         "evidence_replay",
     ).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    if capture_return_package_file is not None and str(capture_return_package_file).strip():
+        return_package_dir.mkdir(parents=True, exist_ok=True)
+        ingest_dir.mkdir(parents=True, exist_ok=True)
     if capture_root is not None and str(capture_root).strip():
         ingest_dir.mkdir(parents=True, exist_ok=True)
     attach_dir.mkdir(parents=True, exist_ok=True)
@@ -7347,6 +9027,11 @@ def certify_capture_evidence_pipeline(
         replay_dir,
         "transport_evidence_archive_replay_report.json",
     ).resolve()
+    return_package_report_path = _resolve_output_path(
+        capture_return_extraction_report_file,
+        return_package_dir,
+        "transport_capture_return_package_extraction_report.json",
+    ).resolve()
     status_path = _resolve_output_path(
         status_report_file,
         archive_dir,
@@ -7391,20 +9076,99 @@ def certify_capture_evidence_pipeline(
             blocked_by_step = step_name
         failures.append({"step": step_name, "message": message})
 
+    effective_capture_root = capture_root
+    effective_raw_capture_root = raw_capture_root
+    effective_metadata_manifest_file = capture_metadata_manifest_file
+
+    return_package_result: Optional[Dict[str, object]] = None
+    if capture_return_package_file is not None and str(capture_return_package_file).strip():
+        try:
+            return_package_result = _safe_extract_capture_return_package(
+                package_file=str(capture_return_package_file),
+                output_dir=return_package_dir,
+                expected_capture_corpus_file=str(corpus_path),
+                expected_kit_manifest_file=resolved_kit_manifest_file,
+                expected_capture_return_package_report_file=(
+                    str(capture_return_package_report_file)
+                    if capture_return_package_report_file is not None
+                    else None
+                ),
+                require_capture_return_manifest=bool(require_capture_return_manifest),
+                require_capture_return_file_inventory=bool(
+                    require_capture_return_file_inventory
+                ),
+                require_capture_return_package_report=bool(
+                    require_capture_return_package_report
+                ),
+                report_file=str(return_package_report_path),
+            )
+            steps.append(
+                _capture_pipeline_step(
+                    "extract-capture-return-package",
+                    result=return_package_result,
+                    output_file=return_package_report_path,
+                )
+            )
+            artifacts["capture_return_package_extraction_report_file"] = str(
+                return_package_report_path
+            )
+            if not bool(return_package_result.get("success")):
+                executed = False
+                mark_failure(
+                    "extract-capture-return-package",
+                    "capture return package extraction failed",
+                )
+            else:
+                if (
+                    not (effective_capture_root is not None and str(effective_capture_root).strip())
+                    and return_package_result.get("capture_root")
+                ):
+                    effective_capture_root = str(return_package_result.get("capture_root"))
+                if (
+                    not (
+                        effective_raw_capture_root is not None
+                        and str(effective_raw_capture_root).strip()
+                    )
+                    and return_package_result.get("raw_capture_root")
+                ):
+                    effective_raw_capture_root = str(
+                        return_package_result.get("raw_capture_root")
+                    )
+                if (
+                    not (
+                        effective_metadata_manifest_file is not None
+                        and str(effective_metadata_manifest_file).strip()
+                    )
+                    and return_package_result.get("capture_metadata_manifest_file")
+                ):
+                    effective_metadata_manifest_file = str(
+                        return_package_result.get("capture_metadata_manifest_file")
+                    )
+        except Exception as exc:
+            executed = False
+            steps.append(
+                _capture_pipeline_step(
+                    "extract-capture-return-package",
+                    output_file=return_package_report_path,
+                    error=exc,
+                )
+            )
+            mark_failure("extract-capture-return-package", str(exc))
+
     ingestion_result: Optional[Dict[str, object]] = None
-    if capture_root is not None and str(capture_root).strip():
+    if executed and effective_capture_root is not None and str(effective_capture_root).strip():
         try:
             ingestion_result = ingest_capture_corpus(
                 capture_corpus_file=str(corpus_path),
-                capture_root=str(capture_root),
+                capture_root=str(effective_capture_root),
                 output_dir=str(ingest_dir),
                 report_file=str(ingestion_path),
                 kit_manifest_file=kit_manifest_file,
-                raw_capture_root=raw_capture_root,
+                raw_capture_root=effective_raw_capture_root,
                 classification=capture_required_classification,
                 capture_medium=inferred_capture_medium,
                 capture_metadata=capture_metadata,
-                capture_metadata_manifest_file=capture_metadata_manifest_file,
+                capture_metadata_manifest_file=effective_metadata_manifest_file,
                 require_captures=bool(require_captures),
                 require_raw_captures=bool(require_raw_captures),
                 require_all_case_labels=bool(require_all_case_labels),
@@ -7432,6 +9196,16 @@ def certify_capture_evidence_pipeline(
                 )
             )
             mark_failure("ingest-capture-corpus", str(exc))
+    elif not executed and capture_return_package_file is not None and str(capture_return_package_file).strip():
+        if blocked_by_step == "extract-capture-return-package":
+            steps.append(
+                _capture_pipeline_step(
+                    "ingest-capture-corpus",
+                    output_file=ingestion_path,
+                    skipped=True,
+                    skip_reason="{} failed".format(blocked_by_step),
+                )
+            )
 
     attachment_result: Optional[Dict[str, object]] = None
     if executed:
@@ -7800,13 +9574,48 @@ def certify_capture_evidence_pipeline(
         "capture_corpus_sha256": _sha256_file(corpus_path),
         "output_dir": str(out_dir),
         "parameters": {
+            "capture_return_package_file": (
+                str(capture_return_package_file)
+                if capture_return_package_file is not None
+                else None
+            ),
+            "capture_return_package_report_file": (
+                str(capture_return_package_report_file)
+                if capture_return_package_report_file is not None
+                else None
+            ),
+            "require_capture_return_manifest": bool(require_capture_return_manifest),
+            "require_capture_return_file_inventory": bool(
+                require_capture_return_file_inventory
+            ),
+            "require_capture_return_package_report": bool(
+                require_capture_return_package_report
+            ),
+            "capture_return_manifest_file": (
+                return_package_result.get("capture_return_manifest_file")
+                if isinstance(return_package_result, dict)
+                else None
+            ),
             "capture_root": str(capture_root) if capture_root is not None else None,
             "raw_capture_root": str(raw_capture_root) if raw_capture_root is not None else None,
+            "effective_capture_root": (
+                str(effective_capture_root) if effective_capture_root is not None else None
+            ),
+            "effective_raw_capture_root": (
+                str(effective_raw_capture_root)
+                if effective_raw_capture_root is not None
+                else None
+            ),
             "capture_medium": inferred_capture_medium,
             "capture_metadata": dict(capture_metadata or {}),
             "capture_metadata_manifest_file": (
                 str(capture_metadata_manifest_file)
                 if capture_metadata_manifest_file is not None
+                else None
+            ),
+            "effective_capture_metadata_manifest_file": (
+                str(effective_metadata_manifest_file)
+                if effective_metadata_manifest_file is not None
                 else None
             ),
             "require_all_case_labels": bool(require_all_case_labels),
@@ -7847,6 +9656,59 @@ def certify_capture_evidence_pipeline(
                 ingestion_result.get("success")
                 if isinstance(ingestion_result, dict)
                 else False
+            ),
+            "capture_return_package_extracted": bool(
+                return_package_result.get("success")
+                if isinstance(return_package_result, dict)
+                else False
+            ),
+            "capture_return_manifest_validated": bool(
+                return_package_result.get("summary", {}).get(
+                    "capture_return_manifest_validated"
+                )
+                if isinstance(return_package_result, dict)
+                and isinstance(return_package_result.get("summary"), dict)
+                else False
+            ),
+            "capture_return_manifest_required": bool(
+                return_package_result.get("summary", {}).get(
+                    "capture_return_manifest_required"
+                )
+                if isinstance(return_package_result, dict)
+                and isinstance(return_package_result.get("summary"), dict)
+                else require_capture_return_manifest
+            ),
+            "capture_return_manifest_file_inventory_validated": bool(
+                return_package_result.get("summary", {}).get(
+                    "capture_return_manifest_file_inventory_validated"
+                )
+                if isinstance(return_package_result, dict)
+                and isinstance(return_package_result.get("summary"), dict)
+                else False
+            ),
+            "capture_return_manifest_file_inventory_gate_required": bool(
+                return_package_result.get("summary", {}).get(
+                    "capture_return_manifest_file_inventory_gate_required"
+                )
+                if isinstance(return_package_result, dict)
+                and isinstance(return_package_result.get("summary"), dict)
+                else require_capture_return_file_inventory
+            ),
+            "capture_return_package_report_validated": bool(
+                return_package_result.get("summary", {}).get(
+                    "capture_return_package_report_validated"
+                )
+                if isinstance(return_package_result, dict)
+                and isinstance(return_package_result.get("summary"), dict)
+                else False
+            ),
+            "capture_return_package_report_required": bool(
+                return_package_result.get("summary", {}).get(
+                    "capture_return_package_report_required"
+                )
+                if isinstance(return_package_result, dict)
+                and isinstance(return_package_result.get("summary"), dict)
+                else require_capture_return_package_report
             ),
             "archive_verified": bool(
                 verification_result.get("success")
@@ -8635,6 +10497,12 @@ def certify_transport_reliability(
                 "line_separator": getattr(transport, "line_separator", None),
                 "line_index_mode": getattr(transport, "line_index_mode", None),
                 "line_crc_mode": getattr(transport, "line_crc_mode", None),
+                "payload_alphabet_profile": getattr(
+                    transport,
+                    "payload_alphabet_profile",
+                    None,
+                ),
+                "alphabet": getattr(transport, "payload_alphabet", None),
                 "render_sidecar": getattr(transport, "render_sidecar", None),
                 "font_size": getattr(transport, "font_size", None),
                 "font_fit_mode": getattr(transport, "font_fit_mode", None),
@@ -8732,7 +10600,7 @@ def certify_transport_reliability(
             "supported_but_not_certified": [
                 "real-camera-photo",
                 "real-camera-perspective-correction",
-            "print-scan-full",
+                "print-scan-full",
                 "generic-ocr-only",
             ],
         },
@@ -8792,6 +10660,10 @@ __all__ = [
     "CERTIFICATION_STATUS_SCHEMA",
     "CAPTURE_CERTIFICATION_PIPELINE_SCHEMA",
     "CAPTURE_CORPUS_INGESTION_REPORT_SCHEMA",
+    "CAPTURE_METADATA_MANIFEST_SCHEMA",
+    "CAPTURE_RETURN_PACKAGE_EXTRACTION_SCHEMA",
+    "CAPTURE_RETURN_PACKAGE_SCHEMA",
+    "CAPTURE_RETURN_MANIFEST_SCHEMA",
     "DEFAULT_PAYLOAD_SIZES",
     "DIGITAL_SIDECAR_PROFILE",
     "RELIABLE_AIRGAP_PROFILE",
@@ -8814,6 +10686,7 @@ __all__ = [
     "TRANSPORT_CERTIFICATION_CLAIMS",
     "certify_transport_reliability",
     "prepare_capture_corpus_kit",
+    "package_capture_return",
     "ingest_capture_corpus",
     "attach_capture_corpus",
     "correct_capture_perspective",
