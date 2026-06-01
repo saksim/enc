@@ -3045,6 +3045,112 @@ class TransportCertificationTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue(Path(str(replay["replay_report_file"])).exists())
 
     @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
+    def test_replay_transport_evidence_archive_accepts_multi_image_rewritten_corpus(self) -> None:
+        root = self.make_case_root("replay_archive_multi_image_corpus")
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=24,
+            lines_per_page=8,
+            max_compressed_kib=64,
+            metadata_level="compact",
+            line_index_mode="full",
+            line_crc_mode="on",
+            render_sidecar=True,
+        )
+        payload_path = root / "payload.bin"
+        payload_path.write_bytes(b"operator supplied multi image replay payload")
+        export_result = transport.export_artifact(
+            input_file=str(payload_path),
+            output_dir=str(root / "exported"),
+            filename_prefix="capture",
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+        source_pages = [Path(str(path)) for path in export_result["images"]]
+        self.assertGreater(len(source_pages), 1)
+        capture_dir = root / "captures" / "multi"
+        capture_dir.mkdir(parents=True)
+        for source_page in source_pages:
+            capture_page = capture_dir / source_page.name
+            shutil.copy2(str(source_page), str(capture_page))
+            with capture_page.open("ab") as handle:
+                handle.write(b"\n# replay multi-image fixture marker\n")
+
+        corpus_file = root / "capture_corpus.json"
+        corpus_file.write_text(
+            json.dumps(
+                {
+                    "schema": certify.CAPTURE_CORPUS_SCHEMA,
+                    "classification": "lab",
+                    "cases": [
+                        {
+                            "label": "multi-image-print-scan-fixture",
+                            "classification": "lab",
+                            "capture_medium": "print-scan",
+                            "manifest_path": str(export_result["manifest_path"]),
+                            "payload_path": str(payload_path),
+                            "image_path": str(capture_dir),
+                            "reference_image_paths": [str(path) for path in source_pages],
+                            "capture_metadata": {
+                                "printer": "unit-test-printer",
+                                "scanner": "unit-test-flatbed",
+                                "dpi": 300,
+                                "capture_session_id": "unit-test-multi-image-session",
+                                "operator": "unit-test-operator",
+                                "captured_at_utc": "2026-06-01T05:00:00Z",
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        attachment = transport.attach_capture_corpus(
+            capture_corpus_file=str(corpus_file),
+            output_dir=str(root / "attach"),
+            require_captures=True,
+            require_distinct_capture_images=True,
+        )
+        self.assertTrue(attachment["success"])
+        result = transport.certify_reliability(
+            output_dir=str(root / "cert"),
+            backend="sidecar",
+            profile="reliable-airgap-v1",
+            capture_corpus_file=str(corpus_file),
+            capture_attachment_report_file=str(attachment["report_file"]),
+            include_generated_corpus=False,
+            require_distinct_capture_images=True,
+            require_physical_print_scan=True,
+            require_capture_attachment_report=True,
+            require_capture_provenance=True,
+            redundancy_copies=2,
+            parity_group_size=4,
+            max_list=20,
+        )
+        self.assertTrue(result["success"])
+        archive_manifest = certify.archive_transport_evidence(
+            report_file=str(root / "cert" / "transport_reliability_report.json"),
+            output_dir=str(root / "archive"),
+            require_successful_report=True,
+            require_capture_attachment_report=True,
+            require_physical_print_scan=True,
+            require_profile_certified=True,
+        )
+
+        replay = transport.replay_transport_evidence_archive(
+            archive_file=str(archive_manifest["archive_file"]),
+            manifest_file=str(archive_manifest["manifest_file"]),
+            output_dir=str(root / "replay_archive"),
+            require_successful_report=True,
+            require_capture_attachment_report=True,
+            require_physical_print_scan=True,
+            require_profile_certified=True,
+        )
+
+        self.assertTrue(replay["success"])
+        self.assertEqual(replay["comparison"]["mismatch_count"], 0)
+        self.assertTrue(replay["summary"]["replay_success"])
+
+    @unittest.skipUnless(qrcode_helper.PIL_AVAILABLE, "requires Pillow for generated digital pages")
     def test_verify_transport_evidence_archive_fails_on_tampered_member(self) -> None:
         root = self.make_case_root("verify_archive_tamper")
         transport = qrcode_helper.AirgapTransportLayer(

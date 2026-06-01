@@ -650,6 +650,55 @@ Current go-live gate note (2026-05-07):
   - Verification reports now expose `archived_report_paths_verified` and `archived_report_path_binding_count` for audit handoff.
   - Local evidence `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive_verification.json` verified `archived_report_paths_verified=true`, `archived_report_path_binding_count=89`, `verified_file_count=91`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
   - This tightens synthetic OCR-safe archived-report replay metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe report-state parity), `ENC-P0-019` tightens OCR-safe archive report state integrity:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires boolean-typed report success flags and source-verification-required flags in `manifest.reports[]`.
+  - Source-verification manifest metadata and archived verifier JSON must use boolean `success` and integer `failure_count`; string truthy values fail closed even when the embedded synthetic report still replays.
+  - Verification reports now expose `archive_report_states_verified` and `source_report_verification_states_verified` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_report_state_20260531a/ocr_safe_evidence_archive_verification.json` verified `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `verified_file_count=92`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive state metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-05-31 (OCR-safe source-verification summary parity), `ENC-P0-019` tightens OCR-safe source-verifier inventory replay:
+  - `soenc transport archive-ocr-safe-evidence` now records `summary.source_report_verification_count` and `summary.source_report_verification_roles` beside the general report/file summaries.
+  - `soenc transport verify-ocr-safe-evidence-archive` recomputes the source-verification count and per-report-role inventory from `manifest.reports[]` and fails closed if the summary is missing, malformed, or drifted.
+  - Verification reports now expose `summary_source_report_verification_count_verified`, `summary_source_report_verification_roles_verified`, and `verified_source_report_verification_roles` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_source_summary_20260531/ocr_safe_evidence_archive_verification.json` verified `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `verified_source_report_verification_roles={"ocr_safe_confusion_report": 1}`, `verified_file_count=92`, `confusion_report_verified=true`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive source-verification summary metadata only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (OCR-safe archive timestamp provenance), `ENC-P0-019` tightens OCR-safe archive generation-time metadata:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires archive manifest `generated_at_utc` to be canonical UTC `YYYY-MM-DDTHH:MM:SSZ`.
+  - When an external manifest is supplied, `generated_at_utc` must match the embedded manifest before `external_manifest_verified=true`.
+  - Verification reports now expose `archive_generated_at_verified` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_timestamp_20260601/ocr_safe_evidence_archive_verification.json` verified `archive_generated_at_verified=true`, `external_manifest_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=383318`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive timestamp provenance only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (OCR-safe archive file metadata provenance), `ENC-P0-019` tightens OCR-safe archive per-file manifest metadata:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires each `manifest.files[]` record to carry a canonical lowercase 64-hex SHA256 and an integer non-negative `size_bytes`.
+  - Verification reports now expose `manifest_file_metadata_verified` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_file_metadata_20260601/ocr_safe_evidence_archive_verification.json` verified `manifest_file_metadata_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=383690`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive file metadata provenance only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (OCR-safe archive report-entry metadata provenance), `ENC-P0-019` tightens OCR-safe archive report-entry manifest metadata:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires report-entry source/report SHA256 metadata plus source-report/source-verifier archive path, SHA256, and byte-size metadata to be canonical.
+  - Verification reports now expose `archive_report_metadata_verified` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_report_metadata_20260601/ocr_safe_evidence_archive_verification.json` verified `archive_report_metadata_verified=true`, `manifest_file_metadata_verified=true`, `verified_file_count=92`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive report-entry metadata provenance only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (OCR-safe archive package-time state typing), `ENC-P0-019` tightens OCR-safe archive creation semantics:
+  - `soenc transport archive-ocr-safe-evidence` now rejects malformed source report `success` state and malformed source-verifier `success`/`failure_count` state before any ZIP is written.
+  - This prevents truthy strings or other coerced state from being normalized into a clean archive manifest.
+  - Local evidence `.tmp_transport_ocr_safe_packaging_state_20260601/ocr_safe_evidence_archive_verification.json` verified `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `archive_report_metadata_verified=true`, `manifest_file_metadata_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=383876`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe package-time evidence hygiene only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (OCR-safe archive file-role binding), `ENC-P0-019` tightens OCR-safe archive file inventory semantics:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires every `manifest.files[]` role to be an allowlisted OCR-safe evidence role.
+  - Fixed report/source-verifier roles must use their canonical archive member names, and artifact roles must live under the matching archive path prefix before `archive_file_roles_verified=true`.
+  - Local evidence `.tmp_transport_ocr_safe_file_roles_20260601/ocr_safe_evidence_archive_verification.json` verified `archive_file_roles_verified=true`, `verified_file_count=92`, `summary_roles_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe archive file-role provenance only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (OCR-safe source-report archive metadata parity), `ENC-P0-019` tightens OCR-safe source-verifier handoff metadata:
+  - `soenc transport verify-ocr-safe-evidence-archive` now requires the report-level `source_report_archive` path/SHA256/size to match the duplicate `source_verification.source_report_archive_*` fields.
+  - Verification reports now expose `source_report_archive_metadata_parity_verified` for audit handoff.
+  - Local evidence `.tmp_transport_ocr_safe_source_report_parity_20260601/ocr_safe_evidence_archive_verification.json` verified `source_report_archive_metadata_parity_verified=true`, `archive_report_metadata_verified=true`, `verified_file_count=92`, `confusion_report_verified=true`, `source_report_verification_count=1`, and `failure_count=0`.
+  - This tightens synthetic OCR-safe source-report archive provenance only; it still does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+- As of 2026-06-01 (encrypted-text real-capture operator harness), `ENC-P0-019` adds a concrete text-to-photo-to-recovery validation entry point:
+  - `scripts/real_capture_text_transport.py prepare` encrypts operator-supplied text with the platform encryption helper, exports OCR-safe transport pages, stages capture/raw-capture directories, and writes replayable corpus/kit/instruction manifests.
+  - `scripts/real_capture_text_transport.py certify` reads operator-supplied photos/scans from the staged capture directory, runs the capture evidence pipeline, verifies and replays the archive, decrypts the recovered artifact, and writes `text_roundtrip_verification.json` with final plaintext SHA256 verification.
+  - Transport evidence archive replay now handles archived multi-image capture corpora whose extracted `image_path` is rewritten as a list, and drops stale raw-camera path fields when the archive contains no raw-image digest records.
+  - Local smoke `.tmp_real_capture_text_flow_20260601_smoke2/` passed `--claim none` after copying generated pages into the capture folder for harness validation only.
+  - This closes an operator workflow gap but does not certify real camera/photo, physical print-scan, real camera perspective-correction, or backend-specific OCR transfer unless actual supplied captures pass the matching strict claim gate and archive/status checks.
 - As of 2026-05-10 (iteration 22), `ENC-P0-016` adds fail-closed CI-context binding for archived promotion evidence:
   - `collect-promotion-evidence` now records `github_context` in `promotion_evidence.json`.
   - `soenc verify-promotion-artifacts` now supports `--require-ci-context-match` to enforce evidence/run identity consistency:

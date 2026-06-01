@@ -357,6 +357,19 @@ def _resolve_output_path(raw_path: Optional[str], output_dir: Path, default_name
 
 
 def _image_paths_from_capture_input(raw_path: object, base_dir: Path) -> List[Path]:
+    if isinstance(raw_path, list):
+        paths: List[Path] = []
+        seen = set()
+        for item in raw_path:
+            for path in _image_paths_from_capture_input(item, base_dir):
+                key = str(path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(path)
+        if not paths:
+            raise ValueError("capture image path list has no supported image files")
+        return paths
     path = _resolve_existing_path(raw_path, base_dir, "capture image path")
     if path.is_file():
         if path.suffix.lower() not in CAPTURE_IMAGE_SUFFIXES:
@@ -8069,6 +8082,9 @@ def _rewrite_archive_corpus_paths(
             )
         if raw_paths:
             raw_case["raw_image_paths"] = raw_paths
+        else:
+            raw_case.pop("raw_image_paths", None)
+            raw_case.pop("raw_image_path", None)
 
 
 def _rewrite_archive_corpus_paths_from_report(
@@ -8132,6 +8148,9 @@ def _rewrite_archive_corpus_paths_from_report(
         )
         if raw_paths:
             raw_case["raw_image_paths"] = raw_paths
+        else:
+            raw_case.pop("raw_image_paths", None)
+            raw_case.pop("raw_image_path", None)
 
 
 def _case_replay_comparison(
