@@ -225,6 +225,19 @@ def _safe_archive_member_for_path(path: Path, role: str, used: set) -> str:
     return candidate
 
 
+def _reserve_ocr_safe_archive_member(member: str, used: set, description: str) -> str:
+    if not _is_safe_archive_member(member):
+        raise ValueError(
+            "unsafe OCR-safe archive member for {}: {}".format(description, member)
+        )
+    if member == OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST or member in used:
+        raise ValueError(
+            "duplicate OCR-safe archive member for {}: {}".format(description, member)
+        )
+    used.add(member)
+    return member
+
+
 def _archive_digest_record(path: Path, role: str, used: set) -> Dict[str, object]:
     payload = path.read_bytes()
     return {
@@ -313,7 +326,6 @@ def _rewrite_report_paths_for_archive(
         "payload_file",
         "manifest_path",
         "export_payload_path",
-        "requested_output_file",
         "output_file",
         "ocr_input_path",
         "corrections_file",
@@ -321,6 +333,16 @@ def _rewrite_report_paths_for_archive(
     ]:
         if field in rewritten:
             rewritten[field] = _rewrite_value(rewritten.get(field))
+    if "requested_output_file" in rewritten:
+        requested_output = report.get("requested_output_file")
+        requested_output_rewritten = _rewrite_value(requested_output)
+        if (
+            _normalize_optional_path(requested_output)
+            and requested_output_rewritten == requested_output
+        ):
+            rewritten["requested_output_file"] = None
+        else:
+            rewritten["requested_output_file"] = requested_output_rewritten
 
     for record in rewritten.get("source_page_texts", []) or []:
         if isinstance(record, dict) and "path" in record:
@@ -338,6 +360,36 @@ def _rewrite_report_paths_for_archive(
     return rewritten
 
 
+def _archive_source_path_map(files: List[object]) -> Dict[str, Dict[str, object]]:
+    file_by_source: Dict[str, Dict[str, object]] = {}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        if role in OCR_SAFE_EVIDENCE_ARCHIVE_FIXED_ROLE_PATHS or role in {
+            "ocr_safe_confusion_source_report",
+            "correction_replay_source_report",
+        }:
+            continue
+        source_path = str(item.get("source_path") or "").strip()
+        if not source_path:
+            continue
+        file_by_source.setdefault(source_path, item)
+        try:
+            resolved_source_path = str(Path(source_path).resolve())
+        except Exception:
+            continue
+        file_by_source.setdefault(resolved_source_path, item)
+    return file_by_source
+
+
+def _archive_source_path_identity(source_path: str) -> str:
+    try:
+        return str(Path(source_path).resolve())
+    except Exception:
+        return str(source_path).strip().replace("\\", "/")
+
+
 def _expected_rewritten_report_role(report_role: str) -> Optional[str]:
     if report_role == "ocr_safe_confusion_report":
         return "ocr_safe_confusion_report_rewritten"
@@ -346,12 +398,26 @@ def _expected_rewritten_report_role(report_role: str) -> Optional[str]:
     return None
 
 
+def _expected_rewritten_report_archive_path(report_role: str) -> Optional[str]:
+    role = _expected_rewritten_report_role(report_role)
+    if role is None:
+        return None
+    return OCR_SAFE_EVIDENCE_ARCHIVE_FIXED_ROLE_PATHS.get(role)
+
+
 def _source_verification_archive_role(report_role: str) -> Optional[str]:
     if report_role == "ocr_safe_confusion_report":
         return "ocr_safe_confusion_source_verification_report"
     if report_role == "correction_replay_report":
         return "correction_replay_source_verification_report"
     return None
+
+
+def _source_verification_archive_path(report_role: str) -> Optional[str]:
+    role = _source_verification_archive_role(report_role)
+    if role is None:
+        return None
+    return OCR_SAFE_EVIDENCE_ARCHIVE_FIXED_ROLE_PATHS.get(role)
 
 
 def _source_report_archive_role(report_role: str) -> Optional[str]:
@@ -365,10 +431,19 @@ def _source_report_archive_role(report_role: str) -> Optional[str]:
 def _rewrite_source_verification_for_archive(
     verification: Dict[str, object],
     source_report_record: Optional[Dict[str, object]],
+    verification_archive_path: Optional[str] = None,
 ) -> Dict[str, object]:
     rewritten = json.loads(json.dumps(verification))
+    if verification_archive_path:
+        rewritten["archive_path"] = str(verification_archive_path)
     if source_report_record is not None:
-        rewritten["report_file"] = str(source_report_record.get("archive_path") or "")
+        source_report_archive_path = str(source_report_record.get("archive_path") or "")
+        rewritten["report_file"] = source_report_archive_path
+        rewritten["source_report_archive_path"] = source_report_archive_path
+        rewritten["source_report_archive_sha256"] = source_report_record.get("sha256")
+        rewritten["source_report_archive_size_bytes"] = source_report_record.get(
+            "size_bytes"
+        )
     return rewritten
 
 
@@ -384,6 +459,7 @@ def _verify_archived_report_path_bindings(
     role: str,
     archived_report: Dict[str, object],
     archive_payloads: Dict[str, bytes],
+    archive_file_records: Dict[str, Dict[str, object]],
     failure_callback,
 ) -> Tuple[bool, int]:
     ok = True
@@ -394,6 +470,7 @@ def _verify_archived_report_path_bindings(
         value: object,
         *,
         required: bool = True,
+        expected_roles: Tuple[str, ...] = (),
         index: Optional[int] = None,
         case: Optional[str] = None,
     ) -> None:
@@ -433,14 +510,50 @@ def _verify_archived_report_path_bindings(
                 index=index,
                 case=case,
             )
+            return
+        record = archive_file_records.get(archive_member)
+        if record is None:
+            ok = False
+            failure_callback(
+                "archived_report_path_manifest_record_missing",
+                role=role,
+                field=field,
+                archive_path=archive_member,
+                index=index,
+                case=case,
+            )
+            return
+        if expected_roles:
+            actual_role = str(record.get("role") or "")
+            if actual_role not in expected_roles:
+                ok = False
+                failure_callback(
+                    "archived_report_path_role_mismatch",
+                    role=role,
+                    field=field,
+                    archive_path=archive_member,
+                    expected_roles=list(expected_roles),
+                    actual_role=actual_role or None,
+                    index=index,
+                    case=case,
+                )
 
     if role == "ocr_safe_confusion_report":
-        for field in ["payload_file", "manifest_path"]:
-            _check(field, archived_report.get(field), required=True)
+        for field, expected_role in [
+            ("payload_file", "payload"),
+            ("manifest_path", "manifest"),
+        ]:
+            _check(
+                field,
+                archived_report.get(field),
+                required=True,
+                expected_roles=(expected_role,),
+            )
         _check(
             "export_payload_path",
             archived_report.get("export_payload_path"),
             required=False,
+            expected_roles=("encoded_payload",),
         )
         source_page_texts = archived_report.get("source_page_texts")
         if isinstance(source_page_texts, list):
@@ -450,6 +563,7 @@ def _verify_archived_report_path_bindings(
                         "source_page_texts[].path",
                         record.get("path"),
                         required=True,
+                        expected_roles=("source_page_text",),
                         index=index,
                     )
         cases = archived_report.get("cases")
@@ -458,11 +572,15 @@ def _verify_archived_report_path_bindings(
                 if not isinstance(case_record, dict):
                     continue
                 case_name = str(case_record.get("name") or "")
-                for field in ["ocr_input_path", "analyze_report_path"]:
+                for field, expected_role in [
+                    ("ocr_input_path", "confusion_ocr_input"),
+                    ("analyze_report_path", "confusion_analyze_report"),
+                ]:
                     _check(
                         "cases[].{}".format(field),
                         case_record.get(field),
                         required=True,
+                        expected_roles=(expected_role,),
                         index=index,
                         case=case_name or None,
                     )
@@ -470,22 +588,45 @@ def _verify_archived_report_path_bindings(
                     "cases[].recovered_output_path",
                     case_record.get("recovered_output_path"),
                     required=bool(case_record.get("success")),
+                    expected_roles=("confusion_recovered_output",),
                     index=index,
                     case=case_name or None,
                 )
         return ok, checked_count
 
     if role == "correction_replay_report":
-        for field in ["manifest_path", "ocr_input_path", "corrections_file"]:
-            _check(field, archived_report.get(field), required=True)
-        for field in [
-            "output_file",
-            "refreshed_corrections_template_path",
+        for field, expected_role in [
+            ("manifest_path", "manifest"),
+            ("ocr_input_path", "correction_ocr_input"),
+            ("corrections_file", "corrections_file"),
         ]:
-            _check(field, archived_report.get(field), required=False)
+            _check(
+                field,
+                archived_report.get(field),
+                required=True,
+                expected_roles=(expected_role,),
+            )
+        for field, expected_role in [
+            ("output_file", "correction_recovered_output"),
+            (
+                "refreshed_corrections_template_path",
+                "refreshed_corrections_template",
+            ),
+        ]:
+            _check(
+                field,
+                archived_report.get(field),
+                required=False,
+                expected_roles=(expected_role,),
+            )
         requested_output = archived_report.get("requested_output_file")
-        if requested_output and archived_report.get("output_file"):
-            _check("requested_output_file", requested_output, required=False)
+        if requested_output:
+            _check(
+                "requested_output_file",
+                requested_output,
+                required=False,
+                expected_roles=("correction_recovered_output",),
+            )
         return ok, checked_count
 
     return False, checked_count
@@ -2273,6 +2414,11 @@ def archive_ocr_safe_evidence(
             if role == "ocr_safe_confusion_report"
             else "transport_ocr_correction_replay_report.json"
         )
+        archive_report_path = _reserve_ocr_safe_archive_member(
+            archive_report_path,
+            used_archive_paths,
+            "{} rewritten report".format(role),
+        )
         rewritten_record = {
             "role": "{}_rewritten".format(role),
             "source_path": None,
@@ -2296,9 +2442,15 @@ def archive_ocr_safe_evidence(
                 if role == "ocr_safe_confusion_report"
                 else "transport_ocr_correction_replay_source_verification.json"
             )
+            verification_archive_path = _reserve_ocr_safe_archive_member(
+                verification_archive_path,
+                used_archive_paths,
+                "{} source verification report".format(role),
+            )
             archived_verification = _rewrite_source_verification_for_archive(
                 _verification,
                 source_report_records.get(role),
+                verification_archive_path,
             )
             verification_bytes = json.dumps(
                 archived_verification,
@@ -2551,6 +2703,7 @@ def verify_ocr_safe_evidence_archive(
     embedded_manifest: Dict[str, object] = {}
     embedded_manifest_payload: Optional[bytes] = None
     embedded_manifest_sha: Optional[str] = None
+    archive_inventory_verified = True
     try:
         with zipfile.ZipFile(str(archive_path), "r") as archive:
             infos = archive.infolist()
@@ -2558,12 +2711,15 @@ def verify_ocr_safe_evidence_archive(
             counts = Counter(member_names)
             for name, count in counts.items():
                 if count != 1:
+                    archive_inventory_verified = False
                     _failure("duplicate_archive_member", archive_path=name, count=count)
             for info in infos:
                 if not _is_safe_archive_member(info.filename):
+                    archive_inventory_verified = False
                     _failure("unsafe_archive_member", archive_path=info.filename)
                     continue
                 if _zip_info_is_symlink(info):
+                    archive_inventory_verified = False
                     _failure("archive_member_is_symlink", archive_path=info.filename)
                     continue
                 payload = archive.read(info)
@@ -2572,9 +2728,11 @@ def verify_ocr_safe_evidence_archive(
                 else:
                     archive_payloads[info.filename] = payload
     except zipfile.BadZipFile:
+        archive_inventory_verified = False
         _failure("archive_unreadable")
 
     if embedded_manifest_payload is None:
+        archive_inventory_verified = False
         _failure("embedded_manifest_missing")
     else:
         embedded_manifest_sha = protocol.sha256_hex(embedded_manifest_payload)
@@ -2660,10 +2818,13 @@ def verify_ocr_safe_evidence_archive(
     expected_members = {OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST}
     archive_file_counts: Counter = Counter()
     manifest_file_role_counts: Counter = Counter()
+    archive_file_records_by_path: Dict[str, Dict[str, object]] = {}
     verified_file_count = 0
     total_size_verified = 0
     manifest_file_metadata_verified = True
     archive_file_roles_verified = True
+    archive_source_paths_verified = True
+    source_path_records_by_identity: Dict[str, Dict[str, object]] = {}
     for item in files:
         if not isinstance(item, dict):
             _failure("archive_file_record_invalid")
@@ -2672,6 +2833,7 @@ def verify_ocr_safe_evidence_archive(
         manifest_file_role_counts[role or "unknown"] += 1
         member = str(item.get("archive_path") or "")
         if not _is_safe_archive_member(member):
+            archive_inventory_verified = False
             _failure("archive_file_record_path_unsafe", archive_path=member or None)
             continue
         role_path_ok, role_path_failure = _archive_file_role_path_status(role, member)
@@ -2702,7 +2864,55 @@ def verify_ocr_safe_evidence_archive(
                 archive_path=member,
                 actual=expected_size,
             )
+        source_path_raw = item.get("source_path")
+        source_path_text = ""
+        if source_path_raw is None:
+            source_path_text = ""
+        elif isinstance(source_path_raw, str):
+            source_path_text = source_path_raw.strip()
+        else:
+            archive_source_paths_verified = False
+            _failure(
+                "archive_file_record_source_path_invalid",
+                role=role or None,
+                archive_path=member,
+                actual=source_path_raw,
+            )
+        if role in OCR_SAFE_EVIDENCE_ARCHIVE_PREFIX_ROLES:
+            if not source_path_text:
+                archive_source_paths_verified = False
+                _failure(
+                    "archive_file_record_source_path_missing",
+                    role=role or None,
+                    archive_path=member,
+                )
+        elif role in OCR_SAFE_EVIDENCE_ARCHIVE_FIXED_ROLE_PATHS:
+            if source_path_text:
+                archive_source_paths_verified = False
+                _failure(
+                    "archive_file_record_source_path_unexpected",
+                    role=role or None,
+                    archive_path=member,
+                    source_path=source_path_text,
+                )
+        if source_path_text:
+            source_identity = _archive_source_path_identity(source_path_text)
+            prior_record = source_path_records_by_identity.get(source_identity)
+            if prior_record is not None:
+                archive_source_paths_verified = False
+                _failure(
+                    "archive_file_record_source_path_duplicate",
+                    role=role or None,
+                    archive_path=member,
+                    source_path=source_path_text,
+                    prior_role=prior_record.get("role"),
+                    prior_archive_path=prior_record.get("archive_path"),
+                )
+            else:
+                source_path_records_by_identity[source_identity] = item
         archive_file_counts[member] += 1
+        if member not in archive_file_records_by_path:
+            archive_file_records_by_path[member] = item
         expected_members.add(member)
         payload = archive_payloads.get(member)
         if payload is None:
@@ -2710,6 +2920,7 @@ def verify_ocr_safe_evidence_archive(
         actual_sha = protocol.sha256_hex(payload)
         actual_size = len(payload)
         if actual_sha != str(item.get("sha256") or ""):
+            manifest_file_metadata_verified = False
             _failure(
                 "file_sha256_mismatch",
                 archive_path=member,
@@ -2721,6 +2932,7 @@ def verify_ocr_safe_evidence_archive(
         else:
             expected_size_int = -1
         if actual_size != expected_size_int:
+            manifest_file_metadata_verified = False
             _failure(
                 "file_size_mismatch",
                 archive_path=member,
@@ -2731,14 +2943,17 @@ def verify_ocr_safe_evidence_archive(
         total_size_verified += actual_size
     for member, count in archive_file_counts.items():
         if count != 1:
+            archive_inventory_verified = False
             _failure("duplicate_manifest_archive_path", archive_path=member, count=count)
 
     actual_members = set(member_names)
     missing_members = sorted(expected_members - actual_members)
     unexpected_members = sorted(actual_members - expected_members)
     if missing_members:
+        archive_inventory_verified = False
         _failure("archive_member_missing", archive_paths=missing_members)
     if unexpected_members:
+        archive_inventory_verified = False
         _failure("archive_member_unexpected", archive_paths=unexpected_members)
 
     parameters = manifest.get("parameters")
@@ -2796,6 +3011,10 @@ def verify_ocr_safe_evidence_archive(
     source_report_members: Dict[Tuple[str, str], Dict[str, object]] = {}
     archive_report_states_verified = True
     archive_report_metadata_verified = True
+    archive_report_source_paths_verified = True
+    archive_report_manifest_entry_set_verified = True
+    archive_report_fixed_paths_verified = True
+    referenced_rewritten_report_members: set = set()
     for item in files:
         if not isinstance(item, dict):
             continue
@@ -2819,6 +3038,18 @@ def verify_ocr_safe_evidence_archive(
         role = str(report.get("role") or "")
         manifest_report_role_counts[role or "unknown"] += 1
         archive_report_path = str(report.get("archive_report_path") or "")
+        report_source_path_raw = report.get("source_path")
+        report_source_path = ""
+        if isinstance(report_source_path_raw, str):
+            report_source_path = report_source_path_raw.strip()
+        if not report_source_path:
+            archive_report_metadata_verified = False
+            archive_report_source_paths_verified = False
+            _failure(
+                "archive_report_source_path_missing_or_invalid",
+                role=role or None,
+                actual=report_source_path_raw,
+            )
         schema = str(report.get("schema") or "")
         expected_schema = (
             OCR_SAFE_CONFUSION_REPORT_SCHEMA
@@ -2870,8 +3101,24 @@ def verify_ocr_safe_evidence_archive(
                 archive_path=archive_report_path or None,
             )
             continue
+        expected_archive_report_path = _expected_rewritten_report_archive_path(role)
+        if (
+            expected_archive_report_path is not None
+            and archive_report_path != expected_archive_report_path
+        ):
+            archive_report_metadata_verified = False
+            archive_report_fixed_paths_verified = False
+            _failure(
+                "archive_report_fixed_path_mismatch",
+                role=role,
+                expected=expected_archive_report_path,
+                actual=archive_report_path,
+            )
+        referenced_rewritten_report_members.add((role, archive_report_path))
         rewritten_record = rewritten_report_members.get((role, archive_report_path))
         if rewritten_record is None:
+            archive_report_manifest_entry_set_verified = False
+            archive_report_metadata_verified = False
             _failure(
                 "archive_report_file_record_missing",
                 role=role,
@@ -2880,6 +3127,7 @@ def verify_ocr_safe_evidence_archive(
             continue
         expected_rewritten_role = _expected_rewritten_report_role(role)
         if rewritten_record.get("role") != expected_rewritten_role:
+            archive_report_metadata_verified = False
             _failure(
                 "archive_report_file_role_mismatch",
                 role=role,
@@ -2892,6 +3140,7 @@ def verify_ocr_safe_evidence_archive(
         actual_report_sha = protocol.sha256_hex(payload)
         actual_report_size = len(payload)
         if actual_report_sha != str(report.get("archive_report_sha256") or ""):
+            archive_report_metadata_verified = False
             _failure(
                 "archive_report_sha256_mismatch",
                 role=role,
@@ -2900,6 +3149,7 @@ def verify_ocr_safe_evidence_archive(
                 actual=actual_report_sha,
             )
         if actual_report_sha != str(rewritten_record.get("sha256") or ""):
+            archive_report_metadata_verified = False
             _failure(
                 "archive_report_file_sha256_mismatch",
                 role=role,
@@ -2908,6 +3158,7 @@ def verify_ocr_safe_evidence_archive(
                 actual=actual_report_sha,
             )
         if actual_report_size != _json_int(rewritten_record.get("size_bytes"), -1):
+            archive_report_metadata_verified = False
             _failure(
                 "archive_report_file_size_mismatch",
                 role=role,
@@ -2957,6 +3208,15 @@ def verify_ocr_safe_evidence_archive(
                     expected=report_success,
                     actual=archived_report_success,
                 )
+    for role, archive_path_text in sorted(rewritten_report_members):
+        if (role, archive_path_text) not in referenced_rewritten_report_members:
+            archive_report_manifest_entry_set_verified = False
+            archive_report_metadata_verified = False
+            _failure(
+                "archive_report_file_record_unreferenced",
+                role=role,
+                archive_path=archive_path_text,
+            )
     if require_confusion_report and "ocr_safe_confusion_report" not in roles:
         _failure("required_confusion_report_missing")
     if (
@@ -2985,7 +3245,16 @@ def verify_ocr_safe_evidence_archive(
     source_verification_count = 0
     source_report_verification_states_verified = True
     source_report_archive_metadata_parity_verified = True
+    source_report_archive_entry_metadata_verified = True
+    source_report_verification_archive_metadata_verified = True
+    source_report_verification_archive_entry_metadata_verified = True
+    source_report_verification_manifest_entry_set_verified = True
+    source_report_verification_fixed_paths_verified = True
+    archive_report_source_rewrite_verified = True
     manifest_source_verification_role_counts: Counter = Counter()
+    referenced_source_verification_members: set = set()
+    referenced_source_report_members: set = set()
+    archive_source_paths = _archive_source_path_map(files)
     source_verification_required = (
         require_source_report_verification or manifest_requires_source_verification
     )
@@ -2994,6 +3263,13 @@ def verify_ocr_safe_evidence_archive(
             if not isinstance(report, dict):
                 continue
             role = str(report.get("role") or "")
+            archive_report_path = str(report.get("archive_report_path") or "")
+            report_source_path_raw = report.get("source_path")
+            report_source_path = (
+                report_source_path_raw.strip()
+                if isinstance(report_source_path_raw, str)
+                else ""
+            )
             expected_schema = (
                 OCR_SAFE_CONFUSION_VERIFICATION_SCHEMA
                 if role == "ocr_safe_confusion_report"
@@ -3188,6 +3464,9 @@ def verify_ocr_safe_evidence_archive(
                     expected=declared_source_report_size,
                     actual=source_report_verification_source_size,
                 )
+            source_report_payload = None
+            source_report_sha = None
+            source_report_size = None
             if not _is_safe_archive_member(source_report_archive_path):
                 archive_report_metadata_verified = False
                 _failure(
@@ -3196,17 +3475,45 @@ def verify_ocr_safe_evidence_archive(
                     archive_path=source_report_archive_path or None,
                 )
             else:
+                referenced_source_report_members.add((role, source_report_archive_path))
                 source_report_record = source_report_members.get(
                     (role, source_report_archive_path)
                 )
                 if source_report_record is None:
+                    source_report_verification_manifest_entry_set_verified = False
+                    source_report_archive_entry_metadata_verified = False
                     _failure(
                         "source_report_archive_file_record_missing",
                         role=role,
                         archive_path=source_report_archive_path,
                     )
+                else:
+                    source_record_path = str(
+                        source_report_record.get("source_path") or ""
+                    ).strip()
+                    if not source_record_path:
+                        archive_report_metadata_verified = False
+                        archive_report_source_paths_verified = False
+                        _failure(
+                            "archive_report_source_path_file_record_missing",
+                            role=role,
+                            archive_path=source_report_archive_path,
+                        )
+                    elif _archive_source_path_identity(
+                        report_source_path
+                    ) != _archive_source_path_identity(source_record_path):
+                        archive_report_metadata_verified = False
+                        archive_report_source_paths_verified = False
+                        _failure(
+                            "archive_report_source_path_mismatch",
+                            role=role,
+                            archive_path=source_report_archive_path,
+                            expected=source_record_path,
+                            actual=report_source_path or None,
+                        )
                 source_report_payload = archive_payloads.get(source_report_archive_path)
                 if source_report_payload is None:
+                    source_report_archive_entry_metadata_verified = False
                     _failure(
                         "source_report_archive_member_missing",
                         role=role,
@@ -3216,6 +3523,8 @@ def verify_ocr_safe_evidence_archive(
                     source_report_sha = protocol.sha256_hex(source_report_payload)
                     source_report_size = len(source_report_payload)
                     if source_report_sha != str(report.get("source_sha256") or ""):
+                        archive_report_metadata_verified = False
+                        source_report_archive_metadata_parity_verified = False
                         _failure(
                             "source_report_archive_sha256_mismatch",
                             role=role,
@@ -3228,6 +3537,8 @@ def verify_ocr_safe_evidence_archive(
                         or source_report_archive.get("sha256")
                         or ""
                     ):
+                        archive_report_metadata_verified = False
+                        source_report_archive_metadata_parity_verified = False
                         _failure(
                             "source_report_archive_metadata_sha256_mismatch",
                             role=role,
@@ -3244,6 +3555,8 @@ def verify_ocr_safe_evidence_archive(
                     if source_report_size != _json_int(
                         expected_source_report_size, -1
                     ):
+                        archive_report_metadata_verified = False
+                        source_report_archive_metadata_parity_verified = False
                         _failure(
                             "source_report_archive_metadata_size_mismatch",
                             role=role,
@@ -3253,6 +3566,7 @@ def verify_ocr_safe_evidence_archive(
                         )
                     if source_report_record is not None:
                         if source_report_record.get("role") != _source_report_archive_role(role):
+                            source_report_archive_entry_metadata_verified = False
                             _failure(
                                 "source_report_archive_file_role_mismatch",
                                 role=role,
@@ -3261,6 +3575,7 @@ def verify_ocr_safe_evidence_archive(
                                 actual=source_report_record.get("role"),
                             )
                         if source_report_sha != str(source_report_record.get("sha256") or ""):
+                            source_report_archive_entry_metadata_verified = False
                             _failure(
                                 "source_report_archive_file_sha256_mismatch",
                                 role=role,
@@ -3271,6 +3586,7 @@ def verify_ocr_safe_evidence_archive(
                         if source_report_size != _json_int(
                             source_report_record.get("size_bytes"), -1
                         ):
+                            source_report_archive_entry_metadata_verified = False
                             _failure(
                                 "source_report_archive_file_size_mismatch",
                                 role=role,
@@ -3278,11 +3594,72 @@ def verify_ocr_safe_evidence_archive(
                                 expected=source_report_record.get("size_bytes"),
                                 actual=source_report_size,
                             )
+                    try:
+                        source_report = json.loads(
+                            source_report_payload.decode("utf-8")
+                        )
+                        if not isinstance(source_report, dict):
+                            source_report = {}
+                            archive_report_source_rewrite_verified = False
+                            _failure(
+                                "source_report_archive_json_not_object",
+                                role=role,
+                                archive_path=source_report_archive_path,
+                            )
+                    except Exception as exc:
+                        source_report = {}
+                        archive_report_source_rewrite_verified = False
+                        _failure(
+                            "source_report_archive_json_invalid",
+                            role=role,
+                            archive_path=source_report_archive_path,
+                            message=str(exc),
+                        )
+                    if source_report:
+                        expected_rewritten_report = _rewrite_report_paths_for_archive(
+                            source_report,
+                            archive_source_paths,
+                        )
+                        archived_report_payload = archive_payloads.get(
+                            archive_report_path
+                        )
+                        if archived_report_payload is None:
+                            archive_report_source_rewrite_verified = False
+                            _failure(
+                                "archive_report_member_missing_for_source_rewrite",
+                                role=role,
+                                archive_path=archive_report_path,
+                            )
+                        else:
+                            try:
+                                archived_report = json.loads(
+                                    archived_report_payload.decode("utf-8")
+                                )
+                            except Exception as exc:
+                                archived_report = None
+                                archive_report_source_rewrite_verified = False
+                                _failure(
+                                    "archive_report_json_invalid_for_source_rewrite",
+                                    role=role,
+                                    archive_path=archive_report_path,
+                                    message=str(exc),
+                                )
+                            if (
+                                archived_report is None
+                                or archived_report != expected_rewritten_report
+                            ):
+                                archive_report_source_rewrite_verified = False
+                                _failure(
+                                    "archive_report_source_rewrite_mismatch",
+                                    role=role,
+                                    archive_path=archive_report_path,
+                                )
             verification_archive_path = str(
                 source_verification.get("archive_path") or ""
             )
             if _canonical_sha256_text(source_verification.get("archive_sha256")) is None:
                 archive_report_metadata_verified = False
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_archive_sha256_missing_or_invalid",
                     role=role,
@@ -3290,6 +3667,7 @@ def verify_ocr_safe_evidence_archive(
                 )
             if not _is_non_negative_int(source_verification.get("archive_size_bytes")):
                 archive_report_metadata_verified = False
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_archive_size_missing_or_invalid",
                     role=role,
@@ -3297,6 +3675,7 @@ def verify_ocr_safe_evidence_archive(
                 )
             if not _is_safe_archive_member(verification_archive_path):
                 archive_report_metadata_verified = False
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_archive_path_missing",
                     role=role,
@@ -3304,10 +3683,27 @@ def verify_ocr_safe_evidence_archive(
                 )
                 source_verification_count += 1
                 continue
+            expected_verification_archive_path = _source_verification_archive_path(role)
+            if (
+                expected_verification_archive_path is not None
+                and verification_archive_path != expected_verification_archive_path
+            ):
+                archive_report_metadata_verified = False
+                source_report_verification_archive_entry_metadata_verified = False
+                source_report_verification_fixed_paths_verified = False
+                _failure(
+                    "source_report_verification_fixed_path_mismatch",
+                    role=role,
+                    expected=expected_verification_archive_path,
+                    actual=verification_archive_path,
+                )
+            referenced_source_verification_members.add((role, verification_archive_path))
             verification_record = source_verification_members.get(
                 (role, verification_archive_path)
             )
             if verification_record is None:
+                source_report_verification_manifest_entry_set_verified = False
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_file_record_missing",
                     role=role,
@@ -3315,6 +3711,7 @@ def verify_ocr_safe_evidence_archive(
                 )
             verification_payload = archive_payloads.get(verification_archive_path)
             if verification_payload is None:
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_archive_member_missing",
                     role=role,
@@ -3325,6 +3722,7 @@ def verify_ocr_safe_evidence_archive(
             verification_sha = protocol.sha256_hex(verification_payload)
             verification_size = len(verification_payload)
             if verification_sha != str(source_verification.get("archive_sha256") or ""):
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_archive_sha256_mismatch",
                     role=role,
@@ -3335,6 +3733,7 @@ def verify_ocr_safe_evidence_archive(
             if verification_size != _json_int(
                 source_verification.get("archive_size_bytes"), -1
             ):
+                source_report_verification_archive_entry_metadata_verified = False
                 _failure(
                     "source_report_verification_archive_size_mismatch",
                     role=role,
@@ -3344,6 +3743,7 @@ def verify_ocr_safe_evidence_archive(
                 )
             if verification_record is not None:
                 if verification_record.get("role") != _source_verification_archive_role(role):
+                    source_report_verification_archive_entry_metadata_verified = False
                     _failure(
                         "source_report_verification_file_role_mismatch",
                         role=role,
@@ -3352,6 +3752,7 @@ def verify_ocr_safe_evidence_archive(
                         actual=verification_record.get("role"),
                     )
                 if verification_sha != str(verification_record.get("sha256") or ""):
+                    source_report_verification_archive_entry_metadata_verified = False
                     _failure(
                         "source_report_verification_file_sha256_mismatch",
                         role=role,
@@ -3362,6 +3763,7 @@ def verify_ocr_safe_evidence_archive(
                 if verification_size != _json_int(
                     verification_record.get("size_bytes"), -1
                 ):
+                    source_report_verification_archive_entry_metadata_verified = False
                     _failure(
                         "source_report_verification_file_size_mismatch",
                         role=role,
@@ -3375,6 +3777,8 @@ def verify_ocr_safe_evidence_archive(
                 )
                 if not isinstance(archived_source_verification, dict):
                     archived_source_verification = {}
+                    source_report_verification_states_verified = False
+                    source_report_verification_archive_metadata_verified = False
                     _failure(
                         "source_report_verification_json_not_object",
                         role=role,
@@ -3382,6 +3786,8 @@ def verify_ocr_safe_evidence_archive(
                     )
             except Exception as exc:
                 archived_source_verification = {}
+                source_report_verification_states_verified = False
+                source_report_verification_archive_metadata_verified = False
                 _failure(
                     "source_report_verification_json_invalid",
                     role=role,
@@ -3459,6 +3865,95 @@ def verify_ocr_safe_evidence_archive(
                         expected=report.get("source_sha256"),
                         actual=archived_source_verification.get("report_sha256"),
                     )
+                member_verification_archive_path = str(
+                    archived_source_verification.get("archive_path") or ""
+                )
+                if not _is_safe_archive_member(member_verification_archive_path):
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_archive_path_missing_or_invalid",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        actual=member_verification_archive_path or None,
+                    )
+                elif member_verification_archive_path != verification_archive_path:
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_archive_path_mismatch",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        expected=verification_archive_path,
+                        actual=member_verification_archive_path,
+                    )
+                member_source_report_archive_path = str(
+                    archived_source_verification.get("source_report_archive_path")
+                    or ""
+                )
+                if not _is_safe_archive_member(member_source_report_archive_path):
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_source_report_path_missing_or_invalid",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        actual=member_source_report_archive_path or None,
+                    )
+                elif member_source_report_archive_path != source_report_archive_path:
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_source_report_path_mismatch",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        expected=source_report_archive_path,
+                        actual=member_source_report_archive_path,
+                    )
+                member_source_report_archive_sha = _canonical_sha256_text(
+                    archived_source_verification.get("source_report_archive_sha256")
+                )
+                if member_source_report_archive_sha is None:
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_source_report_sha256_missing_or_invalid",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        actual=archived_source_verification.get(
+                            "source_report_archive_sha256"
+                        ),
+                    )
+                elif (
+                    source_report_sha is not None
+                    and member_source_report_archive_sha != source_report_sha
+                ):
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_source_report_sha256_mismatch",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        expected=source_report_sha,
+                        actual=member_source_report_archive_sha,
+                    )
+                member_source_report_archive_size = archived_source_verification.get(
+                    "source_report_archive_size_bytes"
+                )
+                if not _is_non_negative_int(member_source_report_archive_size):
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_source_report_size_missing_or_invalid",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        actual=member_source_report_archive_size,
+                    )
+                elif (
+                    source_report_size is not None
+                    and member_source_report_archive_size != source_report_size
+                ):
+                    source_report_verification_archive_metadata_verified = False
+                    _failure(
+                        "source_report_verification_member_source_report_size_mismatch",
+                        role=role,
+                        archive_path=verification_archive_path,
+                        expected=source_report_size,
+                        actual=member_source_report_archive_size,
+                    )
                 member_report_file = str(
                     archived_source_verification.get("report_file") or ""
                 )
@@ -3487,6 +3982,26 @@ def verify_ocr_safe_evidence_archive(
                         archive_path=member_report_archive_path,
                     )
             source_verification_count += 1
+
+    for role, archive_path_text in sorted(source_verification_members):
+        if (role, archive_path_text) not in referenced_source_verification_members:
+            source_report_verification_manifest_entry_set_verified = False
+            source_report_verification_archive_entry_metadata_verified = False
+            _failure(
+                "source_report_verification_file_record_unreferenced",
+                role=role,
+                archive_path=archive_path_text,
+            )
+    for role, archive_path_text in sorted(source_report_members):
+        if (role, archive_path_text) not in referenced_source_report_members:
+            source_report_verification_manifest_entry_set_verified = False
+            source_report_archive_metadata_parity_verified = False
+            source_report_archive_entry_metadata_verified = False
+            _failure(
+                "source_report_archive_file_record_unreferenced",
+                role=role,
+                archive_path=archive_path_text,
+            )
 
     confusion_verified = False
     correction_replay_verified = False
@@ -3535,6 +4050,7 @@ def verify_ocr_safe_evidence_archive(
                         role=role,
                         archived_report=archived_report_for_paths,
                         archive_payloads=archive_payloads,
+                        archive_file_records=archive_file_records_by_path,
                         failure_callback=_failure,
                     )
                     archived_report_path_binding_count += path_count
@@ -3799,6 +4315,21 @@ def verify_ocr_safe_evidence_archive(
         "source_report_archive_metadata_parity_verified": bool(
             source_report_archive_metadata_parity_verified
         ),
+        "source_report_archive_entry_metadata_verified": bool(
+            source_report_archive_entry_metadata_verified
+        ),
+        "source_report_verification_archive_metadata_verified": bool(
+            source_report_verification_archive_metadata_verified
+        ),
+        "source_report_verification_archive_entry_metadata_verified": bool(
+            source_report_verification_archive_entry_metadata_verified
+        ),
+        "source_report_verification_manifest_entry_set_verified": bool(
+            source_report_verification_manifest_entry_set_verified
+        ),
+        "source_report_verification_fixed_paths_verified": bool(
+            source_report_verification_fixed_paths_verified
+        ),
         "summary_source_report_verification_count_verified": bool(
             summary_source_verification_count_verified
         ),
@@ -3812,12 +4343,26 @@ def verify_ocr_safe_evidence_archive(
         ),
         "archive_report_states_verified": bool(archive_report_states_verified),
         "archive_report_metadata_verified": bool(archive_report_metadata_verified),
+        "archive_report_source_paths_verified": bool(
+            archive_report_source_paths_verified
+        ),
+        "archive_report_manifest_entry_set_verified": bool(
+            archive_report_manifest_entry_set_verified
+        ),
+        "archive_report_fixed_paths_verified": bool(
+            archive_report_fixed_paths_verified
+        ),
+        "archive_report_source_rewrite_verified": bool(
+            archive_report_source_rewrite_verified
+        ),
         "archive_generated_at_verified": bool(generated_at_verified),
         "archive_success_verified": bool(manifest_success_verified),
         "certification_boundary_verified": bool(certification_boundary_verified),
         "archive_parameters_verified": bool(archive_parameters_verified),
         "archive_parameter_gates": dict(sorted(manifest_parameter_values.items())),
+        "archive_inventory_verified": bool(archive_inventory_verified),
         "manifest_file_metadata_verified": bool(manifest_file_metadata_verified),
+        "archive_source_paths_verified": bool(archive_source_paths_verified),
         "archive_file_roles_verified": bool(archive_file_roles_verified),
         "report_count": len(reports),
         "verified_report_count": len(report_verifications),

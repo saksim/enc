@@ -453,6 +453,58 @@ class TransportModuleExtractionTests(unittest.TestCase):
         )
         return transport, payload, export
 
+    def _ocr_safe_correction_replay_report(self, root: Path) -> tuple:
+        transport, payload, export = self._ocr_safe_export_with_required_symbols(root)
+        manifest_path = Path(export["manifest_path"])
+        ocr_lines = []
+        corrupted = False
+        corrected_payload_text = ""
+        for text_file in sorted(Path(path) for path in export["page_texts"]):
+            for line in text_file.read_text(encoding="ascii").splitlines():
+                if (
+                    not corrupted
+                    and line.startswith("P")
+                    and "|C" in line
+                    and line.count("|") >= 3
+                ):
+                    prefix, payload_text, crc = line.rsplit("|", 2)
+                    corrected_payload_text = payload_text
+                    line = "{}|{}|{}".format(prefix, "C" + payload_text[1:], crc)
+                    corrupted = True
+                ocr_lines.append(line)
+        self.assertTrue(corrupted)
+        ocr_text = root / "ocr_unresolved.txt"
+        ocr_text.write_text("\n".join(ocr_lines) + "\n", encoding="utf-8")
+        analyze = transport.analyze_ocr_text(
+            manifest_path=str(manifest_path),
+            ocr_input_path=str(ocr_text),
+            strict_payload_chars=True,
+            emit_corrections_file=str(root / "corrections_template.csv"),
+        )
+        template_path = Path(analyze["corrections_template_path"])
+        with template_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        rows[0]["corrected_text"] = corrected_payload_text
+        with template_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        replay_report = root / "transport_ocr_correction_replay_report.json"
+        output_file = root / "corrected.bin"
+        replay = transport.replay_ocr_corrections(
+            manifest_path=str(manifest_path),
+            ocr_input_path=str(ocr_text),
+            corrections_file=str(template_path),
+            output_file=str(output_file),
+            report_file=str(replay_report),
+            strict_payload_chars=True,
+        )
+        self.assertTrue(replay["success"])
+        self.assertEqual(output_file.read_bytes(), payload)
+        return transport, payload, replay_report, output_file
+
     @staticmethod
     def _mutate_ocr_safe_payload(payload: str) -> str:
         mutated = payload
@@ -1101,6 +1153,89 @@ class TransportModuleExtractionTests(unittest.TestCase):
                 "correction_replay_not_accepted",
             )
             self.assertFalse(output_file.exists())
+
+    def test_ocr_safe_archive_drops_unpackaged_requested_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport, _payload, export = self._ocr_safe_export_with_required_symbols(root)
+            manifest_path = Path(export["manifest_path"])
+            ocr_lines = []
+            corrupted = False
+            corrected_payload_text = ""
+            for text_file in sorted(Path(path) for path in export["page_texts"]):
+                for line in text_file.read_text(encoding="ascii").splitlines():
+                    if (
+                        not corrupted
+                        and line.startswith("P")
+                        and "|C" in line
+                        and line.count("|") >= 3
+                    ):
+                        prefix, payload_text, crc = line.rsplit("|", 2)
+                        corrected_payload_text = payload_text
+                        line = "{}|{}|{}".format(prefix, "C" + payload_text[1:], crc)
+                        corrupted = True
+                    ocr_lines.append(line)
+            self.assertTrue(corrupted)
+            ocr_text = root / "ocr_unresolved.txt"
+            ocr_text.write_text("\n".join(ocr_lines) + "\n", encoding="utf-8")
+            analyze = transport.analyze_ocr_text(
+                manifest_path=str(manifest_path),
+                ocr_input_path=str(ocr_text),
+                strict_payload_chars=True,
+                emit_corrections_file=str(root / "corrections_template.csv"),
+            )
+            template_path = Path(analyze["corrections_template_path"])
+            with template_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            rows[0]["corrected_text"] = corrected_payload_text
+            extra = dict(rows[0])
+            extra["line"] = "999"
+            extra["corrected_text"] = corrected_payload_text
+            rows.append(extra)
+            with template_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            replay_report = root / "transport_ocr_correction_replay_report.json"
+            requested_output = root / "must_not_exist.bin"
+            replay = transport.replay_ocr_corrections(
+                manifest_path=str(manifest_path),
+                ocr_input_path=str(ocr_text),
+                corrections_file=str(template_path),
+                output_file=str(requested_output),
+                report_file=str(replay_report),
+                strict_payload_chars=True,
+            )
+            self.assertFalse(replay["success"])
+            self.assertEqual(replay["requested_output_file"], str(requested_output))
+            self.assertFalse(requested_output.exists())
+
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            manifest_file = root / "ocr_safe_evidence_archive_manifest.json"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                manifest_file=str(manifest_file),
+                correction_replay_report_file=str(replay_report),
+            )
+            with zipfile.ZipFile(str(archive_file), "r") as archive_zip:
+                archived_report = json.loads(
+                    archive_zip.read(
+                        "transport_ocr_correction_replay_report.json"
+                    ).decode("utf-8")
+                )
+            self.assertIsNone(archived_report["requested_output_file"])
+            self.assertIsNone(archived_report["output_file"])
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(archive_file),
+                manifest_file=str(manifest_file),
+                require_success=False,
+            )
+            self.assertTrue(verification["success"])
+            self.assertTrue(verification["archived_report_paths_verified"])
+            self.assertTrue(verification["correction_replay_report_verified"])
+            self.assertEqual(archive["summary"]["report_count"], 1)
 
     def test_ocr_safe_replay_corrections_reports_malformed_csv_without_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1803,8 +1938,14 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertTrue(verification["archive_success_verified"])
             self.assertTrue(verification["certification_boundary_verified"])
             self.assertTrue(verification["archive_report_metadata_verified"])
+            self.assertTrue(
+                verification["archive_report_manifest_entry_set_verified"]
+            )
+            self.assertTrue(verification["archive_report_fixed_paths_verified"])
             self.assertTrue(verification["archive_parameters_verified"])
+            self.assertTrue(verification["archive_inventory_verified"])
             self.assertTrue(verification["manifest_file_metadata_verified"])
+            self.assertTrue(verification["archive_source_paths_verified"])
             self.assertTrue(verification["archive_file_roles_verified"])
             self.assertEqual(
                 verification["archive_parameter_gates"]["require_confusion_report"],
@@ -1828,6 +1969,9 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertTrue(
                 verification["summary_source_report_verification_roles_verified"]
             )
+            self.assertTrue(
+                verification["source_report_verification_fixed_paths_verified"]
+            )
             self.assertEqual(
                 verification["verified_source_report_verification_roles"],
                 {"ocr_safe_confusion_report": 1},
@@ -1841,44 +1985,8 @@ class TransportModuleExtractionTests(unittest.TestCase):
     def test_ocr_safe_archive_combined_evidence_cli_verifies_replayably(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            transport, _payload, export = self._ocr_safe_export_with_required_symbols(root)
-            manifest_path = Path(export["manifest_path"])
-            ocr_lines = []
-            corrupted = False
-            corrected_payload_text = ""
-            for text_file in sorted(Path(path) for path in export["page_texts"]):
-                for line in text_file.read_text(encoding="ascii").splitlines():
-                    if (not corrupted) and line.startswith("P") and "|C" in line and line.count("|") >= 3:
-                        prefix, payload_text, crc = line.rsplit("|", 2)
-                        corrected_payload_text = payload_text
-                        line = "{}|{}|{}".format(prefix, "C" + payload_text[1:], crc)
-                        corrupted = True
-                    ocr_lines.append(line)
-            self.assertTrue(corrupted)
-            ocr_text = root / "ocr_unresolved.txt"
-            ocr_text.write_text("\n".join(ocr_lines) + "\n", encoding="utf-8")
-            analyze = transport.analyze_ocr_text(
-                manifest_path=str(manifest_path),
-                ocr_input_path=str(ocr_text),
-                strict_payload_chars=True,
-                emit_corrections_file=str(root / "corrections_template.csv"),
-            )
-            template_path = Path(analyze["corrections_template_path"])
-            with template_path.open(newline="", encoding="utf-8") as handle:
-                rows = list(csv.DictReader(handle))
-            rows[0]["corrected_text"] = corrected_payload_text
-            with template_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(rows)
-            replay_report = root / "transport_ocr_correction_replay_report.json"
-            transport.replay_ocr_corrections(
-                manifest_path=str(manifest_path),
-                ocr_input_path=str(ocr_text),
-                corrections_file=str(template_path),
-                output_file=str(root / "corrected.bin"),
-                report_file=str(replay_report),
-                strict_payload_chars=True,
+            transport, _payload, replay_report, _output_file = (
+                self._ocr_safe_correction_replay_report(root)
             )
 
             confusion_report = root / "synthetic_ocr_confusion_report.json"
@@ -1933,6 +2041,23 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertTrue(verification["correction_replay_report_verified"])
             self.assertEqual(verification["failure_count"], 0)
             self.assertEqual(verification["source_report_verification_count"], 2)
+            self.assertTrue(
+                verification[
+                    "source_report_verification_archive_metadata_verified"
+                ]
+            )
+            self.assertTrue(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
+            self.assertTrue(
+                verification["archive_report_manifest_entry_set_verified"]
+            )
+            self.assertTrue(verification["archive_report_fixed_paths_verified"])
+            self.assertTrue(
+                verification["source_report_verification_fixed_paths_verified"]
+            )
             self.assertEqual(
                 {item["role"] for item in verification["report_verifications"]},
                 {"ocr_safe_confusion_report", "correction_replay_report"},
@@ -1957,6 +2082,22 @@ class TransportModuleExtractionTests(unittest.TestCase):
                 self.assertTrue(report["source_verification"]["success"])
                 self.assertIn("archive_path", report["source_verification"])
                 self.assertIn("archive_sha256", report["source_verification"])
+                self.assertIn(
+                    "archive_size_bytes",
+                    report["source_verification"],
+                )
+                self.assertIn(
+                    "source_report_archive_path",
+                    report["source_verification"],
+                )
+                self.assertIn(
+                    "source_report_archive_sha256",
+                    report["source_verification"],
+                )
+                self.assertIn(
+                    "source_report_archive_size_bytes",
+                    report["source_verification"],
+                )
 
     def test_ocr_safe_archive_source_verification_report_is_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2019,6 +2160,22 @@ class TransportModuleExtractionTests(unittest.TestCase):
                 source_verification["source_report_archive_path"],
                 source_report_archive["archive_path"],
             )
+            self.assertEqual(
+                archived_verification["archive_path"],
+                verification_member,
+            )
+            self.assertEqual(
+                archived_verification["source_report_archive_path"],
+                source_report_archive["archive_path"],
+            )
+            self.assertEqual(
+                archived_verification["source_report_archive_sha256"],
+                source_report_archive["sha256"],
+            )
+            self.assertEqual(
+                archived_verification["source_report_archive_size_bytes"],
+                source_report_archive["size_bytes"],
+            )
             with zipfile.ZipFile(str(archive_file), "r") as archive_zip:
                 archived_source_report = archive_zip.read(
                     source_report_archive["archive_path"]
@@ -2036,6 +2193,11 @@ class TransportModuleExtractionTests(unittest.TestCase):
 
             self.assertTrue(verification["success"])
             self.assertEqual(verification["source_report_verification_count"], 1)
+            self.assertTrue(
+                verification[
+                    "source_report_verification_archive_metadata_verified"
+                ]
+            )
 
     def test_ocr_safe_archive_verification_fails_when_source_verification_member_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2082,9 +2244,216 @@ class TransportModuleExtractionTests(unittest.TestCase):
             )
 
             self.assertFalse(verification["success"])
+            self.assertFalse(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
             reasons = {item["reason"] for item in verification["failures"]}
             self.assertIn("archive_member_missing", reasons)
             self.assertIn("source_report_verification_archive_member_missing", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_unreferenced_source_verification_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260602,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "unreferenced_source_verification_records.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                embedded_manifest = json.loads(
+                    source.read(recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST).decode(
+                        "utf-8"
+                    )
+                )
+                source_verification_record = next(
+                    record
+                    for record in embedded_manifest["files"]
+                    if record["role"]
+                    == "ocr_safe_confusion_source_verification_report"
+                )
+                source_report_record = next(
+                    record
+                    for record in embedded_manifest["files"]
+                    if record["role"] == "ocr_safe_confusion_source_report"
+                )
+                extra_verification_path = (
+                    "transport_ocr_correction_replay_source_verification.json"
+                )
+                extra_report_path = (
+                    "correction_replay_source_report/"
+                    "synthetic_ocr_confusion_report.json"
+                )
+                extra_verification_payload = source.read(
+                    source_verification_record["archive_path"]
+                )
+                extra_report_payload = source.read(source_report_record["archive_path"])
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            extra_verification_record = dict(source_verification_record)
+                            extra_verification_record[
+                                "role"
+                            ] = "correction_replay_source_verification_report"
+                            extra_verification_record["archive_path"] = (
+                                extra_verification_path
+                            )
+                            extra_report_record = dict(source_report_record)
+                            extra_report_record["role"] = "correction_replay_source_report"
+                            extra_report_record["archive_path"] = extra_report_path
+                            manifest["files"].extend(
+                                [extra_verification_record, extra_report_record]
+                            )
+                            manifest["summary"]["file_count"] += 2
+                            manifest["summary"]["total_size_bytes"] += int(
+                                extra_verification_record["size_bytes"]
+                            ) + int(extra_report_record["size_bytes"])
+                            for record in [
+                                extra_verification_record,
+                                extra_report_record,
+                            ]:
+                                role = record["role"]
+                                manifest["summary"]["roles"][role] = (
+                                    manifest["summary"]["roles"].get(role, 0) + 1
+                                )
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+                    target.writestr(extra_verification_path, extra_verification_payload)
+                    target.writestr(extra_report_path, extra_report_payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(
+                verification[
+                    "source_report_verification_manifest_entry_set_verified"
+                ]
+            )
+            self.assertFalse(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
+            self.assertFalse(
+                verification["source_report_archive_metadata_parity_verified"]
+            )
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn(
+                "source_report_verification_file_record_unreferenced",
+                reasons,
+            )
+            self.assertIn("source_report_archive_file_record_unreferenced", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_unreferenced_rewritten_report_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260602,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "unreferenced_rewritten_report_records.zip"
+            extra_report_path = "transport_ocr_correction_replay_report.json"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                extra_report_payload = source.read("synthetic_ocr_confusion_report.json")
+                extra_report_record = {
+                    "role": "correction_replay_report_rewritten",
+                    "source_path": None,
+                    "archive_path": extra_report_path,
+                    "sha256": protocol.sha256_hex(extra_report_payload),
+                    "size_bytes": len(extra_report_payload),
+                }
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            manifest["files"].append(extra_report_record)
+                            manifest["summary"]["file_count"] += 1
+                            manifest["summary"]["total_size_bytes"] += int(
+                                extra_report_record["size_bytes"]
+                            )
+                            role = extra_report_record["role"]
+                            manifest["summary"]["roles"][role] = (
+                                manifest["summary"]["roles"].get(role, 0) + 1
+                            )
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+                    target.writestr(extra_report_path, extra_report_payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(
+                verification["archive_report_manifest_entry_set_verified"]
+            )
+            self.assertFalse(verification["archive_report_metadata_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_report_file_record_unreferenced", reasons)
 
     def test_ocr_safe_archive_verification_fails_on_local_source_verifier_report_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2241,6 +2610,50 @@ class TransportModuleExtractionTests(unittest.TestCase):
             reasons = {item["reason"] for item in verification["failures"]}
             self.assertIn("source_report_verification_not_required_by_archive", reasons)
             self.assertIn("source_report_verification_flag_missing", reasons)
+
+    def test_ocr_safe_archive_packaging_rejects_fixed_member_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            original_allocator = recover._safe_archive_member_for_path
+
+            def colliding_allocator(path: Path, role: str, used: set) -> str:
+                if role == "payload":
+                    member = "synthetic_ocr_confusion_report.json"
+                    used.add(member)
+                    return member
+                return original_allocator(path, role, used)
+
+            with mock.patch.object(
+                recover,
+                "_safe_archive_member_for_path",
+                autospec=True,
+                side_effect=colliding_allocator,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "duplicate OCR-safe archive member",
+                ):
+                    transport.archive_ocr_safe_evidence(
+                        archive_file=str(archive_file),
+                        confusion_report_file=str(confusion_report),
+                        require_confusion_report=True,
+                    )
+
+            self.assertFalse(archive_file.exists())
 
     def test_ocr_safe_archive_packaging_rejects_report_state_type_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2686,6 +3099,727 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertIn("source_report_archive_metadata_sha256_mismatch", reasons)
             self.assertIn("source_report_archive_metadata_size_mismatch", reasons)
 
+    def test_ocr_safe_archive_verification_fails_on_source_report_file_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "tampered_source_report_file_metadata.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            record = next(
+                                item
+                                for item in manifest["files"]
+                                if item["role"] == "ocr_safe_confusion_source_report"
+                            )
+                            record["sha256"] = "0" * 64
+                            record["size_bytes"] += 1
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["manifest_file_metadata_verified"])
+            self.assertTrue(
+                verification["source_report_archive_metadata_parity_verified"]
+            )
+            self.assertFalse(
+                verification["source_report_archive_entry_metadata_verified"]
+            )
+            self.assertTrue(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("source_report_archive_file_sha256_mismatch", reasons)
+            self.assertIn("source_report_archive_file_size_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_source_report_member_byte_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "tampered_source_report_member_bytes.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                manifest = json.loads(
+                    source.read(
+                        recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST
+                    ).decode("utf-8")
+                )
+                source_report_record = next(
+                    item
+                    for item in manifest["files"]
+                    if item["role"] == "ocr_safe_confusion_source_report"
+                )
+                source_report_member = source_report_record["archive_path"]
+                source_report = json.loads(
+                    source.read(source_report_member).decode("utf-8")
+                )
+                source_report["seed"] = int(source_report["seed"]) + 1
+                tampered_source_payload = json.dumps(
+                    source_report,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                tampered_source_sha = protocol.sha256_hex(tampered_source_payload)
+                tampered_source_size = len(tampered_source_payload)
+                manifest["summary"]["total_size_bytes"] += (
+                    tampered_source_size - int(source_report_record["size_bytes"])
+                )
+                source_report_record["sha256"] = tampered_source_sha
+                source_report_record["size_bytes"] = tampered_source_size
+                report_entry = manifest["reports"][0]
+                report_entry["source_report_archive"]["sha256"] = (
+                    tampered_source_sha
+                )
+                report_entry["source_report_archive"]["size_bytes"] = (
+                    tampered_source_size
+                )
+                report_entry["source_verification"][
+                    "source_report_archive_sha256"
+                ] = tampered_source_sha
+                report_entry["source_verification"][
+                    "source_report_archive_size_bytes"
+                ] = tampered_source_size
+                tampered_manifest_payload = json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == source_report_member:
+                            payload = tampered_source_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            payload = tampered_manifest_payload
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertTrue(
+                verification["source_report_archive_entry_metadata_verified"]
+            )
+            self.assertFalse(
+                verification["source_report_archive_metadata_parity_verified"]
+            )
+            self.assertFalse(verification["archive_report_metadata_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("source_report_archive_sha256_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_source_rewrite_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+            rewritten_member = archive["reports"][0]["archive_report_path"]
+
+            tampered_archive = root / "tampered_source_rewrite_archive.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                report = json.loads(source.read(rewritten_member).decode("utf-8"))
+                report["seed"] = int(report["seed"]) + 1
+                rewritten_payload = json.dumps(
+                    report,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                rewritten_sha = protocol.sha256_hex(rewritten_payload)
+                rewritten_size = len(rewritten_payload)
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == rewritten_member:
+                            payload = rewritten_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            report_entry = manifest["reports"][0]
+                            report_entry["archive_report_sha256"] = rewritten_sha
+                            for record in manifest["files"]:
+                                if record.get("archive_path") == rewritten_member:
+                                    manifest["summary"]["total_size_bytes"] += (
+                                        rewritten_size - int(record["size_bytes"])
+                                    )
+                                    record["sha256"] = rewritten_sha
+                                    record["size_bytes"] = rewritten_size
+                                    break
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["archive_report_metadata_verified"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["archive_report_source_rewrite_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_report_source_rewrite_mismatch", reasons)
+            self.assertNotIn("archive_report_sha256_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_rewritten_report_fixed_path_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            original_member = "synthetic_ocr_confusion_report.json"
+            drifted_member = "ocr_safe_confusion_report_rewritten/drifted.json"
+            tampered_archive = root / "tampered_rewritten_fixed_path.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == original_member:
+                            target.writestr(drifted_member, payload)
+                            continue
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            manifest["reports"][0][
+                                "archive_report_path"
+                            ] = drifted_member
+                            for record in manifest["files"]:
+                                if record.get("archive_path") == original_member:
+                                    record["archive_path"] = drifted_member
+                                    break
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertFalse(verification["confusion_report_verified"])
+            self.assertFalse(verification["archive_report_fixed_paths_verified"])
+            self.assertFalse(verification["archive_report_metadata_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_report_fixed_path_mismatch", reasons)
+            self.assertNotIn("archive_member_unexpected", reasons)
+            self.assertNotIn("archive_member_missing", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_source_verifier_fixed_path_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            original_member = archive["reports"][0]["source_verification"][
+                "archive_path"
+            ]
+            drifted_member = "ocr_safe_confusion_source_verification_report/drifted.json"
+            tampered_archive = root / "tampered_source_verifier_fixed_path.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                verifier = json.loads(source.read(original_member).decode("utf-8"))
+                verifier["archive_path"] = drifted_member
+                drifted_payload = json.dumps(
+                    verifier,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                drifted_sha = protocol.sha256_hex(drifted_payload)
+                drifted_size = len(drifted_payload)
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == original_member:
+                            target.writestr(drifted_member, drifted_payload)
+                            continue
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            source_verification = manifest["reports"][0][
+                                "source_verification"
+                            ]
+                            source_verification["archive_path"] = drifted_member
+                            source_verification["archive_sha256"] = drifted_sha
+                            source_verification["archive_size_bytes"] = drifted_size
+                            for record in manifest["files"]:
+                                if record.get("archive_path") == original_member:
+                                    manifest["summary"]["total_size_bytes"] += (
+                                        drifted_size - int(record["size_bytes"])
+                                    )
+                                    record["archive_path"] = drifted_member
+                                    record["sha256"] = drifted_sha
+                                    record["size_bytes"] = drifted_size
+                                    break
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(
+                verification["source_report_verification_fixed_paths_verified"]
+            )
+            self.assertFalse(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("source_report_verification_fixed_path_mismatch", reasons)
+            self.assertNotIn("archive_member_unexpected", reasons)
+            self.assertNotIn("archive_member_missing", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_source_verifier_archive_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260602,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+            verification_member = archive["reports"][0]["source_verification"][
+                "archive_path"
+            ]
+
+            tampered_archive = root / "tampered_source_verifier_archive_metadata.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                verifier = json.loads(source.read(verification_member).decode("utf-8"))
+                verifier["archive_path"] = "wrong_source_verification.json"
+                verifier["source_report_archive_path"] = (
+                    "ocr_safe_confusion_source_report/wrong_report.json"
+                )
+                verifier["source_report_archive_sha256"] = "0" * 64
+                verifier["source_report_archive_size_bytes"] += 1
+                tampered_verifier_payload = json.dumps(
+                    verifier,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                tampered_sha = protocol.sha256_hex(tampered_verifier_payload)
+                tampered_size = len(tampered_verifier_payload)
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == verification_member:
+                            payload = tampered_verifier_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            for record in manifest["files"]:
+                                if record.get("archive_path") == verification_member:
+                                    manifest["summary"]["total_size_bytes"] += (
+                                        tampered_size - int(record["size_bytes"])
+                                    )
+                                    record["sha256"] = tampered_sha
+                                    record["size_bytes"] = tampered_size
+                                    break
+                            source_verification = manifest["reports"][0][
+                                "source_verification"
+                            ]
+                            source_verification["archive_sha256"] = tampered_sha
+                            source_verification["archive_size_bytes"] = tampered_size
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(
+                verification[
+                    "source_report_verification_archive_metadata_verified"
+                ]
+            )
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn(
+                "source_report_verification_member_archive_path_mismatch",
+                reasons,
+            )
+            self.assertIn(
+                "source_report_verification_member_source_report_path_mismatch",
+                reasons,
+            )
+            self.assertIn(
+                "source_report_verification_member_source_report_sha256_mismatch",
+                reasons,
+            )
+            self.assertIn(
+                "source_report_verification_member_source_report_size_mismatch",
+                reasons,
+            )
+
+    def test_ocr_safe_archive_verification_fails_on_correction_replay_source_verifier_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport, _payload, replay_report, _output_file = (
+                self._ocr_safe_correction_replay_report(root)
+            )
+            archive_file = root / "ocr_safe_correction_replay_archive.zip"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                correction_replay_report_file=str(replay_report),
+                require_correction_replay_report=True,
+                require_source_report_verification=True,
+            )
+            report = archive["reports"][0]
+            self.assertEqual(report["role"], "correction_replay_report")
+            verification_member = report["source_verification"]["archive_path"]
+
+            tampered_archive = root / "tampered_correction_source_verifier.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                verifier = json.loads(source.read(verification_member).decode("utf-8"))
+                verifier["archive_path"] = "wrong_correction_source_verification.json"
+                verifier["source_report_archive_path"] = (
+                    "correction_replay_source_report/wrong_report.json"
+                )
+                verifier["source_report_archive_sha256"] = "0" * 64
+                verifier["source_report_archive_size_bytes"] += 1
+                tampered_verifier_payload = json.dumps(
+                    verifier,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                tampered_sha = protocol.sha256_hex(tampered_verifier_payload)
+                tampered_size = len(tampered_verifier_payload)
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == verification_member:
+                            payload = tampered_verifier_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            for record in manifest["files"]:
+                                if record.get("archive_path") == verification_member:
+                                    manifest["summary"]["total_size_bytes"] += (
+                                        tampered_size - int(record["size_bytes"])
+                                    )
+                                    record["sha256"] = tampered_sha
+                                    record["size_bytes"] = tampered_size
+                                    break
+                            source_verification = manifest["reports"][0][
+                                "source_verification"
+                            ]
+                            source_verification["archive_sha256"] = tampered_sha
+                            source_verification["archive_size_bytes"] = tampered_size
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_correction_replay_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["correction_replay_report_verified"])
+            self.assertTrue(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
+            self.assertFalse(
+                verification[
+                    "source_report_verification_archive_metadata_verified"
+                ]
+            )
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn(
+                "source_report_verification_member_archive_path_mismatch",
+                reasons,
+            )
+            self.assertIn(
+                "source_report_verification_member_source_report_path_mismatch",
+                reasons,
+            )
+            self.assertIn(
+                "source_report_verification_member_source_report_sha256_mismatch",
+                reasons,
+            )
+            self.assertIn(
+                "source_report_verification_member_source_report_size_mismatch",
+                reasons,
+            )
+
+    def test_ocr_safe_archive_verification_fails_on_invalid_source_verifier_json_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260602,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+            verification_member = archive["reports"][0]["source_verification"][
+                "archive_path"
+            ]
+
+            tampered_archive = root / "invalid_source_verifier_json.zip"
+            tampered_payload = b"{not json"
+            tampered_sha = protocol.sha256_hex(tampered_payload)
+            tampered_size = len(tampered_payload)
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == verification_member:
+                            payload = tampered_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            for record in manifest["files"]:
+                                if record.get("archive_path") == verification_member:
+                                    manifest["summary"]["total_size_bytes"] += (
+                                        tampered_size - int(record["size_bytes"])
+                                    )
+                                    record["sha256"] = tampered_sha
+                                    record["size_bytes"] = tampered_size
+                                    break
+                            source_verification = manifest["reports"][0][
+                                "source_verification"
+                            ]
+                            source_verification["archive_sha256"] = tampered_sha
+                            source_verification["archive_size_bytes"] = tampered_size
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(
+                verification["source_report_verification_states_verified"]
+            )
+            self.assertTrue(
+                verification[
+                    "source_report_verification_archive_entry_metadata_verified"
+                ]
+            )
+            self.assertFalse(
+                verification[
+                    "source_report_verification_archive_metadata_verified"
+                ]
+            )
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("source_report_verification_json_invalid", reasons)
+
     def test_ocr_safe_archive_verification_fails_on_tampered_member(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2735,6 +3869,53 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertIn("external_archive_sha256_mismatch", reasons)
             self.assertIn("file_sha256_mismatch", reasons)
             self.assertIn("embedded_report_verification_failed", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_archive_inventory_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "tampered_archive_inventory.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        target.writestr(info, source.read(info.filename))
+                    target.writestr("unreferenced/extra.txt", b"extra member\n")
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["archive_inventory_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_member_unexpected", reasons)
 
     def test_ocr_safe_archive_verification_fails_on_file_metadata_type_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2796,6 +3977,85 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertIn("archive_file_record_size_missing_or_invalid", reasons)
             self.assertIn("file_sha256_mismatch", reasons)
             self.assertIn("file_size_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_file_payload_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            manifest_file = root / "ocr_safe_evidence_archive_manifest.json"
+            archive = transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                manifest_file=str(manifest_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+            tamper_member = next(
+                item["archive_path"]
+                for item in archive["files"]
+                if item["role"] == "confusion_ocr_input"
+            )
+
+            tampered_archive = root / "tampered_file_payload_metadata_archive.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == tamper_member:
+                            payload = payload + b"\nDRIFT\n"
+                        target.writestr(info, payload)
+
+            external_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            external_manifest["archive_file"] = str(tampered_archive)
+            external_manifest["archive_sha256"] = protocol.sha256_hex(
+                tampered_archive.read_bytes()
+            )
+            external_manifest["archive_size_bytes"] = tampered_archive.stat().st_size
+            tampered_manifest_file = root / "tampered_external_manifest.json"
+            external_manifest["manifest_file"] = str(tampered_manifest_file)
+            tampered_manifest_file.write_text(
+                json.dumps(
+                    external_manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                manifest_file=str(tampered_manifest_file),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["external_manifest_verified"])
+            self.assertFalse(verification["manifest_file_metadata_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertNotIn("external_archive_sha256_mismatch", reasons)
+            self.assertNotIn("external_archive_size_mismatch", reasons)
+            self.assertIn("file_sha256_mismatch", reasons)
+            self.assertIn("file_size_mismatch", reasons)
+            self.assertIn("summary_total_size_mismatch", reasons)
 
     def test_ocr_safe_archive_verification_fails_on_external_manifest_envelope_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2942,6 +4202,238 @@ class TransportModuleExtractionTests(unittest.TestCase):
             reasons = {item["reason"] for item in verification["failures"]}
             self.assertIn("archived_report_path_not_archive_relative", reasons)
 
+    def test_ocr_safe_archive_verification_fails_on_archived_report_path_role_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260603,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "tampered_report_path_role_archive.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                manifest = json.loads(
+                    source.read(
+                        recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST
+                    ).decode("utf-8")
+                )
+                source_entries = [
+                    (info, source.read(info.filename)) for info in source.infolist()
+                ]
+                wrong_role_member = next(
+                    item["archive_path"]
+                    for item in manifest["files"]
+                    if item["role"] == "source_page_text"
+                )
+                tampered_report_payload = None
+                for info, payload in source_entries:
+                    if info.filename != "synthetic_ocr_confusion_report.json":
+                        continue
+                    report = json.loads(payload.decode("utf-8"))
+                    report["cases"][0]["ocr_input_path"] = wrong_role_member
+                    tampered_report_payload = json.dumps(
+                        report,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    tampered_report_sha = protocol.sha256_hex(
+                        tampered_report_payload
+                    )
+                    tampered_report_size = len(tampered_report_payload)
+                    manifest["reports"][0][
+                        "archive_report_sha256"
+                    ] = tampered_report_sha
+                    for record in manifest["files"]:
+                        if (
+                            record.get("archive_path")
+                            == "synthetic_ocr_confusion_report.json"
+                        ):
+                            manifest["summary"][
+                                "total_size_bytes"
+                            ] += tampered_report_size - int(record["size_bytes"])
+                            record["sha256"] = tampered_report_sha
+                            record["size_bytes"] = tampered_report_size
+                            break
+                    break
+                self.assertIsNotNone(tampered_report_payload)
+                tampered_manifest_payload = json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info, payload in source_entries:
+                        if info.filename == "synthetic_ocr_confusion_report.json":
+                            payload = tampered_report_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            payload = tampered_manifest_payload
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertFalse(verification["confusion_report_verified"])
+            self.assertFalse(verification["archived_report_paths_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archived_report_path_role_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_local_requested_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport, _payload, export = self._ocr_safe_export_with_required_symbols(root)
+            manifest_path = Path(export["manifest_path"])
+            ocr_lines = []
+            corrupted = False
+            corrected_payload_text = ""
+            for text_file in sorted(Path(path) for path in export["page_texts"]):
+                for line in text_file.read_text(encoding="ascii").splitlines():
+                    if (
+                        not corrupted
+                        and line.startswith("P")
+                        and "|C" in line
+                        and line.count("|") >= 3
+                    ):
+                        prefix, payload_text, crc = line.rsplit("|", 2)
+                        corrected_payload_text = payload_text
+                        line = "{}|{}|{}".format(prefix, "C" + payload_text[1:], crc)
+                        corrupted = True
+                    ocr_lines.append(line)
+            self.assertTrue(corrupted)
+            ocr_text = root / "ocr_unresolved.txt"
+            ocr_text.write_text("\n".join(ocr_lines) + "\n", encoding="utf-8")
+            analyze = transport.analyze_ocr_text(
+                manifest_path=str(manifest_path),
+                ocr_input_path=str(ocr_text),
+                strict_payload_chars=True,
+                emit_corrections_file=str(root / "corrections_template.csv"),
+            )
+            template_path = Path(analyze["corrections_template_path"])
+            with template_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            rows[0]["corrected_text"] = corrected_payload_text
+            extra = dict(rows[0])
+            extra["line"] = "999"
+            extra["corrected_text"] = corrected_payload_text
+            rows.append(extra)
+            with template_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            replay_report = root / "transport_ocr_correction_replay_report.json"
+            requested_output = root / "must_not_exist.bin"
+            transport.replay_ocr_corrections(
+                manifest_path=str(manifest_path),
+                ocr_input_path=str(ocr_text),
+                corrections_file=str(template_path),
+                output_file=str(requested_output),
+                report_file=str(replay_report),
+                strict_payload_chars=True,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                correction_replay_report_file=str(replay_report),
+            )
+
+            tampered_archive = root / "tampered_requested_output_archive.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                manifest = json.loads(
+                    source.read(
+                        recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST
+                    ).decode("utf-8")
+                )
+                source_entries = [
+                    (info, source.read(info.filename)) for info in source.infolist()
+                ]
+                tampered_report_payload = None
+                for info, payload in source_entries:
+                    if info.filename != "transport_ocr_correction_replay_report.json":
+                        continue
+                    report = json.loads(payload.decode("utf-8"))
+                    self.assertIsNone(report["requested_output_file"])
+                    report["requested_output_file"] = str(requested_output)
+                    tampered_report_payload = json.dumps(
+                        report,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    tampered_report_sha = protocol.sha256_hex(
+                        tampered_report_payload
+                    )
+                    tampered_report_size = len(tampered_report_payload)
+                    manifest["reports"][0][
+                        "archive_report_sha256"
+                    ] = tampered_report_sha
+                    for record in manifest["files"]:
+                        if (
+                            record.get("archive_path")
+                            == "transport_ocr_correction_replay_report.json"
+                        ):
+                            manifest["summary"][
+                                "total_size_bytes"
+                            ] += tampered_report_size - int(record["size_bytes"])
+                            record["sha256"] = tampered_report_sha
+                            record["size_bytes"] = tampered_report_size
+                            break
+                    break
+                self.assertIsNotNone(tampered_report_payload)
+                tampered_manifest_payload = json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info, payload in source_entries:
+                        if info.filename == "transport_ocr_correction_replay_report.json":
+                            payload = tampered_report_payload
+                        elif info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            payload = tampered_manifest_payload
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_success=False,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertFalse(verification["correction_replay_report_verified"])
+            self.assertFalse(verification["archived_report_paths_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archived_report_path_not_archive_relative", reasons)
+
     def test_ocr_safe_archive_verification_fails_on_report_metadata_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2994,6 +4486,211 @@ class TransportModuleExtractionTests(unittest.TestCase):
             self.assertTrue(verification["confusion_report_verified"])
             reasons = {item["reason"] for item in verification["failures"]}
             self.assertIn("archive_report_sha256_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_rewritten_report_file_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260602,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+            )
+
+            tampered_archive = root / "tampered_rewritten_report_file_metadata.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info in source.infolist():
+                        payload = source.read(info.filename)
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            manifest = json.loads(payload.decode("utf-8"))
+                            record = next(
+                                item
+                                for item in manifest["files"]
+                                if item["role"] == "ocr_safe_confusion_report_rewritten"
+                            )
+                            record["sha256"] = "0" * 64
+                            record["size_bytes"] += 1
+                            payload = json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["archive_report_metadata_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_report_file_sha256_mismatch", reasons)
+            self.assertIn("archive_report_file_size_mismatch", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_duplicate_source_path_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260604,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+            )
+
+            tampered_archive = root / "tampered_duplicate_source_path.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                source_entries = [
+                    (info, source.read(info.filename)) for info in source.infolist()
+                ]
+                manifest = json.loads(
+                    source.read(
+                        recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST
+                    ).decode("utf-8")
+                )
+                source_path_records = [
+                    item
+                    for item in manifest["files"]
+                    if isinstance(item.get("source_path"), str)
+                    and item["source_path"].strip()
+                ]
+                self.assertGreaterEqual(len(source_path_records), 2)
+                source_path_records[1]["source_path"] = source_path_records[0][
+                    "source_path"
+                ]
+                tampered_manifest_payload = json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info, payload in source_entries:
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            payload = tampered_manifest_payload
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["archive_source_paths_verified"])
+            self.assertTrue(verification["manifest_file_metadata_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_file_record_source_path_duplicate", reasons)
+
+    def test_ocr_safe_archive_verification_fails_on_report_source_path_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transport = qrcode_helper.AirgapTransportLayer(
+                chunk_chars=18,
+                lines_per_page=5,
+                render_sidecar=False,
+                payload_alphabet_profile=protocol.OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+            )
+            confusion_report = root / "synthetic_ocr_confusion_report.json"
+            transport.certify_ocr_safe_confusions(
+                output_dir=str(root),
+                report_file=str(confusion_report),
+                payload_size=256,
+                seed=20260604,
+            )
+            archive_file = root / "ocr_safe_evidence_archive.zip"
+            transport.archive_ocr_safe_evidence(
+                archive_file=str(archive_file),
+                confusion_report_file=str(confusion_report),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            tampered_archive = root / "tampered_report_source_path.zip"
+            with zipfile.ZipFile(str(archive_file), "r") as source:
+                source_entries = [
+                    (info, source.read(info.filename)) for info in source.infolist()
+                ]
+                manifest = json.loads(
+                    source.read(
+                        recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST
+                    ).decode("utf-8")
+                )
+                report_record = manifest["reports"][0]
+                self.assertEqual(
+                    report_record["source_path"],
+                    str(confusion_report.resolve()),
+                )
+                report_record["source_path"] = str(
+                    (root / "operator_local_relocated_report.json").resolve()
+                )
+                tampered_manifest_payload = json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                with zipfile.ZipFile(
+                    str(tampered_archive),
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as target:
+                    for info, payload in source_entries:
+                        if info.filename == recover.OCR_SAFE_EVIDENCE_ARCHIVE_MANIFEST:
+                            payload = tampered_manifest_payload
+                        target.writestr(info, payload)
+
+            verification = transport.verify_ocr_safe_evidence_archive(
+                archive_file=str(tampered_archive),
+                require_confusion_report=True,
+                require_source_report_verification=True,
+            )
+
+            self.assertFalse(verification["success"])
+            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["archive_report_source_paths_verified"])
+            self.assertFalse(verification["archive_report_metadata_verified"])
+            self.assertTrue(verification["manifest_file_metadata_verified"])
+            self.assertTrue(verification["archive_source_paths_verified"])
+            reasons = {item["reason"] for item in verification["failures"]}
+            self.assertIn("archive_report_source_path_mismatch", reasons)
 
     def test_ocr_safe_archive_verification_fails_on_summary_role_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3501,11 +5198,13 @@ class TransportModuleExtractionTests(unittest.TestCase):
             )
 
             self.assertFalse(verification["success"])
-            self.assertTrue(verification["confusion_report_verified"])
+            self.assertFalse(verification["confusion_report_verified"])
+            self.assertFalse(verification["archived_report_paths_verified"])
             self.assertTrue(verification["summary_roles_verified"])
             self.assertFalse(verification["archive_file_roles_verified"])
             reasons = {item["reason"] for item in verification["failures"]}
             self.assertIn("archive_file_record_role_path_mismatch", reasons)
+            self.assertIn("archived_report_path_role_mismatch", reasons)
 
     def test_qrcode_helper_certify_entrypoint_delegates_to_transport_module(self) -> None:
         transport = qrcode_helper.AirgapTransportLayer()
