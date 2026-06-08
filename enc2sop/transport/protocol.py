@@ -17,6 +17,14 @@ SUPPORTED_PAYLOAD_ALPHABET_PROFILES = (
     "safe-base32-v1",
     OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
 )
+PAYLOAD_PROFILE_CODES = {
+    "S1": "safe-base32-v1",
+    "O1": OCR_SAFE_HUMAN_CORRECTABLE_PROFILE,
+}
+PAYLOAD_PROFILE_TO_CODE = {
+    value: key for key, value in PAYLOAD_PROFILE_CODES.items()
+}
+PARITY_SYMBOL_MODES = ("xor", "modular-sum")
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 SIDECAR_BITS_PER_ROW = 50
 SIDECAR_CELL_SIZE = 6
@@ -193,12 +201,47 @@ def normalize_payload(payload: str) -> str:
 
 
 def payload_alphabet_for_profile(profile: Optional[str]) -> str:
-    value = str(profile or "safe-base32-v1").strip().lower()
+    value = canonical_payload_profile(profile)
     if value in ("", "safe-base32", "safe-base32-v1"):
         return SAFE_BASE32_ALPHABET
     if value == OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
         return OCR_SAFE_HUMAN_CORRECTABLE_ALPHABET
     raise ValueError("unsupported payload alphabet profile: {}".format(profile))
+
+
+def canonical_payload_profile(profile: Optional[str]) -> str:
+    value = str(profile or "safe-base32-v1").strip()
+    upper = value.upper()
+    if upper in PAYLOAD_PROFILE_CODES:
+        return PAYLOAD_PROFILE_CODES[upper]
+    lower = value.lower()
+    if lower in ("", "safe-base32", "safe-base32-v1"):
+        return "safe-base32-v1"
+    if lower == OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
+        return OCR_SAFE_HUMAN_CORRECTABLE_PROFILE
+    raise ValueError("unsupported payload alphabet profile: {}".format(profile))
+
+
+def payload_profile_code(profile: Optional[str]) -> str:
+    value = canonical_payload_profile(profile)
+    try:
+        return PAYLOAD_PROFILE_TO_CODE[value]
+    except KeyError as exc:
+        raise ValueError("unsupported payload alphabet profile: {}".format(profile)) from exc
+
+
+def canonical_parity_symbol_mode(mode: Optional[str], payload_alphabet_profile: Optional[str] = None) -> str:
+    raw = str(mode or "").strip()
+    if raw:
+        lower = raw.lower()
+        if lower in PARITY_SYMBOL_MODES:
+            return lower
+        raise ValueError("unsupported parity symbol mode: {}".format(mode))
+    return (
+        "modular-sum"
+        if canonical_payload_profile(payload_alphabet_profile) == OCR_SAFE_HUMAN_CORRECTABLE_PROFILE
+        else "xor"
+    )
 
 
 def payload_value_map_for_profile(profile: Optional[str]) -> Dict[str, int]:
@@ -215,7 +258,7 @@ def payload_char_for_value(profile: Optional[str], value: int) -> str:
 
 
 def encode_payload_for_profile(data: bytes, profile: Optional[str]) -> str:
-    value = str(profile or "safe-base32-v1").strip().lower()
+    value = canonical_payload_profile(profile)
     if value in ("", "safe-base32", "safe-base32-v1"):
         return encode_safe_base32(data)
     if value != OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
@@ -224,7 +267,7 @@ def encode_payload_for_profile(data: bytes, profile: Optional[str]) -> str:
 
 
 def decode_payload_for_profile(data: str, profile: Optional[str]) -> bytes:
-    value = str(profile or "safe-base32-v1").strip().lower()
+    value = canonical_payload_profile(profile)
     if value in ("", "safe-base32", "safe-base32-v1"):
         return decode_safe_base32(data)
     if value != OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
@@ -233,7 +276,7 @@ def decode_payload_for_profile(data: str, profile: Optional[str]) -> bytes:
 
 
 def payload_to_bits_for_profile(payload: str, profile: Optional[str]) -> str:
-    value = str(profile or "safe-base32-v1").strip().lower()
+    value = canonical_payload_profile(profile)
     if value in ("", "safe-base32", "safe-base32-v1"):
         return safe_payload_to_bits(payload)
     if value != OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
@@ -245,7 +288,7 @@ def payload_to_bits_for_profile(payload: str, profile: Optional[str]) -> str:
 
 
 def bits_to_payload_for_profile(bits: str, expected_len: int, profile: Optional[str]) -> str:
-    value = str(profile or "safe-base32-v1").strip().lower()
+    value = canonical_payload_profile(profile)
     if value in ("", "safe-base32", "safe-base32-v1"):
         return bits_to_safe_payload(bits, expected_len)
     if value != OCR_SAFE_HUMAN_CORRECTABLE_PROFILE:
@@ -378,6 +421,9 @@ def normalize_protocol_signature(line: str) -> str:
             .replace("IPG=", "|PG=")
             .replace("ICS=", "|CS=")
             .replace("IRS=", "|RS=")
+            .replace("IPF=", "|PF=")
+            .replace("IPM=", "|PM=")
+            .replace("IEL=", "|EL=")
         )
     line = line.replace("|ATLI|", "|AT1|")
     if line.startswith("@CHI|"):
@@ -470,15 +516,29 @@ def normalize_hex_token(token: str) -> str:
     return "".join(cleaned).replace("O", "0").replace("I", "1").replace("L", "1").replace("S", "5")
 
 
-def parse_cfg_line(line: str) -> Optional[Dict[str, int]]:
+def parse_cfg_line(line: str) -> Optional[Dict[str, object]]:
     if not line.startswith("@CFG|AT1|"):
         return None
     parts = line.split("|")
-    values: Dict[str, int] = {}
+    values: Dict[str, object] = {}
     for item in parts[2:]:
         if "=" not in item:
             return None
         key, value = item.split("=", 1)
+        key = str(key or "").strip().upper()
+        if key in {"PF", "PM"}:
+            token = to_ascii_width(value).strip().replace(" ", "").upper()
+            if key == "PF":
+                try:
+                    values[key] = canonical_payload_profile(token)
+                except Exception:
+                    return None
+            else:
+                try:
+                    values[key] = canonical_parity_symbol_mode(token)
+                except Exception:
+                    return None
+            continue
         try:
             values[key] = int(normalize_digit_token(value))
         except Exception:
@@ -569,6 +629,19 @@ def safe_base32_encoded_length(byte_len: int) -> int:
     return length + extra
 
 
+def encoded_payload_length_for_profile(byte_len: int, profile: Optional[str]) -> int:
+    if int(byte_len) <= 0:
+        return 0
+    value = canonical_payload_profile(profile)
+    if value == "safe-base32-v1":
+        return safe_base32_encoded_length(byte_len)
+    raise ValueError(
+        "encoded payload length for profile {} cannot be inferred from byte length; embedded EL is required".format(
+            value
+        )
+    )
+
+
 def safe_payload_to_bits(payload: str) -> str:
     bits = []
     for ch in payload:
@@ -597,6 +670,9 @@ __all__ = [
     "OCR_SAFE_HUMAN_CORRECTABLE_PROFILE",
     "OCR_SAFE_HUMAN_CORRECTABLE_ALPHABET",
     "SUPPORTED_PAYLOAD_ALPHABET_PROFILES",
+    "PAYLOAD_PROFILE_CODES",
+    "PAYLOAD_PROFILE_TO_CODE",
+    "PARITY_SYMBOL_MODES",
     "IMAGE_SUFFIXES",
     "SIDECAR_BITS_PER_ROW",
     "SIDECAR_CELL_SIZE",
@@ -631,6 +707,9 @@ __all__ = [
     "normalize_ocr_line",
     "normalize_ocr_line_preserve_case",
     "normalize_payload",
+    "canonical_payload_profile",
+    "payload_profile_code",
+    "canonical_parity_symbol_mode",
     "payload_alphabet_for_profile",
     "payload_value_map_for_profile",
     "payload_char_for_value",
@@ -652,6 +731,7 @@ __all__ = [
     "encode_safe_base32",
     "decode_safe_base32",
     "safe_base32_encoded_length",
+    "encoded_payload_length_for_profile",
     "safe_payload_to_bits",
     "bits_to_safe_payload",
 ]

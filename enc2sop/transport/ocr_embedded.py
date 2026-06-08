@@ -25,7 +25,11 @@ def build_inferred_manifest_from_metadata(
     chunk_chars = int(metadata["CC"])
     compressed_size = int(metadata["CS"])
     total_chunks = int(metadata["total_chunks"])
-    encoded_len = protocol.safe_base32_encoded_length(compressed_size)
+    payload_alphabet_profile = protocol.canonical_payload_profile(metadata.get("PF"))
+    encoded_len = int(
+        metadata.get("EL")
+        or protocol.encoded_payload_length_for_profile(compressed_size, payload_alphabet_profile)
+    )
     expected_total_chunks = int(math.ceil(float(encoded_len) / float(chunk_chars))) if encoded_len > 0 else 0
     if expected_total_chunks != total_chunks:
         raise ValueError(
@@ -39,20 +43,29 @@ def build_inferred_manifest_from_metadata(
     chunk_lengths.append(last_chunk_len)
 
     parity_group_size = int(metadata["PG"])
+    parity_symbol_mode = protocol.canonical_parity_symbol_mode(
+        metadata.get("PM"),
+        payload_alphabet_profile,
+    )
     manifest.update(
         {
             "compressed_sha256": (str(metadata["CH1"]) + str(metadata["CH2"])).lower(),
             "raw_sha256": (str(metadata["RH1"]) + str(metadata["RH2"])).lower(),
             "raw_size": int(metadata["RS"]),
             "compressed_size": compressed_size,
+            "encoded_payload_len": encoded_len,
             "chunk_chars": chunk_chars,
             "chunk_lengths": chunk_lengths,
             "redundancy_copies": int(metadata["RC"]),
             "interleave_enabled": bool(int(metadata["IL"])),
+            "payload_alphabet_profile": payload_alphabet_profile,
+            "alphabet": protocol.payload_alphabet_for_profile(payload_alphabet_profile),
             "parity": rebuild_parity_manifest(
                 total_chunks=total_chunks,
                 chunk_lengths=chunk_lengths,
                 parity_group_size=parity_group_size,
+                payload_alphabet_profile=payload_alphabet_profile,
+                parity_symbol_mode=parity_symbol_mode,
             ),
         }
     )
@@ -133,7 +146,7 @@ def ocr_embedded_metadata_page_tesseract(
     if len(bands) < 5:
         raise ValueError("detected text bands {} is less than minimum embedded layout 5".format(len(bands)))
 
-    meta_whitelist = "@META|AT1IDPAGECHUNKSOTALCFGPRHSC0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_=-/"
+    meta_whitelist = "@META|AT1IDPAGECHUNKSOTALCFGPRHSCSELPFMX0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_=-/"
     hash_whitelist = "@RHCH|0123456789ABCDEF"
     compact_hash_whitelist = "@HSRC|0123456789ABCDEF="
     pagecrc_whitelist = "@PAGECR|P0123456789ABCDEF"
@@ -304,6 +317,9 @@ def ocr_embedded_metadata_page_tesseract(
         "CH1": hash_values["CH1"],
         "CH2": hash_values["CH2"],
     }
+    for key in ("PF", "PM", "EL"):
+        if key in cfg_line["values"]:
+            metadata[key] = cfg_line["values"][key]
     manifest = build_inferred_manifest_from_metadata(
         metadata=metadata,
         rebuild_parity_manifest=transport._rebuild_parity_manifest,

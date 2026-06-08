@@ -330,11 +330,13 @@ class AirgapTransportLayer(object):
                 total_pages=total_pages,
                 raw_size=len(raw),
                 compressed_size=len(compressed),
+                encoded_payload_len=len(encoded),
                 raw_sha256=raw_sha256,
                 compressed_sha256=compressed_sha256,
                 redundancy_copies=redundancy_copies,
                 interleave=bool(interleave),
                 parity_group_size=parity_group_size,
+                parity_symbol_mode=str(parity_info["manifest"].get("symbol_mode") or ""),
             )
         pages, chunk_locations = self._build_pages(
             artifact_id=artifact_id,
@@ -381,6 +383,7 @@ class AirgapTransportLayer(object):
             "alphabet": self.payload_alphabet,
             "raw_size": len(raw),
             "compressed_size": len(compressed),
+            "encoded_payload_len": len(encoded),
             "raw_sha256": raw_sha256,
             "compressed_sha256": compressed_sha256,
             "chunk_chars": self.chunk_chars,
@@ -1771,16 +1774,18 @@ class AirgapTransportLayer(object):
         total_pages: int,
         raw_size: int,
         compressed_size: int,
+        encoded_payload_len: int,
         raw_sha256: str,
         compressed_sha256: str,
         redundancy_copies: int,
         interleave: bool,
         parity_group_size: int,
+        parity_symbol_mode: str,
     ) -> List[str]:
         raw_sha256 = raw_sha256.upper()
         compressed_sha256 = compressed_sha256.upper()
         return [
-            "@CFG|AT1|CC={}|LP={}|RC={}|IL={}|PG={}|CS={}|RS={}".format(
+            "@CFG|AT1|CC={}|LP={}|RC={}|IL={}|PG={}|CS={}|RS={}|PF={}|PM={}|EL={}".format(
                 self.chunk_chars,
                 self.lines_per_page,
                 int(redundancy_copies),
@@ -1788,6 +1793,12 @@ class AirgapTransportLayer(object):
                 int(parity_group_size),
                 int(compressed_size),
                 int(raw_size),
+                _transport_protocol.payload_profile_code(self.payload_alphabet_profile),
+                _transport_protocol.canonical_parity_symbol_mode(
+                    parity_symbol_mode,
+                    self.payload_alphabet_profile,
+                ),
+                int(encoded_payload_len),
             ),
             "@HS1|R={}|C={}".format(
                 raw_sha256[:HASH_FRAGMENT_LEN],
@@ -1800,14 +1811,27 @@ class AirgapTransportLayer(object):
         ]
 
     def _rebuild_parity_manifest(
-        self, total_chunks: int, chunk_lengths: List[int], parity_group_size: int
+        self,
+        total_chunks: int,
+        chunk_lengths: List[int],
+        parity_group_size: int,
+        payload_alphabet_profile: Optional[str] = None,
+        parity_symbol_mode: Optional[str] = None,
     ) -> Dict[str, object]:
+        active_profile = _transport_protocol.canonical_payload_profile(
+            payload_alphabet_profile or self.payload_alphabet_profile
+        )
+        symbol_mode = _transport_protocol.canonical_parity_symbol_mode(
+            parity_symbol_mode,
+            active_profile,
+        )
         if int(parity_group_size) <= 1 or int(total_chunks) <= 0:
             return {
                 "enabled": False,
                 "group_size": 0,
                 "group_count": 0,
                 "index_base": 0,
+                "symbol_mode": symbol_mode,
                 "groups": [],
             }
 
@@ -1826,6 +1850,7 @@ class AirgapTransportLayer(object):
                     "data_chunk_indices": data_indices,
                     "parity_chunk_index": index_base + group_id,
                     "parity_len": parity_len,
+                    "symbol_mode": symbol_mode,
                 }
             )
             group_id += 1
@@ -1835,6 +1860,7 @@ class AirgapTransportLayer(object):
             "group_size": group_size,
             "group_count": len(groups),
             "index_base": index_base,
+            "symbol_mode": symbol_mode,
             "groups": groups,
         }
 
@@ -1844,6 +1870,10 @@ class AirgapTransportLayer(object):
         One parity chunk per group can recover one missing chunk in that group.
         """
         if parity_group_size <= 1 or not chunks:
+            parity_symbol_mode = _transport_protocol.canonical_parity_symbol_mode(
+                None,
+                self.payload_alphabet_profile,
+            )
             return {
                 "entries": [],
                 "manifest": {
@@ -1851,6 +1881,7 @@ class AirgapTransportLayer(object):
                     "group_size": 0,
                     "group_count": 0,
                     "index_base": 0,
+                    "symbol_mode": parity_symbol_mode,
                     "groups": [],
                 },
             }
@@ -1862,10 +1893,9 @@ class AirgapTransportLayer(object):
         group_id = 0
         payload_alphabet = self.payload_alphabet
         payload_char_to_val = {ch: idx for idx, ch in enumerate(payload_alphabet)}
-        parity_symbol_mode = (
-            "modular-sum"
-            if self.payload_alphabet_profile == OCR_SAFE_HUMAN_CORRECTABLE_PROFILE
-            else "xor"
+        parity_symbol_mode = _transport_protocol.canonical_parity_symbol_mode(
+            None,
+            self.payload_alphabet_profile,
         )
         payload_base = len(payload_alphabet)
         for start in range(0, len(chunks), group_size):

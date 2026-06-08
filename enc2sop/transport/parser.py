@@ -1608,6 +1608,11 @@ def scan_transport_metadata(transport, ocr_input_path: str) -> Dict[str, object]
         "PG": {},
         "CS": {},
         "RS": {},
+        "EL": {},
+    }
+    cfg_text_votes: Dict[str, Dict[str, int]] = {
+        "PF": {},
+        "PM": {},
     }
     hash_votes: Dict[str, Dict[str, int]] = {
         "RH1": {},
@@ -1638,7 +1643,10 @@ def scan_transport_metadata(transport, ocr_input_path: str) -> Dict[str, object]
         cfg = protocol.parse_cfg_line(line)
         if cfg:
             for key, value in cfg.items():
-                _add_vote(cfg_votes[key], int(value))
+                if key in cfg_text_votes:
+                    _add_vote(cfg_text_votes[key], str(value))
+                else:
+                    _add_vote(cfg_votes[key], int(value))
             continue
 
         hash_fragment = protocol.parse_hash_fragment_line(line)
@@ -1787,6 +1795,11 @@ def scan_transport_metadata(transport, ocr_input_path: str) -> Dict[str, object]
         if value is not None:
             metadata[key] = int(value)
 
+    for key, bucket in cfg_text_votes.items():
+        value = choose_majority_metadata_value(key, bucket)
+        if value is not None:
+            metadata[key] = str(value)
+
     for key, bucket in hash_votes.items():
         value = choose_majority_metadata_value(key, bucket)
         if value is not None:
@@ -1816,7 +1829,11 @@ def build_inferred_manifest_from_ocr(transport, ocr_input_path: str) -> Dict[str
 
     chunk_chars = int(metadata["CC"])
     compressed_size = int(metadata["CS"])
-    encoded_len = protocol.safe_base32_encoded_length(compressed_size)
+    payload_alphabet_profile = protocol.canonical_payload_profile(metadata.get("PF"))
+    encoded_len = int(
+        metadata.get("EL")
+        or protocol.encoded_payload_length_for_profile(compressed_size, payload_alphabet_profile)
+    )
     total_chunks = int(metadata["total_chunks"])
     if chunk_chars <= 0:
         return manifest
@@ -1837,20 +1854,29 @@ def build_inferred_manifest_from_ocr(transport, ocr_input_path: str) -> Dict[str
     chunk_lengths.append(last_chunk_len)
 
     parity_group_size = int(metadata["PG"])
+    parity_symbol_mode = protocol.canonical_parity_symbol_mode(
+        metadata.get("PM"),
+        payload_alphabet_profile,
+    )
     manifest.update(
         {
             "compressed_sha256": (str(metadata["CH1"]) + str(metadata["CH2"])).lower(),
             "raw_sha256": (str(metadata["RH1"]) + str(metadata["RH2"])).lower(),
             "raw_size": int(metadata["RS"]),
             "compressed_size": compressed_size,
+            "encoded_payload_len": encoded_len,
             "chunk_chars": chunk_chars,
             "chunk_lengths": chunk_lengths,
             "redundancy_copies": int(metadata["RC"]),
             "interleave_enabled": bool(int(metadata["IL"])),
+            "payload_alphabet_profile": payload_alphabet_profile,
+            "alphabet": protocol.payload_alphabet_for_profile(payload_alphabet_profile),
             "parity": transport._rebuild_parity_manifest(
                 total_chunks=total_chunks,
                 chunk_lengths=chunk_lengths,
                 parity_group_size=parity_group_size,
+                payload_alphabet_profile=payload_alphabet_profile,
+                parity_symbol_mode=parity_symbol_mode,
             ),
             "_embedded_metadata_complete": True,
         }

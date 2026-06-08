@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -17,24 +18,8 @@ from . import image_scan
 from . import key_material
 from . import qr_transport
 
-
-_NOT_IMPLEMENTED_BY_STAGE = {
-    "render": "P0-S2 QR visual transport is not implemented yet.",
-    "scan": "P0-S2 QR visual transport is not implemented yet.",
-    "send": "P0-S3 send workflow is not implemented yet.",
-    "receive": "P0-S3 receive workflow is not implemented yet.",
-}
-
-
-class CrossMediaNotImplemented(NotImplementedError):
-    """Raised when a documented cross-media command is not implemented in the current stage."""
-
-
-def _run_not_implemented(args: argparse.Namespace) -> int:
-    command = str(getattr(args, "cm_command", "") or "")
-    message = _NOT_IMPLEMENTED_BY_STAGE.get(command, "Cross-media command is not implemented yet.")
-    raise CrossMediaNotImplemented(message)
-
+SEND_REPORT_SCHEMA = "enc2sop-cross-media-send-report/v1"
+DECRYPT_REPORT_SCHEMA = "enc2sop-cross-media-decrypt-report/v1"
 
 def _resolve_encrypt_key(args: argparse.Namespace) -> tuple[bytes, str, Optional[dict]]:
     if bool(getattr(args, "key_file", None)) == bool(getattr(args, "passphrase", False)):
@@ -116,6 +101,14 @@ def _run_decrypt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _decrypt_sox1_to_output(args: argparse.Namespace, sox1: str, *, output_path: Path) -> tuple[bytes, dict]:
+    envelope = crypto_envelope.decode_sox1_envelope(sox1)
+    key = _resolve_decrypt_key(args, envelope)
+    plaintext, envelope = crypto_envelope.decrypt_sox1_to_bytes(sox1, key=key)
+    crypto_envelope.write_bytes_atomic(output_path, plaintext)
+    return plaintext, envelope
+
+
 def _run_render(args: argparse.Namespace) -> int:
     if args.mode != "qr":
         raise qr_transport.QrTransportError("P0-S2 only supports --mode qr")
@@ -130,15 +123,6 @@ def _run_render(args: argparse.Namespace) -> int:
     print("artifact_id={0}".format(manifest.get("artifact_id")))
     print("chunks_total={0}".format(manifest.get("chunks_total")))
     return 0
-
-
-def _scan_report_path(args: argparse.Namespace) -> Path:
-    if getattr(args, "work_dir", None):
-        work_dir = Path(args.work_dir)
-    else:
-        work_dir = Path(args.out_string).parent
-    work_dir.mkdir(parents=True, exist_ok=True)
-    return work_dir / "scan_report.json"
 
 
 def _parse_reassembly_report(exc: qr_transport.QrReassemblyError) -> dict:
@@ -168,16 +152,19 @@ def _scan_exit_code(report: dict) -> int:
     return 20
 
 
-def _run_scan(args: argparse.Namespace) -> int:
-    image_input = Path(args.image_input)
-    out_string = Path(args.out_string)
+def _recover_sox1_from_images(
+    *,
+    image_input: Path,
+    out_string: Path,
+    report_path: Path,
+    artifact_id: Optional[str] = None,
+) -> tuple[int, Optional[str], dict]:
     payloads, scan_meta = image_scan.scan_image_input(image_input)
     bad_images = scan_meta.get("bad_images") if isinstance(scan_meta.get("bad_images"), list) else []
-    report_path = _scan_report_path(args)
     try:
         sox1, report = qr_transport.reassemble_chunks(
             payloads,
-            artifact_id=getattr(args, "artifact_id", None),
+            artifact_id=artifact_id,
             image_count=int(scan_meta.get("image_count") or 0),
             bad_images=bad_images,
             out_string=out_string,
@@ -186,6 +173,35 @@ def _run_scan(args: argparse.Namespace) -> int:
         report = _parse_reassembly_report(exc)
         report["scan_report"] = str(report_path)
         qr_transport.write_json_atomic(report_path, report)
+        return _scan_exit_code(report), None, report
+
+    crypto_envelope.write_text_atomic(out_string, sox1 + "\n")
+    report["image_count"] = int(scan_meta.get("image_count") or 0)
+    report["bad_images"] = bad_images
+    report["scan_report"] = str(report_path)
+    qr_transport.write_json_atomic(report_path, report)
+    return 0, sox1, report
+
+
+def _scan_report_path(args: argparse.Namespace) -> Path:
+    if getattr(args, "work_dir", None):
+        work_dir = Path(args.work_dir)
+    else:
+        work_dir = Path(args.out_string).parent
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir / "scan_report.json"
+
+
+def _run_scan(args: argparse.Namespace) -> int:
+    out_string = Path(args.out_string)
+    report_path = _scan_report_path(args)
+    exit_code, _sox1, report = _recover_sox1_from_images(
+        image_input=Path(args.image_input),
+        out_string=out_string,
+        report_path=report_path,
+        artifact_id=getattr(args, "artifact_id", None),
+    )
+    if exit_code != 0:
         print(
             "cross-media scan error: {0}; retake_pages={1}; scan_report={2}".format(
                 report.get("reason"),
@@ -194,13 +210,8 @@ def _run_scan(args: argparse.Namespace) -> int:
             ),
             file=sys.stderr,
         )
-        return _scan_exit_code(report)
+        return exit_code
 
-    crypto_envelope.write_text_atomic(out_string, sox1 + "\n")
-    report["image_count"] = int(scan_meta.get("image_count") or 0)
-    report["bad_images"] = bad_images
-    report["scan_report"] = str(report_path)
-    qr_transport.write_json_atomic(report_path, report)
     print("out_string={0}".format(out_string))
     print("scan_report={0}".format(report_path))
     print("artifact_id={0}".format(report.get("artifact_id")))
@@ -209,12 +220,190 @@ def _run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_send(args: argparse.Namespace) -> int:
+    if args.mode != "qr":
+        raise qr_transport.QrTransportError("P0-S3 send only supports --mode qr")
+    key, key_mode, kdf = _resolve_encrypt_key(args)
+    input_path = Path(args.input)
+    output_dir = Path(args.output_dir)
+    plaintext = input_path.read_bytes()
+    input_sha256 = hashlib.sha256(plaintext).hexdigest()
+    sox1 = crypto_envelope.encrypt_bytes_to_sox1(
+        plaintext,
+        key=key,
+        name=input_path.name,
+        key_mode=key_mode,
+        kdf=kdf,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload_path: Optional[Path] = None
+    if not getattr(args, "no_debug_sox1", False):
+        payload_path = output_dir / "payload.sox1"
+        crypto_envelope.write_text_atomic(payload_path, sox1 + "\n")
+    else:
+        stale_payload = output_dir / "payload.sox1"
+        if stale_payload.exists() and stale_payload.is_file():
+            stale_payload.unlink()
+    manifest = qr_transport.render_qr_pages(sox1, output_dir, chunk_chars=qr_transport.DEFAULT_CHUNK_CHARS)
+    report = {
+        "schema": SEND_REPORT_SCHEMA,
+        "success": True,
+        "input": str(input_path),
+        "input_size": len(plaintext),
+        "input_sha256": input_sha256,
+        "artifact_id": manifest.get("artifact_id"),
+        "pages": manifest.get("chunks_total"),
+        "mode": args.mode,
+        "output_dir": str(output_dir),
+        "pages_dir": str(output_dir / "pages"),
+        "payload_sox1": str(payload_path) if payload_path is not None else None,
+        "manifest": str(output_dir / "manifest.json"),
+    }
+    report_path = output_dir / "send_report.json"
+    qr_transport.write_json_atomic(report_path, report)
+    print("output_dir={0}".format(output_dir))
+    print("pages_dir={0}".format(output_dir / "pages"))
+    print("send_report={0}".format(report_path))
+    print("artifact_id={0}".format(report.get("artifact_id")))
+    print("pages={0}".format(report.get("pages")))
+    print("input_sha256={0}".format(input_sha256))
+    return 0
+
+
+def _decrypt_success_report(
+    *,
+    output_path: Path,
+    recovered_sox1_path: Path,
+    plaintext: bytes,
+    envelope: dict,
+) -> dict:
+    content = envelope.get("content") if isinstance(envelope.get("content"), dict) else {}
+    return {
+        "schema": DECRYPT_REPORT_SCHEMA,
+        "success": True,
+        "output": str(output_path),
+        "output_sha256": hashlib.sha256(plaintext).hexdigest(),
+        "output_size": len(plaintext),
+        "content_name": content.get("name"),
+        "recovered_sox1": str(recovered_sox1_path),
+    }
+
+
+def _decrypt_failure_report(
+    *,
+    output_path: Path,
+    recovered_sox1_path: Path,
+    reason: str,
+    error: Exception,
+) -> dict:
+    return {
+        "schema": DECRYPT_REPORT_SCHEMA,
+        "success": False,
+        "output": str(output_path),
+        "recovered_sox1": str(recovered_sox1_path),
+        "reason": reason,
+        "error": str(error),
+    }
+
+
+def _preflight_receive_key(args: argparse.Namespace) -> None:
+    if getattr(args, "key_file", None):
+        key_material.load_key_file(Path(args.key_file))
+    elif getattr(args, "passphrase", False):
+        key_material.passphrase_from_env()
+
+
+def _run_receive(args: argparse.Namespace) -> int:
+    if bool(getattr(args, "key_file", None)) == bool(getattr(args, "passphrase", False)):
+        raise ValueError("use exactly one of --key-file or --passphrase")
+    work_dir = Path(args.work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    recovered_sox1 = work_dir / "recovered.sox1"
+    scan_report = work_dir / "scan_report.json"
+    decrypt_report = work_dir / "decrypt_report.json"
+    output_path = Path(args.output)
+    try:
+        _preflight_receive_key(args)
+    except key_material.KeyMaterialError as exc:
+        report = _decrypt_failure_report(
+            output_path=output_path,
+            recovered_sox1_path=recovered_sox1,
+            reason="key_material_error",
+            error=exc,
+        )
+        qr_transport.write_json_atomic(decrypt_report, report)
+        print("cross-media receive key error: {0}; decrypt_report={1}".format(exc, decrypt_report), file=sys.stderr)
+        return 10
+    exit_code, sox1, scan_payload = _recover_sox1_from_images(
+        image_input=Path(args.image_input),
+        out_string=recovered_sox1,
+        report_path=scan_report,
+    )
+    if exit_code != 0:
+        print(
+            "cross-media receive scan error: {0}; retake_pages={1}; scan_report={2}".format(
+                scan_payload.get("reason"),
+                scan_payload.get("retake_pages", []),
+                scan_report,
+            ),
+            file=sys.stderr,
+        )
+        return exit_code
+    assert sox1 is not None
+    try:
+        plaintext, envelope = _decrypt_sox1_to_output(args, sox1, output_path=output_path)
+    except key_material.KeyMaterialError as exc:
+        report = _decrypt_failure_report(
+            output_path=output_path,
+            recovered_sox1_path=recovered_sox1,
+            reason="key_material_error",
+            error=exc,
+        )
+        qr_transport.write_json_atomic(decrypt_report, report)
+        print("cross-media receive key error: {0}; decrypt_report={1}".format(exc, decrypt_report), file=sys.stderr)
+        return 10
+    except crypto_envelope.Sox1DecryptError as exc:
+        report = _decrypt_failure_report(
+            output_path=output_path,
+            recovered_sox1_path=recovered_sox1,
+            reason="authenticated_decryption_failed",
+            error=exc,
+        )
+        qr_transport.write_json_atomic(decrypt_report, report)
+        print("cross-media receive decrypt error: {0}; decrypt_report={1}".format(exc, decrypt_report), file=sys.stderr)
+        return 11
+    except crypto_envelope.Sox1EnvelopeError as exc:
+        report = _decrypt_failure_report(
+            output_path=output_path,
+            recovered_sox1_path=recovered_sox1,
+            reason="sox1_envelope_error",
+            error=exc,
+        )
+        qr_transport.write_json_atomic(decrypt_report, report)
+        print("cross-media receive envelope error: {0}; decrypt_report={1}".format(exc, decrypt_report), file=sys.stderr)
+        return 11
+
+    report = _decrypt_success_report(
+        output_path=output_path,
+        recovered_sox1_path=recovered_sox1,
+        plaintext=plaintext,
+        envelope=envelope,
+    )
+    qr_transport.write_json_atomic(decrypt_report, report)
+    print("output={0}".format(output_path))
+    print("scan_report={0}".format(scan_report))
+    print("decrypt_report={0}".format(decrypt_report))
+    print("output_size={0}".format(len(plaintext)))
+    print("output_sha256={0}".format(report.get("output_sha256")))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="soenc cm",
         description=(
-            "Cross-media encrypted transport commands. P0-S0 provides this lightweight "
-            "entrypoint; SOX1/QR/send/receive land in the next documented stages."
+            "Cross-media encrypted transport commands: SOX1 envelope, QR visual "
+            "transport, and P0 send/receive workflows."
         ),
     )
     subparsers = parser.add_subparsers(dest="cm_command")
@@ -261,7 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--output-dir", required=True, help="Output send package directory.")
     send_parser.add_argument("--mode", choices=["qr"], default="qr", help="Visual transport mode.")
     send_parser.add_argument("--no-debug-sox1", action="store_true", help="Do not persist payload.sox1 debug output.")
-    send_parser.set_defaults(handler=_run_not_implemented)
+    send_parser.set_defaults(handler=_run_send)
 
     receive_parser = subparsers.add_parser("receive", help="Scan and decrypt in one command (P0-S3).")
     receive_parser.add_argument("--image-input", required=True, help="Directory containing captured images.")
@@ -269,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
     receive_parser.add_argument("--passphrase", action="store_true", help="Read passphrase without putting it in shell history.")
     receive_parser.add_argument("--output", required=True, help="Output plaintext file.")
     receive_parser.add_argument("--work-dir", required=True, help="Directory for reports and intermediates.")
-    receive_parser.set_defaults(handler=_run_not_implemented)
+    receive_parser.set_defaults(handler=_run_receive)
 
     return parser
 
@@ -298,12 +487,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except qr_transport.QrTransportError as exc:
         print("cross-media QR transport error: {0}".format(exc), file=sys.stderr)
         return 21
-    except CrossMediaNotImplemented as exc:
-        print("cross-media command not implemented: {0}".format(exc), file=sys.stderr)
-        return 40
     except OSError as exc:
         print("cross-media file error: {0}".format(exc), file=sys.stderr)
         return 30
+    except ValueError as exc:
+        print("cross-media argument error: {0}".format(exc), file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         message = str(exc)
         if "OpenCV" in message or "Pillow" in message or "cryptography" in message:
@@ -312,4 +501,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise
 
 
-__all__ = ["CrossMediaNotImplemented", "build_parser", "main"]
+__all__ = ["build_parser", "main"]

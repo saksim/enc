@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import builtins
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from enc2sop import cli as soenc_cli
@@ -62,9 +64,49 @@ class CrossMediaCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mocked_main.assert_called_once_with(["render", "--input-string", "x", "--output-dir", "out"])
 
-    def test_crossmedia_send_still_fails_explicitly_until_next_stage(self) -> None:
+    def test_crossmedia_receive_requires_key_mode_now_implemented(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exit_code = crossmedia_cli.main(
+                [
+                    "receive",
+                    "--image-input",
+                    str(root),
+                    "--output",
+                    str(root / "out.bin"),
+                    "--work-dir",
+                    str(root / "work"),
+                ]
+            )
+            self.assertEqual(exit_code, 2)
+
+    def test_crossmedia_send_missing_key_file_returns_key_error(self) -> None:
+        exit_code = crossmedia_cli.main(["send", "--input", "missing.bin", "--output-dir", "pages", "--key-file", "missing.key"])
+        self.assertEqual(exit_code, 10)
+
+    def test_crossmedia_receive_scan_input_errors_return_file_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key_file = root / "key.bin"
+            key_file.write_bytes(bytes(range(32)))
+            exit_code = crossmedia_cli.main(
+                [
+                    "receive",
+                    "--image-input",
+                    str(root / "missing_photos"),
+                    "--output",
+                    str(root / "out.bin"),
+                    "--work-dir",
+                    str(root / "work"),
+                    "--key-file",
+                    str(key_file),
+                ]
+            )
+            self.assertEqual(exit_code, 30)
+
+    def test_crossmedia_send_requires_exactly_one_key_mode(self) -> None:
         exit_code = crossmedia_cli.main(["send", "--input", "plain.bin", "--output-dir", "pages"])
-        self.assertEqual(exit_code, 40)
+        self.assertEqual(exit_code, 2)
 
 
 if __name__ == "__main__":

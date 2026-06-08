@@ -373,6 +373,9 @@ def render_qr_pages(sox1: str, output_dir: Path, *, chunk_chars: int = DEFAULT_C
     output = Path(output_dir)
     pages_dir = output / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
+    for old_page in pages_dir.glob("page_*.png"):
+        if old_page.is_file():
+            old_page.unlink()
     page_records = []
     for chunk in chunks:
         payload = encode_qr_payload(chunk)
