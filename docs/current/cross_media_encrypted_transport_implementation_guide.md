@@ -1,318 +1,310 @@
-# 跨介质加密解密传送：现状诊断与后续 GPT5.5 施工文档
+﻿# 跨介质加密传输施工落地指南（GPT-5.5 执行版）
 
-> 目标版本：V0.1 施工指引  
-> 分析对象：`6_so_enc.rar` 解包后的代码包  
-> 唯一目标：让任意数据在密闭环境内被加密成字符串，再被渲染成图片；外界用手机拍摄图片后，使用同一套代码恢复字符串并解密出原始数据。  
-> 明确排除：不要继续围绕 release / promotion / GitHub evidence / 平台发版治理扩展；这些不是当前卡点。
+> 目标版本：v1.0 施工蓝图  
+> 文档状态：后续 GPT-5.5 施工的唯一主线指引  
+> 项目根目录：`D:\Download\gaming\new_program\data_helper\6_so_enc`  
+> 当前施工文档：`docs/current/cross_media_encrypted_transport_implementation_guide.md`  
+> 上一版原文备份：`docs/archive/cross_media_encrypted_transport_implementation_guide.pre_opt_*.md`
 
 ---
 
-## 1. 最终目标的工程化定义
+## 0. 给后续 GPT-5.5 的执行总令
 
-用户真正要的不是“加密平台发布治理”，而是一条可被普通操作者执行的跨介质链路：
+本轮施工只解决一个产品目标：
 
 ```text
-密闭环境内：
-原始数据 bytes
-  -> 加密信封 encrypted envelope
-  -> 稳定 ASCII 字符串 SOX1.xxx
-  -> 一张或多张可拍摄图片 pages/*.png
-
-跨介质动作：
-手机拍照 / 扫描 / 截图 / 传图
-
-外界环境内：
-照片 images/*
-  -> 自动识别/纠偏/解码
-  -> 还原 SOX1.xxx 字符串
-  -> 使用同一套代码 + 正确密钥解密
+任意数据 bytes
+  -> 加密信封字符串 SOX1
+  -> 可拍摄图片
+  -> 手机拍照/截图/扫描
+  -> 恢复 SOX1 字符串
+  -> 用正确密钥解密
   -> 原始数据 bytes
 ```
 
-验收标准必须是端到端的：
+不要继续扩展 release、promotion、GitHub evidence、平台发布治理、证据归档平台。那些能力可以保留，但不是当前卡点。
 
-1. **正确性**：恢复文件与原文件 SHA256 完全一致。
-2. **保密性**：图片、字符串、manifest 中不得携带可直接解密的密钥。
-3. **完整性**：任意一张图片、任意一个字符、任意一个分片被篡改，都必须解密失败或校验失败。
-4. **跨介质鲁棒性**：清晰手机照片、轻微旋转、轻微透视、JPEG 压缩、轻微模糊、缩放后仍可恢复，失败时给出明确 retake plan。
-5. **自包含性**：外界不应必须拿到额外 manifest 文件；如果需要 manifest，它也必须被编码进图片链路。
-6. **易用性**：操作者只需要 4 个命令以内完成：加密、渲染、扫描、解密。
+后续 GPT-5.5 必须按以下顺序施工：
+
+1. **P0-S0：CLI 入口解耦**：`python soenc.py transport --help` 与 `python soenc.py cm --help` 必须能在最小跨介质依赖下启动。
+2. **P0-S1：SOX1 通用加密信封**：实现 `bytes <-> SOX1 string`，严禁把密钥嵌入信封或图片。
+3. **P0-S2：QR 分片视觉传输**：实现 `SOX1 string <-> QR pages <-> photos <-> SOX1 string`。
+4. **P0-S3：send/receive 高层命令**：把普通用户路径收敛到 2 条命令。
+5. **P0-S4：保留并修复旧 OCR/sidecar manifest-less 缺陷**：不得让旧能力文档声称可用但实际不可闭环。
+6. **P0-S5：端到端验收脚本与测试**：以 SHA256 完全一致作为最终准入。
+
+每一步只允许修改与该步骤相关的文件。若某一步失败，回到最早不确定点，不要横向扩展。
 
 ---
 
-## 2. 当前代码包与目标的关系
+## 1. 目标、非目标与验收口径
 
-### 2.1 当前代码里已经有用的部分
+### 1.1 真实目标
 
-与目标强相关的文件：
-
-```text
-qrcode_helper.py                         # 旧的空气隔离/图片传输主入口
-enc2sop/transport/protocol.py            # 编码、CRC、OCR normalization、payload profile
-enc2sop/transport/render.py              # 文本页 + 右侧 binary sidecar 渲染
-enc2sop/transport/ocr_runtime.py         # sidecar / tesseract / easyocr / external OCR 编排
-enc2sop/transport/ocr_embedded.py        # 无 manifest 时从图片 OCR 读取 embedded metadata
-enc2sop/transport/parser.py              # OCR 文本解析、纠错、parity 恢复
-enc2sop/transport/recover.py             # verify/analyze/recover 实现
-enc2sop/transport/certify.py             # 可靠性证据、capture corpus、物理扫描/相机证据链
-scripts/real_capture_text_transport.py   # “文本加密 -> 图片 -> 真实捕获 -> 解密”的试验脚本
-```
-
-当前传输层不是标准 QR code。`qrcode_helper.py` 名字像 QR，但实际核心是：
+面向“密闭环境向外界传递任意小型数据”的实际操作链路：
 
 ```text
-zlib 压缩 bytes
-  -> safe-base32 或 ocr-safe alphabet
-  -> 分片文本行
-  -> 每行 CRC
-  -> 可选重复/交织/parity
-  -> PNG 页面
-  -> 右侧 binary sidecar 小黑块
-  -> OCR/sidecar 恢复
-  -> SHA256 校验
+密闭环境内：
+  secret.bin
+    -> soenc.py cm encrypt/send
+    -> send_pages/*.png
+
+跨介质动作：
+  打印 / 屏幕显示 / 手机拍照 / 截图 / 扫描
+
+外界环境内：
+  phone_photos/*
+    -> soenc.py cm scan/receive
+    -> restored.bin
 ```
 
-这条链路在“生成 PNG 原图”场景下已经能跑通。
+### 1.2 P0 必须满足的验收标准
 
-### 2.2 我实测到的结果
+1. **正确性**：`sha256(restored.bin) == sha256(secret.bin)`。
+2. **保密性**：图片、SOX1 字符串、manifest、scan report 中不得包含明文、原始 key、key shards、可直接恢复明文的材料。
+3. **完整性**：任意篡改 SOX1、QR chunk、图片内容或分片顺序，必须导致扫描失败、CRC 失败、GCM tag 校验失败或最终 SHA 校验失败。
+4. **自包含传输**：外界只拿到照片也能恢复 SOX1；manifest 只能作为调试辅助，不得作为 P0 恢复必需品。
+5. **易用性**：普通操作者最多使用 2 条主命令：`send` 与 `receive`。
+6. **失败可操作**：缺页、坏页、CRC 错误时必须输出 retake plan，明确需要重拍哪一页。
+7. **最小依赖**：跨介质命令不得被 protect/build/release 的依赖污染。
 
-在当前环境中直接用 `qrcode_helper.py` 做最小闭环，结果如下：
+### 1.3 明确非目标
+
+P0 不做：
+
+- 公钥加密完整产品化。
+- 大文件无限容量传输。
+- 一页多 QR 的排版优化。
+- 证据链平台、发布审批、GitHub release proof。
+- 自动证明目标是否“本地/外部”。本项目只关心 sandbox 内的工程闭环。
+
+---
+
+## 2. 当前仓库事实与可复用资产
+
+### 2.1 关键文件
 
 ```text
-artifact.bin
-  -> qrcode_helper.py export
-  -> pages_txt recover：成功，cmp 一致
-  -> recover-images + manifest + backend auto：成功，选择 sidecar，cmp 一致
-  -> recover-images + manifest + backend tesseract：成功，cmp 一致
+soenc.py                                      # 仓库统一 CLI wrapper
+enc2sop/cli.py                               # 当前统一 CLI；顶层 import 偏重
+qrcode_helper.py                             # 旧 airgap/text/image transport 主入口
+enc2sop/transport/cli.py                     # 旧 transport CLI parser
+enc2sop/transport/protocol.py                # CRC、SHA、payload alphabet、CFG parser
+enc2sop/transport/render.py                  # 旧文本页/sidecar 渲染
+enc2sop/transport/ocr_embedded.py            # 旧 embedded metadata OCR
+enc2sop/transport/parser.py                  # OCR 文本解析、缺片、冲突、parity 思路
+enc2sop/transport/recover.py                 # recover/analyze/report/retake 思路
+enc2sop/transport/certify.py                 # 证据链、真实拍摄、校正实验工具
+scripts/real_capture_text_transport.py       # 旧真实拍摄实验脚本
 ```
 
-另外做了几类轻量图片扰动：
+### 2.2 当前依赖事实
+
+在当前本机环境中观察到：
 
 ```text
-JPEG q85：成功
-轻微 blur：成功
-低对比度：成功
-50% 缩放再放大：成功
-轻微旋转/裁剪：出现超时或失败风险
+Crypto        可用
+cryptography  可用
+cv2           可用，且有 QRCodeDetector 与 QRCodeEncoder
+PIL           可用
+qrcode        不可用
+pyzbar        不可用
 ```
 
-这说明：
+因此 P0 推荐：
 
-1. 当前核心不是完全不可用；生成图、清晰图、部分压缩/模糊场景能恢复。
-2. 真正的手机拍摄风险主要在 **透视、旋转、裁剪、页面定位**，而不是加密本身。
-3. 现有代码已经有很多证据链功能，但普通端到端使用体验还没有收敛。
+- **QR 生成**：优先使用 OpenCV `cv2.QRCodeEncoder_create()`；若不可用，再考虑 Pillow 手绘或可选 `qrcode` 包。
+- **QR 扫描**：优先使用 OpenCV `cv2.QRCodeDetector().detectAndDecodeMulti()`，再 fallback 到单图多预处理重试。
+- **加密**：优先使用标准库 + `cryptography` 或已有 `Crypto`。为了跨环境稳定，建议在新模块内做轻量 crypto backend 选择，不要顶层依赖旧 `encryption_helper.py`。
 
-### 2.3 当前直接阻塞点
+### 2.3 当前核心问题
 
-#### 阻塞 1：统一入口 `soenc.py transport ...` 被非传输依赖拖死
+1. `enc2sop/cli.py` 顶层导入 `encryption_helper` 与 promotion 模块，导致 transport/cm 入口容易被非本任务依赖拖死。
+2. 旧加密主要面向 Python 代码保护，不是通用数据信封。
+3. `enc2sop/keys/local.py` 的 local-embedded 思路不能用于真实保密传输，因为密钥随 artifact 一起带出。
+4. 旧 OCR/sidecar 在 manifest-less + `ocr-safe-human-correctable-v1` + parity 场景下存在元数据不完整风险。
+5. 真手机照片的旋转、透视、裁切、反光问题还没有进入简单主链路。
 
-执行：
+---
+
+## 3. 目标架构：两层一接口
+
+后续施工必须把系统收敛为两个互相解耦的层：
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ A. Crypto Envelope 层                                        │
+│    输入/输出：bytes <-> SOX1 ASCII string                    │
+│    责任：压缩、加密、认证、密钥派生、信封解析、完整性校验       │
+│    禁止：关心图片、OCR、QR、证据链、发布治理                   │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ 唯一接口：ASCII string（SOX1）
+┌───────────────────────▼─────────────────────────────────────┐
+│ B. Visual Transport 层                                       │
+│    输入/输出：SOX1 string <-> images/photos <-> SOX1 string  │
+│    责任：分片、QR 渲染、扫描、重组、CRC、retake plan           │
+│    禁止：解密明文、读取密钥、判断业务数据含义                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.1 命令形态
+
+底层调试命令：
 
 ```bash
-python3 soenc.py transport --help
+python soenc.py cm encrypt --input secret.bin --key-file key.bin --out-string secret.sox1
+python soenc.py cm render  --input-string secret.sox1 --output-dir pages --mode qr
+python soenc.py cm scan    --image-input phone_photos --out-string recovered.sox1
+python soenc.py cm decrypt --input-string recovered.sox1 --key-file key.bin --output restored.bin
 ```
 
-当前会失败：
-
-```text
-ModuleNotFoundError: No module named 'Crypto'
-```
-
-原因是 `enc2sop/cli.py` 顶层直接 `import encryption_helper`，而 `encryption_helper.py` 又依赖 `Crypto.Cipher.AES`。即使用户只想用 `transport`，也会被主平台加密依赖阻塞。
-
-这必须作为 P0 修复：传输 CLI 入口必须可独立启动，不能被 protect/build/release 的依赖污染。
-
-#### 阻塞 2：当前“加密”更偏 Python 代码保护，不是通用数据加密信封
-
-`encryption_helper.encrypt_snippet()` 使用 AES-GCM，这是可用的密码学原语；但它的上下文是“保护 Python 源码片段”，不是“任意数据跨介质传输”。
-
-`scripts/real_capture_text_transport.py` 有一个文本试验包装，但它仍然是试验脚本，不是清晰的产品命令。
-
-当前缺少一个稳定的、与传输层解耦的通用信封：
-
-```text
-bytes -> encrypted envelope -> SOX1 字符串
-SOX1 字符串 -> envelope -> bytes
-```
-
-#### 阻塞 3：`local-embedded` 不能作为真实保密方案
-
-`enc2sop/keys/local.py` 会把 AES key 拆成 XOR shards 后随 artifact 一起保存。它能用于运行时自解密/测试，但如果这个 artifact 被编码到图片并带到外界，密钥也等于一起带出去了。
-
-对“密闭环境 -> 外界”的真实保密目标来说：
-
-```text
-图片里绝对不能同时包含密文和可还原明文的密钥。
-```
-
-P0 必须改成：
-
-1. `--key-file`：密闭环境和外界预先都有同一把 32-byte key；或
-2. `--passphrase`：双方预共享口令，用 KDF 派生 AES key；或
-3. P1 再做公钥模式：外界先生成 public key，密闭环境只持 public key，外界用 private key 解密。
-
-#### 阻塞 4：无 manifest 恢复还不可靠，尤其 OCR-safe + redundancy/parity
-
-我用如下配置生成图片：
-
-```text
---payload-alphabet-profile ocr-safe-human-correctable-v1
---redundancy-copies 2
---parity-group-size 4
-```
-
-带 manifest 恢复成功；但不带 manifest 直接从图片恢复失败，最终报 compressed sha256 mismatch。
-
-观察到的原因：
-
-1. `@CFG` embedded metadata 当前只包含 `CC/LP/RC/IL/PG/CS/RS`。
-2. 它没有记录 `payload_alphabet_profile`。
-3. `enc2sop/transport/ocr_embedded.py` 的 `build_inferred_manifest_from_metadata()` 默认按 `safe_base32` 推断编码长度和 sidecar payload profile。
-4. 当实际使用 `ocr-safe-human-correctable-v1` 时，无 manifest sidecar 解码会按错误 alphabet 解释 bit payload，得到可成行但内容错误的 payload，最终 hash mismatch。
-
-这对用户最终目标很关键：如果外界只有手机拍到的图片，没有额外 manifest 文件，当前可靠模式并不闭环。
-
-#### 阻塞 5：手机照片的自动透视纠偏没有进入简单 recover-images 主链路
-
-代码里有 `correct-capture-perspective`、capture corpus、真实相机 evidence gate 等能力，但对普通用户来说流程过重。
-
-当前简单命令：
+普通用户主命令：
 
 ```bash
-python qrcode_helper.py recover-images -m manifest -i photos -o restored.bin --backend auto
-```
+python soenc.py cm send \
+  --input secret.bin \
+  --key-file key.bin \
+  --output-dir send_pages \
+  --mode qr
 
-更适合生成图、截图、轻度压缩图。对真实手机拍摄的旋转、透视、裁边，现有流程需要额外人工/证据链步骤，没有形成“自动识别页面 -> 纠偏 -> 解码 -> retake plan”的产品化闭环。
-
----
-
-## 3. 战略判断：不要继续堆平台治理，先收敛成两个独立层
-
-后续不要再让 GPT5.5 继续沿着 promotion/release/certification 方向扩展。当前目标只需要两个稳定模块：
-
-```text
-A. Crypto Envelope 层
-   负责：任意 bytes <-> 加密字符串
-   不关心图片、不关心 OCR、不关心证据链
-
-B. Visual Transport 层
-   负责：字符串 <-> 图片 <-> 手机照片 <-> 字符串
-   不关心明文、不关心业务、不关心 Python 代码保护
-```
-
-二者之间唯一接口：
-
-```text
-ASCII string
-```
-
-推荐最终形态：
-
-```text
-python soenc.py cm encrypt  --input secret.bin --key-file key.bin --out-string secret.sox1
-python soenc.py cm render   --input-string secret.sox1 --output-dir pages --mode qr
-python soenc.py cm scan     --image-input phone_photos --out-string recovered.sox1
-python soenc.py cm decrypt  --input-string recovered.sox1 --key-file key.bin --output restored.bin
-```
-
-其中 `cm` 表示 `cross-media`。
-
----
-
-## 4. 推荐实现路线
-
-### 总体建议
-
-为了最快解决“手机拍照跨介质传输”，建议 P0 优先做 **QR 分片传输模式**，而不是继续硬扛通用 OCR。
-
-原因：
-
-1. QR 本身就是为相机识别设计的，有定位点、透视识别、纠错能力。
-2. 当前 OCR/sidecar 需要额外 manifest、坐标、字体、band 检测，真实手机拍摄会受旋转/透视/裁剪影响。
-3. 当前环境已经能看到 `qrcode`、`cv2`、`pyzbar` 类依赖可用；即使后续要显式写入 requirements，也比自研 OCR 坐标系统风险低。
-4. 现有 sidecar/OCR 代码可以保留为 fallback 或证据链工具，但不要作为 P0 唯一路径。
-
-P0 的务实路径：
-
-```text
-加密字符串 SOX1
-  -> 切分成 N 个 chunk
-  -> 每个 chunk 一个 QR，或每页多个 QR
-  -> 手机拍照
-  -> OpenCV/pyzbar decodeMulti
-  -> CRC/SHA/序号重组
-  -> SOX1
-  -> AES-GCM 解密
+python soenc.py cm receive \
+  --image-input phone_photos \
+  --key-file key.bin \
+  --output restored.bin \
+  --work-dir receive_work
 ```
 
 ---
 
-## 5. P0 施工任务拆解
+## 4. 目录与模块规划
 
-### P0-S0：修复 transport / cross-media CLI 可独立启动
+新增目录：
 
-#### 目标
-
-用户只运行跨介质命令时，不应因为主平台 `Crypto`、Cython、release 等依赖失败。
-
-#### 修改建议
-
-文件：`enc2sop/cli.py`
-
-当前问题：顶层导入太重：
-
-```python
-import encryption_helper
+```text
+enc2sop/crossmedia/
+  __init__.py
+  cli.py                 # cm 子命令 parser 与 dispatch
+  crypto_envelope.py     # SOX1 信封
+  key_material.py        # key-file/passphrase 读取与派生
+  qr_transport.py        # QR 分片、渲染、重组
+  image_scan.py          # OpenCV/PIL 图片读取、预处理、QR 扫描
+  reports.py             # scan/decrypt/send/receive report 写入
+  errors.py              # 稳定错误类型与 exit code
 ```
 
-改法：
+新增测试：
 
-1. 顶层只保留轻量标准库和 plugin registry。
-2. 在 `_run_protect/_run_build/_run_package/_run_verify/_run_release` 内部再 lazy import `encryption_helper`。
-3. `_run_transport` 或新 `_run_cross_media` 不得 import `encryption_helper`。
-4. 新增 `requirements-transport.txt` 或 `requirements-crossmedia.txt`，明确列出最小依赖。
+```text
+tests/test_crossmedia_crypto_envelope.py
+tests/test_crossmedia_qr_transport.py
+tests/test_crossmedia_cli.py
+tests/test_crossmedia_e2e.py
+```
 
-#### 验收命令
+新增脚本：
+
+```text
+scripts/crossmedia_smoke.ps1
+scripts/crossmedia_smoke.sh
+scripts/simulate_capture_distortions.py
+requirements-crossmedia.txt
+```
+
+> 说明：P0 可先只实现 Windows PowerShell smoke；Linux shell 可在后续补齐，但测试必须跨平台路径安全。
+
+---
+
+## 5. P0-S0：CLI 入口解耦
+
+### 5.1 目标
+
+以下命令必须在不触发 protect/build/release 重依赖的情况下启动：
 
 ```bash
 python soenc.py transport --help
-python qrcode_helper.py --help
 python soenc.py cm --help
 ```
 
-其中 `soenc.py cm --help` 是后续新增命令。
+### 5.2 允许修改
 
-#### 验收标准
+```text
+enc2sop/cli.py
+enc2sop/crossmedia/*
+soenc.py（仅在必要时轻微修改）
+requirements-crossmedia.txt
+```
 
-1. 在未安装主平台 protect/build 依赖时，transport/cm help 能启动。
-2. 不出现 `ModuleNotFoundError: Crypto`。
-3. 不触碰 promotion/release 逻辑。
+### 5.3 禁止修改
+
+```text
+enc2sop/promotion_*.py
+scripts/github_release_promotion_evidence.sh
+.github/workflows/release_promotion.yml
+release/promotion/GitHub evidence 相关测试的大规模重写
+```
+
+### 5.4 施工要求
+
+`enc2sop/cli.py` 当前顶层 import 太重，必须改成 lazy import：
+
+- 顶层只保留标准库、`plugin_registry` 如确有必要、轻量类型。
+- `encryption_helper` 只能在 `_run_protect/_run_build/_run_package/_run_verify/_run_release/...` 内部按需导入。
+- `promotion_*` 只能在对应 release/promotion 子命令内部按需导入。
+- 新增 `_run_cross_media(args)`，内部导入 `enc2sop.crossmedia.cli`。
+- 现有 `transport` 子命令也不得因为 `cm` 或 protect 依赖失败。
+
+### 5.5 验收
+
+```bash
+python soenc.py --help
+python soenc.py transport --help
+python soenc.py cm --help
+python -m enc2sop cm --help
+```
+
+全部返回 exit code 0，且不出现：
+
+```text
+ModuleNotFoundError: Crypto
+ModuleNotFoundError: qrcode
+ModuleNotFoundError: pyzbar
+```
 
 ---
 
-### P0-S1：新增通用加密信封 `SOX1`
+## 6. P0-S1：SOX1 通用加密信封
 
-#### 目标
+### 6.1 信封目标
 
-把“任意数据加密成字符串”做成稳定能力。
-
-#### 新增模块建议
+把任意 bytes 加密成稳定 ASCII 字符串：
 
 ```text
-enc2sop/crossmedia/__init__.py
-enc2sop/crossmedia/crypto_envelope.py
-enc2sop/crossmedia/cli.py
+bytes -> zlib compress -> AES-256-GCM -> canonical JSON -> base64url -> SOX1.<payload>
 ```
 
-#### 信封格式
-
-字符串外层：
+反向：
 
 ```text
-SOX1.<base64url_no_padding(canonical_json)>
+SOX1.<payload> -> JSON -> AES-256-GCM verify/decrypt -> zlib decompress -> bytes
 ```
 
-JSON 内层建议：
+### 6.2 字符串格式
+
+外层：
+
+```text
+SOX1.<base64url_no_padding(canonical_json_utf8)>
+```
+
+canonical JSON 要求：
+
+- UTF-8。
+- `sort_keys=True`。
+- `separators=(",", ":")`。
+- 不包含不稳定空白。
+- 字段缺失必须 fail closed。
+
+建议 JSON：
 
 ```json
 {
@@ -341,185 +333,453 @@ JSON 内层建议：
 }
 ```
 
-如果使用 passphrase：
+### 6.3 AAD 规则
+
+AES-GCM AAD 必须绑定不可被静默篡改的上下文。推荐 AAD 内容：
 
 ```json
-"key_mode": "passphrase-scrypt",
-"kdf": {
-  "name": "scrypt",
-  "salt_b64u": "...",
-  "n": 32768,
-  "r": 8,
-  "p": 1,
-  "key_len": 32
+{
+  "schema": "enc2sop-cross-media-envelope/v1",
+  "version": 1,
+  "compression_algorithm": "zlib",
+  "content_name": "optional.bin",
+  "original_size": 123,
+  "plaintext_sha256": "..."
 }
 ```
 
-#### 密钥规则
+AAD 本身可进入 JSON，但 decrypt 时必须重新 canonicalize 后参与 GCM 校验。
 
-P0 支持两种：
+### 6.4 密钥模式
+
+P0 支持两种真实模式：
 
 ```text
---key-file key.bin       # 必须是 32 bytes，或支持 base64/hex 文本
---passphrase             # 从交互输入或环境变量读取，不写入命令历史
+--key-file key.bin
+--passphrase
 ```
 
-禁止默认使用 `local-embedded`。如果为了开发测试允许 `--insecure-embed-key`，必须：
+`--key-file` 规则：
 
-1. 命令名带 `insecure`；
-2. 输出 warning；
-3. 测试报告不得把它当成真实保密能力。
+- 推荐原始 32 bytes。
+- 可接受 hex/base64url/base64 文本，但要明确解析规则。
+- 解析后必须正好 32 bytes，否则失败。
 
-#### CLI
+`--passphrase` 规则：
+
+- 不允许在命令行明文传入 passphrase。
+- 从交互式 prompt 或环境变量读取；若用环境变量，变量名必须显式，如 `SOENC_CM_PASSPHRASE`。
+- KDF 使用 `scrypt(n=32768, r=8, p=1, key_len=32)` 或 `Argon2id`（若依赖稳定）。P0 推荐 scrypt，因为标准库 `hashlib.scrypt` 可用。
+- salt 必须随机生成并写入信封。
+
+禁止：
+
+- 默认使用 `local-embedded`。
+- 在 SOX1、QR payload、manifest、report 中写入 key 或 key shards。
+- 为了“易用”自动生成并随图携带解密 key。
+
+开发测试如确需嵌入 key，必须使用显式危险开关：
+
+```text
+--insecure-embed-key-for-test-only
+```
+
+并且：
+
+- 命令名带 `insecure`。
+- stderr 打印醒目 warning。
+- 测试不得把它作为保密验收。
+- 文档不得推荐给用户。
+
+### 6.5 API 建议
+
+`enc2sop/crossmedia/crypto_envelope.py`：
+
+```python
+def encrypt_bytes_to_sox1(
+    plaintext: bytes,
+    *,
+    key: bytes,
+    name: str | None = None,
+    created_at_utc: str | None = None,
+    compress: bool = True,
+) -> str: ...
+
+
+def decrypt_sox1_to_bytes(
+    sox1: str,
+    *,
+    key: bytes,
+) -> tuple[bytes, dict]: ...
+```
+
+`key_material.py`：
+
+```python
+def load_key_file(path: Path) -> bytes: ...
+def derive_key_from_passphrase(passphrase: str, salt: bytes, *, n: int, r: int, p: int) -> bytes: ...
+def generate_key_file(path: Path, *, overwrite: bool = False) -> Path: ...
+```
+
+### 6.6 CLI
 
 ```bash
+python soenc.py cm keygen --key-file key.bin
+
 python soenc.py cm encrypt \
-  --input ./secret.bin \
-  --key-file ./key.bin \
-  --out-string ./secret.sox1
+  --input secret.bin \
+  --key-file key.bin \
+  --out-string secret.sox1
 
 python soenc.py cm decrypt \
-  --input-string ./secret.sox1 \
-  --key-file ./key.bin \
-  --output ./restored.bin
+  --input-string secret.sox1 \
+  --key-file key.bin \
+  --output restored.bin
 ```
 
-#### 验收测试
+`--input-string` 应同时支持：
 
-1. 明文 roundtrip：`cmp secret.bin restored.bin` 成功。
-2. 错 key：必须失败。
-3. 篡改 SOX1 任意字符：必须失败。
-4. 输出 SOX1 中不能出现明文片段。
-5. 输出 SOX1 中不能包含 key 或 key shards。
+- 文件路径。
+- 直接传入 `SOX1....` 字符串（P0 可选，但如果实现需避免 shell 长度问题）。
+
+推荐明确参数：
+
+```text
+--input-string FILE_OR_LITERAL
+--input-string-file FILE
+--out-string FILE
+```
+
+### 6.7 测试清单
+
+`tests/test_crossmedia_crypto_envelope.py`：
+
+```text
+test_encrypt_decrypt_roundtrip_key_file
+test_encrypt_decrypt_roundtrip_passphrase
+test_decrypt_fails_with_wrong_key
+test_decrypt_fails_after_ciphertext_tamper
+test_decrypt_fails_after_aad_tamper
+test_envelope_does_not_embed_key_material
+test_binary_file_roundtrip
+test_rejects_bad_sox1_prefix
+test_rejects_unknown_schema_version
+test_key_file_requires_32_bytes_after_decoding
+```
 
 ---
 
-### P0-S2：新增 QR 分片视觉传输模式
+## 7. P0-S2：QR 分片视觉传输
 
-#### 目标
+### 7.1 目标
 
-解决“字符串 -> 图片 -> 手机拍摄 -> 字符串”的跨介质问题。
-
-#### 新增模块建议
+实现：
 
 ```text
-enc2sop/crossmedia/qr_transport.py
-enc2sop/crossmedia/image_scan.py
+SOX1 string -> QR pages/*.png -> phone photos/images -> recovered SOX1 string
 ```
 
-#### 分片格式
+P0 不再把 OCR 文本页作为主路径；旧 OCR/sidecar 保留为 fallback/实验工具。
 
-每个 QR payload 使用短 ASCII：
+### 7.2 分片格式
+
+每个 QR payload 使用短 ASCII，格式固定：
 
 ```text
-SOX1QR|v=1|id=<artifact_id>|i=<chunk_index>|n=<chunk_total>|sha=<full_string_sha256_16>|crc=<chunk_crc16>|data=<chunk>
+SOX1QR|v=1|id=<artifact_id>|i=<chunk_index>|n=<chunk_total>|sha=<full_sha256_16>|crc=<chunk_crc16>|data=<chunk>
 ```
 
-说明：
+字段规则：
 
-1. `id`：由完整 SOX1 字符串 SHA256 前 10-16 位生成。
-2. `i`：从 0 开始。
-3. `n`：总分片数。
-4. `sha`：完整 SOX1 字符串 SHA256 前 16 或 32 位，用于同批识别。
-5. `crc`：单 chunk CRC16 或 CRC32。
-6. `data`：base64url-safe 字符串片段。
+| 字段 | 说明 |
+|---|---|
+| `SOX1QR` | magic，必须严格匹配 |
+| `v` | QR transport schema version，P0 固定 `1` |
+| `id` | 完整 SOX1 字符串 SHA256 前 12 或 16 hex |
+| `i` | 分片序号，从 0 开始 |
+| `n` | 总分片数 |
+| `sha` | 完整 SOX1 字符串 SHA256 前 16 或 32 hex |
+| `crc` | 当前 chunk data 的 CRC16 hex，复用 `enc2sop.transport.protocol.crc16_hex()` |
+| `data` | SOX1 字符串的 ASCII 分片 |
 
-#### 渲染策略
+P0 chunk 直接切 SOX1 原始 ASCII 字符串即可。因为 SOX1 外层已经是安全 ASCII，不需要再次 base64。
 
-P0 最简单：一张图片一个 QR。
+### 7.3 分片大小
+
+推荐默认：
 
 ```text
-pages/page_0001.png
-pages/page_0002.png
-...
+--chunk-chars 700
 ```
 
-每张图同时写可读标题：
+可配置范围：
 
 ```text
-SOX1QR <id>  page 1 / 12
-请保持完整边框，避免反光，逐张拍摄
+200 <= chunk_chars <= 1200
 ```
 
-P1 再做一页多个 QR。
+理由：
 
-#### QR 参数建议
+- chunk 太大，QR 版本升高，手机拍摄鲁棒性下降。
+- chunk 太小，页数过多，人工操作成本高。
+- P0 先保守，后续通过 smoke/capture 数据调优。
 
-1. error correction：`H` 或至少 `Q`。
-2. border：不小于 4 modules。
-3. box_size：保证手机拍摄后 QR 最短边不低于 800px。
-4. chunk size：保守起步 600-900 chars，根据二维码版本自动估算。
-5. 默认 redundancy：每个 chunk 可重复渲染 2 次，或者允许扫描端接受重复照片。
+### 7.4 QR 生成策略
 
-#### 扫描策略
+优先使用 OpenCV：
+
+```python
+encoder = cv2.QRCodeEncoder_create(params)
+img = encoder.encode(payload)
+```
+
+若当前 OpenCV Python 绑定的 encoder 参数不稳定，P0 可使用：
+
+- OpenCV 生成二维码矩阵后转 Pillow PNG。
+- 或实现一个可选 `qrcode` backend，但不得把它变成 help/import 必需依赖。
+
+渲染要求：
+
+```text
+pages/
+  page_0001.png
+  page_0002.png
+  ...
+  manifest.json         # 辅助调试，不是恢复必需
+  instructions.md       # 操作提示
+```
+
+每张页面必须包含：
+
+- 单个 QR code。
+- 清晰标题：`SOX1QR <id> page X / N`。
+- 操作提示：保持完整边框、避免反光、逐张拍摄。
+- 足够 quiet zone。
+- QR 最短边建议不低于 800 px。
+
+P0 一页一个 QR；P1 再做一页多 QR。
+
+### 7.5 QR 扫描策略
 
 优先顺序：
 
 ```text
-1. pyzbar / zbar
+1. EXIF 自动旋转 / ImageOps.exif_transpose
 2. OpenCV QRCodeDetector.detectAndDecodeMulti
-3. 单图多尺度/灰度/阈值重试
+3. OpenCV QRCodeDetector.detectAndDecode
+4. 多尺度重试：0.75x / 1.0x / 1.5x / 2.0x
+5. 轻量预处理：灰度、阈值、锐化、轻微去噪
 ```
 
-扫描输出：
+P0 不强制实现完整四点透视矫正，但必须把失败原因记录进 report。若 QR detector 返回 points，可在 P1 增强透视重试。
+
+### 7.6 重组规则
+
+扫描到 payload 后：
+
+1. parse magic/version。
+2. 按 `artifact_id` 分组。
+3. 校验 `i/n` 范围。
+4. 校验 chunk CRC。
+5. 重复 chunk 内容一致则接受；内容冲突则记录 conflict 并失败。
+6. `0..n-1` 全部存在后按序拼接。
+7. 计算完整 SOX1 SHA256，与 `sha`/`id` 对比。
+8. 输出 recovered SOX1。
+
+混入其他批次 QR 时：
+
+- 默认选择扫描到 chunk 数最多且能通过完整校验的 artifact。
+- 若多个 artifact 都完整，失败并要求用户指定 `--artifact-id`。
+- 不得静默拼接不同 artifact。
+
+### 7.7 scan_report.json
+
+每次 `cm scan` 与 `cm receive` 必须写报告：
 
 ```json
 {
+  "schema": "enc2sop-cross-media-scan-report/v1",
+  "success": false,
+  "artifact_id": "abcd1234ef56",
+  "image_count": 10,
+  "chunks_total": 12,
+  "chunks_found": 10,
+  "duplicates": 2,
+  "missing_chunks": [3, 7],
+  "retake_pages": [4, 8],
+  "bad_images": [
+    {
+      "path": "IMG_1003.jpg",
+      "reason": "qr_not_found_or_crc_failed",
+      "suggestion": "retake page 4 closer, keep full border, avoid glare"
+    }
+  ]
+}
+```
+
+成功时：
+
+```json
+{
+  "schema": "enc2sop-cross-media-scan-report/v1",
   "success": true,
-  "artifact_id": "...",
+  "artifact_id": "abcd1234ef56",
   "chunks_total": 12,
   "chunks_found": 12,
   "duplicates": 3,
-  "missing": [],
+  "missing_chunks": [],
   "string_sha256": "...",
   "out_string": "recovered.sox1"
 }
 ```
 
-失败输出必须包含 retake plan：
-
-```json
-{
-  "success": false,
-  "missing_chunks": [3, 7],
-  "retake_pages": [4, 8],
-  "bad_images": ["IMG_1003.jpg"],
-  "reason": "missing_or_crc_failed_chunks"
-}
-```
-
-#### CLI
+### 7.8 CLI
 
 ```bash
 python soenc.py cm render \
-  --input-string ./secret.sox1 \
-  --output-dir ./pages \
-  --mode qr
+  --input-string secret.sox1 \
+  --output-dir pages \
+  --mode qr \
+  --chunk-chars 700
 
 python soenc.py cm scan \
-  --image-input ./phone_photos \
-  --out-string ./recovered.sox1
+  --image-input phone_photos \
+  --out-string recovered.sox1 \
+  --work-dir scan_work
 ```
 
-#### 验收测试
+### 7.9 测试清单
 
-1. 原始 PNG 扫描恢复 SOX1。
-2. JPEG 压缩后恢复 SOX1。
-3. 轻微旋转后恢复 SOX1。
-4. 轻微透视后恢复 SOX1。
-5. 缺一张图时失败，并明确提示缺第几页。
-6. 重复拍同一页时不影响恢复。
-7. 混入其他批次 QR 时自动排除或报 artifact_id 冲突。
+`tests/test_crossmedia_qr_transport.py`：
+
+```text
+test_split_join_roundtrip
+test_qr_payload_parse_rejects_bad_magic
+test_qr_payload_crc_tamper_fails
+test_render_scan_roundtrip_png
+test_scan_accepts_duplicate_images
+test_scan_reports_missing_chunks_with_retake_pages
+test_scan_rejects_conflicting_duplicate_chunk
+test_scan_rejects_mixed_artifact_ids_when_ambiguous
+test_scan_jpeg_roundtrip
+test_scan_rotated_image_roundtrip
+```
+
+如 CI 环境缺少 OpenCV QR encoder，可把纯分片/parse/report 测试保持必跑，把真实 QR 图像测试用 `skipUnless(cv2_has_qr)` 标记，但本机 smoke 必须跑通。
 
 ---
 
-### P0-S3：如果继续使用现有 OCR/sidecar，必须修复自包含元数据
+## 8. P0-S3：send/receive 高层命令
 
-即使 P0 采用 QR，也建议修复现有 sidecar 模式，否则当前文档声称的 manifest-less 能力会与实际可靠配置冲突。
+### 8.1 send
 
-#### 目标
+命令：
 
-如下命令必须在不传 manifest 的情况下成功：
+```bash
+python soenc.py cm send \
+  --input secret.bin \
+  --key-file key.bin \
+  --output-dir send_pages \
+  --mode qr
+```
+
+内部等价：
+
+```text
+encrypt -> render
+```
+
+输出：
+
+```text
+send_pages/
+  pages/page_0001.png
+  pages/page_0002.png
+  payload.sox1              # 默认可写；如担心落盘，支持 --no-debug-sox1
+  manifest.json             # 辅助调试；恢复不得依赖它
+  instructions.md
+  send_report.json
+```
+
+`send_report.json` 至少包含：
+
+```json
+{
+  "schema": "enc2sop-cross-media-send-report/v1",
+  "success": true,
+  "input_sha256": "...",
+  "artifact_id": "...",
+  "pages": 12,
+  "mode": "qr",
+  "output_dir": "..."
+}
+```
+
+### 8.2 receive
+
+命令：
+
+```bash
+python soenc.py cm receive \
+  --image-input phone_photos \
+  --key-file key.bin \
+  --output restored.bin \
+  --work-dir receive_work
+```
+
+内部等价：
+
+```text
+scan -> decrypt
+```
+
+输出：
+
+```text
+receive_work/
+  scan_report.json
+  recovered.sox1
+  decrypt_report.json
+restored.bin
+```
+
+`decrypt_report.json` 至少包含：
+
+```json
+{
+  "schema": "enc2sop-cross-media-decrypt-report/v1",
+  "success": true,
+  "output_sha256": "...",
+  "output_size": 123,
+  "content_name": "optional.bin"
+}
+```
+
+### 8.3 错误码建议
+
+| exit code | 含义 |
+|---:|---|
+| 0 | 成功 |
+| 2 | CLI 参数错误 |
+| 10 | 密钥读取/格式错误 |
+| 11 | 解密认证失败 |
+| 20 | QR 扫描不完整 |
+| 21 | QR CRC/冲突失败 |
+| 22 | 混入多个 artifact 且无法自动选择 |
+| 30 | 文件 IO 错误 |
+| 40 | 可选依赖缺失 |
+
+所有失败都必须 stderr 给人类可读摘要，同时 work-dir 写 JSON report。
+
+---
+
+## 9. P0-S4：旧 OCR/sidecar manifest-less 修复
+
+即使 P0 主路径切到 QR，也必须修复旧 sidecar 文档与行为的冲突，避免后续维护者误判。
+
+### 9.1 已知风险
+
+旧命令在如下配置中，带 manifest 可恢复；不带 manifest 时可能因 embedded metadata 不完整导致 hash mismatch：
 
 ```bash
 python qrcode_helper.py export \
@@ -535,21 +795,15 @@ python qrcode_helper.py recover-images \
   --backend auto
 ```
 
-#### 修改点 1：`@CFG` 增加 payload profile
+### 9.2 修复要求
 
-当前：
-
-```text
-@CFG|AT1|CC=32|LP=12|RC=2|IL=1|PG=4|CS=50|RS=42
-```
-
-建议 v2 兼容扩展：
+`@CFG` 增加短字段，保持 OCR 友好：
 
 ```text
 @CFG|AT1|CC=32|LP=12|RC=2|IL=1|PG=4|CS=50|RS=42|PF=O1|PM=modular-sum
 ```
 
-映射建议：
+短码映射：
 
 ```text
 PF=S1 -> safe-base32-v1
@@ -558,245 +812,373 @@ PM=xor
 PM=modular-sum
 ```
 
-不要直接写超长 profile 名，避免 OCR 误识别。
-
-#### 修改点 2：更新 parser
-
-文件：`enc2sop/transport/protocol.py`
-
-更新：
+涉及文件：
 
 ```text
-parse_cfg_line()
+enc2sop/transport/protocol.py
+enc2sop/transport/ocr_embedded.py
+qrcode_helper.py（只做桥接/调用层必要修改）
+tests/test_qrcode_helper_sidecar.py
 ```
 
-让它接受可选字段：
+具体要求：
 
-```text
-PF
-PM
-```
+1. `parse_cfg_line()` 接受可选 `PF`、`PM`，旧格式继续兼容。
+2. `build_inferred_manifest_from_metadata()` 读取 `PF` 并设置 `manifest["payload_alphabet_profile"]`。
+3. encoded length 不能固定用 `safe_base32_encoded_length()`，必须按 profile 计算。
+4. sidecar decode 必须传入正确 `payload_alphabet_profile`。
+5. OCR whitelist 加入新短字段所需字符，但优先使用短码，避免长 profile 名称造成识别风险。
+6. `@META` 可新增 `LINES`/`DATA` 字段澄清语义，但旧 `CHUNKS`/`TOTAL` 仍要兼容。
 
-并保证旧格式仍然兼容。
+### 9.3 测试
 
-#### 修改点 3：更新 embedded manifest 推断
-
-文件：`enc2sop/transport/ocr_embedded.py`
-
-更新：
-
-```text
-build_inferred_manifest_from_metadata()
-```
-
-必须：
-
-1. 读取 `PF`。
-2. 设置 `manifest["payload_alphabet_profile"]`。
-3. 使用 `encoded_length_for_profile(compressed_size, profile)` 计算长度，而不是固定 `safe_base32_encoded_length()`。
-4. 读取 `PM` 或根据 profile 推断 parity symbol mode。
-5. 传给 `_decode_manifest_guided_sidecar_payload(... payload_alphabet_profile=profile)`。
-
-#### 修改点 4：更新 embedded OCR whitelist
-
-文件：`enc2sop/transport/ocr_embedded.py`
-
-当前 `meta_whitelist` 不一定覆盖新字段。要加入：
-
-```text
-PFMOSXabcdefghijklmnopqrstuvwxyz- 等必要字符
-```
-
-更推荐只用短码 `PF=O1/S1`，减少 whitelist 复杂度。
-
-#### 修改点 5：修正字段语义
-
-`@META` 当前类似：
-
-```text
-@META|AT1|ID=...|PAGE=1/1|CHUNKS=8|TOTAL=3
-```
-
-这里 `CHUNKS=8` 是本页 data lines，不是 total chunks；`TOTAL=3` 是 data chunks。语义容易误导。
-
-建议新增 v2 字段，不破坏旧字段：
-
-```text
-@META|AT1|ID=...|PAGE=1/1|LINES=8|DATA=3
-```
-
-旧 parser 继续支持 `CHUNKS/TOTAL`。
-
-#### 验收测试
-
-新增测试：
+新增或修复：
 
 ```text
 tests/test_qrcode_helper_sidecar.py::test_manifestless_ocr_safe_sidecar_with_parity_roundtrip
 ```
 
-测试内容：
+验收：
 
-1. export 使用 `ocr-safe-human-correctable-v1`。
-2. `redundancy_copies=2`。
-3. `parity_group_size=4`。
-4. recover-images 不传 manifest。
-5. 输出文件 SHA256 等于原文件。
-
----
-
-### P0-S4：真实手机照片预处理进入简单主链路
-
-如果采用 QR 模式，这一步大部分由 QR detector 解决。若继续 sidecar/OCR 模式，则必须把图像预处理产品化。
-
-#### 最小实现
-
-新增命令参数：
-
-```bash
-python soenc.py cm scan --image-input photos --out-string recovered.sox1 --preprocess auto
-```
-
-或：
-
-```bash
-python qrcode_helper.py recover-images ... --preprocess-photo auto
-```
-
-处理流程：
-
-```text
-读取图片
-  -> EXIF 自动旋转
-  -> 灰度化
-  -> 页面轮廓检测
-  -> 四点透视矫正
-  -> 去阴影/自适应阈值
-  -> 多尺度 decode
-  -> 失败记录 retake reason
-```
-
-#### 输出质量报告
-
-每次 scan/recover-images 都应写：
-
-```text
-scan_report.json
-```
-
-字段：
-
-```json
-{
-  "image_count": 10,
-  "decoded_chunks": 9,
-  "missing_chunks": [4],
-  "bad_images": [
-    {
-      "path": "IMG_004.jpg",
-      "reason": "qr_not_found_or_crc_failed",
-      "suggestion": "retake page 5 closer, avoid glare"
-    }
-  ]
-}
-```
+- 使用 `ocr-safe-human-correctable-v1`。
+- `redundancy_copies=2`。
+- `parity_group_size=4`。
+- `recover-images` 不传 manifest。
+- 恢复文件 SHA256 等于原始文件。
 
 ---
 
-### P0-S5：端到端命令封装
+## 10. P0-S5：端到端 smoke 与质量门禁
 
-最终用户不应该理解 export/recover/certify/capture-corpus。
+### 10.1 PowerShell smoke
 
-新增一组高层命令：
+新增：`scripts/crossmedia_smoke.ps1`
 
-```bash
-# 1. 密闭环境：加密并渲染
-python soenc.py cm send \
-  --input ./secret.bin \
-  --key-file ./key.bin \
-  --output-dir ./send_pages \
+核心流程：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$root = Resolve-Path -LiteralPath '.'
+$work = Join-Path $root '.tmp_crossmedia_smoke'
+if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+New-Item -ItemType Directory -Path $work | Out-Null
+
+python soenc.py cm keygen --key-file "$work/key.bin"
+Set-Content -LiteralPath "$work/plain.txt" -Value 'hello cross media encrypted transport' -Encoding UTF8
+
+python soenc.py cm send `
+  --input "$work/plain.txt" `
+  --key-file "$work/key.bin" `
+  --output-dir "$work/send" `
   --mode qr
 
-# 2. 外界环境：扫描并解密
-python soenc.py cm receive \
-  --image-input ./phone_photos \
-  --key-file ./key.bin \
-  --output ./restored.bin \
-  --work-dir ./receive_work
+python scripts/simulate_capture_distortions.py `
+  --input "$work/send/pages" `
+  --output "$work/photos" `
+  --jpeg-quality 85 `
+  --rotate-deg 1.0
+
+python soenc.py cm receive `
+  --image-input "$work/photos" `
+  --key-file "$work/key.bin" `
+  --output "$work/restored.txt" `
+  --work-dir "$work/receive"
+
+python -c "from pathlib import Path; import hashlib; a=Path(r'$work/plain.txt').read_bytes(); b=Path(r'$work/restored.txt').read_bytes(); assert hashlib.sha256(a).digest()==hashlib.sha256(b).digest()"
+Write-Host 'CROSSMEDIA_SMOKE_OK'
 ```
 
-`send` 内部等价于：
+### 10.2 模拟拍摄脚本
+
+新增：`scripts/simulate_capture_distortions.py`
+
+P0 支持：
 
 ```text
-encrypt -> render
+--jpeg-quality 85
+--rotate-deg 1.0
+--scale 0.75
+--blur-radius 0.5
 ```
 
-`receive` 内部等价于：
+输出一组 JPEG/PNG 到 photos 目录，用于 scan 测试。
 
-```text
-scan -> decrypt
+### 10.3 必跑测试
+
+施工完成后至少运行：
+
+```bash
+python -m pytest tests/test_crossmedia_crypto_envelope.py
+python -m pytest tests/test_crossmedia_qr_transport.py
+python -m pytest tests/test_crossmedia_cli.py
+python -m pytest tests/test_crossmedia_e2e.py
+python -m pytest tests/test_qrcode_helper_sidecar.py -k manifestless_ocr_safe_sidecar_with_parity_roundtrip
 ```
 
-#### send 输出
+若时间允许，再跑：
 
-```text
-send_pages/
-  manifest.json               # 仅供辅助，不是恢复必需
-  payload.sox1                # 可选调试输出；生产可选择不落盘
-  pages/page_0001.png
-  pages/page_0002.png
-  instructions.md
+```bash
+python -m pytest tests/test_soenc_cli.py tests/test_transport_modules.py tests/test_qrcode_helper_sidecar.py
 ```
 
-#### receive 输出
+### 10.4 最终准入
+
+最终 PR/变更必须证明：
 
 ```text
-receive_work/
-  scan_report.json
-  recovered.sox1
-  decrypt_report.json
-restored.bin
+CROSSMEDIA_SMOKE_OK
+wrong key fails
+tampered SOX1 fails
+missing page reports retake_pages
+scan mixed artifact does not silently merge
 ```
 
 ---
 
-## 6. P1 施工任务
+## 11. 安全边界与威胁模型
 
-P0 只需要解决“能用、闭环、清晰失败”。P1 再做增强。
+### 11.1 保护对象
 
-### P1-S1：公钥加密模式
+保护的是密闭环境内的原始数据 bytes。攻击者可以获得：
 
-新增：
+- 所有图片。
+- 所有 SOX1 字符串。
+- 所有 manifest/report/instructions。
+- 源码。
+- QR 分片顺序与分片内容。
+
+攻击者不应获得：
+
+- `key.bin`。
+- passphrase。
+- private key（P1 公钥模式时）。
+
+### 11.2 安全保证
+
+P0 使用对称密钥时保证：
+
+- 无 key 无法解密明文。
+- 篡改密文或 AAD 导致 GCM tag 校验失败。
+- 篡改 QR chunk 导致 CRC 或完整 SOX1 hash 失败。
+- 即使 CRC 被伪造，最终 GCM tag 仍会失败。
+
+### 11.3 不保证
+
+P0 不保证：
+
+- 密钥在操作系统上的安全存储。
+- 手机相册/云同步不泄露图片。
+- 抗主动钓鱼替换 key。
+- 抗量子安全。
+- 大文件高效传输。
+
+### 11.4 禁止事项
+
+后续 GPT-5.5 不得为了“跑通 demo”做以下事情：
+
+```text
+- 把 key 写入 SOX1 JSON。
+- 把 key shards 写入 QR/manifest。
+- 默认启用 local-embedded。
+- 解密失败时 fallback 到明文输出。
+- 捕获异常后仍输出 success=true。
+- 扫描多个 artifact 时静默拼接。
+- 修改测试让失败路径变成 skip。
+```
+
+---
+
+## 12. 施工顺序与每步交付物
+
+### Step 1：入口解耦
+
+交付物：
+
+```text
+enc2sop/cli.py lazy import 完成
+enc2sop/crossmedia/cli.py 最小 help 可用
+python soenc.py cm --help 通过
+```
+
+完成定义：
+
+```text
+transport/cm help 不依赖 Crypto/qrcode/pyzbar/promotion
+旧 protect/build/release 命令 parser 不被破坏
+```
+
+### Step 2：SOX1 信封
+
+交付物：
+
+```text
+crypto_envelope.py
+key_material.py
+cm keygen/encrypt/decrypt
+tests/test_crossmedia_crypto_envelope.py
+```
+
+完成定义：
+
+```text
+roundtrip 成功
+wrong key 失败
+tamper 失败
+信封不含 key
+```
+
+### Step 3：QR transport
+
+交付物：
+
+```text
+qr_transport.py
+image_scan.py
+cm render/scan
+tests/test_crossmedia_qr_transport.py
+```
+
+完成定义：
+
+```text
+PNG 原图 scan 成功
+JPEG 模拟图 scan 成功
+缺页输出 retake plan
+混入其他 artifact 不静默拼接
+```
+
+### Step 4：send/receive
+
+交付物：
+
+```text
+cm send/receive
+send_report.json
+scan_report.json
+decrypt_report.json
+tests/test_crossmedia_e2e.py
+```
+
+完成定义：
+
+```text
+一条 send + 一条 receive 恢复原文件
+sha256 完全一致
+失败路径有 JSON report
+```
+
+### Step 5：旧 sidecar bug 修复
+
+交付物：
+
+```text
+@CFG PF/PM 支持
+manifest-less inference 支持 payload profile
+test_manifestless_ocr_safe_sidecar_with_parity_roundtrip
+```
+
+完成定义：
+
+```text
+旧 OCR-safe + parity + no manifest 场景可恢复或给出清晰不可用原因
+文档不再声称未实现能力已可用
+```
+
+### Step 6：smoke 与文档同步
+
+交付物：
+
+```text
+scripts/crossmedia_smoke.ps1
+scripts/simulate_capture_distortions.py
+README 或 docs/current 补充最终用户命令
+```
+
+完成定义：
+
+```text
+CROSSMEDIA_SMOKE_OK
+测试命令记录在最终回复/变更说明中
+```
+
+---
+
+## 13. 推荐实现细节
+
+### 13.1 base64url helper
+
+统一实现，不要散落：
+
+```python
+def b64u_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64u_decode(text: str) -> bytes:
+    raw = str(text).encode("ascii")
+    raw += b"=" * ((4 - len(raw) % 4) % 4)
+    return base64.urlsafe_b64decode(raw)
+```
+
+### 13.2 atomic write
+
+输出重要文件使用临时文件 + replace，避免中途失败留下半文件：
+
+```python
+tmp = output.with_suffix(output.suffix + ".tmp")
+tmp.write_bytes(data)
+tmp.replace(output)
+```
+
+### 13.3 路径安全
+
+- 不要递归扫描用户目录。
+- `--image-input` 只处理显式目录下的图片。
+- 支持后缀：`.png .jpg .jpeg .bmp .webp .tif .tiff`。
+- report 中路径使用相对 `image-input` 的路径，避免泄露无关本机目录。
+
+### 13.4 大小限制
+
+P0 默认限制：
+
+```text
+明文 <= 256 KiB
+SOX1 字符串 <= 2 MiB
+QR chunks <= 500
+```
+
+超过限制时失败并提示 P1 大文件分卷尚未实现。不要让程序生成上千张图导致不可操作。
+
+---
+
+## 14. P1 路线图（P0 完成后再做）
+
+### P1-S1：公钥模式
 
 ```bash
-python soenc.py cm keygen --public public.pem --private private.pem
+python soenc.py cm keygen-public --public public.pem --private private.pem
 python soenc.py cm encrypt --input secret.bin --recipient-public-key public.pem --out-string secret.sox1
 python soenc.py cm decrypt --input-string secret.sox1 --private-key private.pem --output restored.bin
 ```
 
-建议用混合加密：
+推荐混合加密：
 
 ```text
 X25519/RSA-OAEP 包装 data key + AES-256-GCM 加密数据
 ```
 
-P0 不强制做，避免拖慢。
-
 ### P1-S2：大文件分卷
 
-当前 transport 默认 compressed limit 是 64 KiB。对“任何数据”来说，这只是小文件能力。
-
-P1 做：
-
 ```text
-large file -> volume_0001.sox1, volume_0002.sox1, ...
+large.bin
+  -> volume_0001.sox1
+  -> volume_0002.sox1
+  -> ...
 ```
 
-每卷独立加密或共享 envelope group metadata，最后重组校验整体 SHA256。
+每卷独立认证，最终 group manifest 校验整文件 SHA256。
 
 ### P1-S3：一页多 QR 与重复布局
-
-优化打印/拍摄效率：
 
 ```text
 每页 4/6/8 个 QR
@@ -804,215 +1186,60 @@ large file -> volume_0001.sox1, volume_0002.sox1, ...
 页脚显示 retake 编号
 ```
 
-### P1-S4：保留现有 certification，但降级为实验/证据工具
+### P1-S4：真实手机拍摄增强
 
-现有 `certify / archive-evidence / capture-corpus` 可以保留，但不要放在普通主流程里。
+- 自动四点透视矫正。
+- 反光/模糊质量评分。
+- 拍摄指引图。
+- 基于真实 capture corpus 的鲁棒性报告。
 
-普通主流程：
+### P1-S5：证据链工具降级为实验模式
+
+保留 `certify/archive/status`，但它们不进入普通用户主链路。主链路永远是：
 
 ```text
 send / receive
 ```
 
-证据链流程：
+---
+
+## 15. 最终验收清单
+
+后续 GPT-5.5 完成施工后，必须在最终回复中给出以下证据块：
 
 ```text
-certify / archive / status
+变更文件：
+- enc2sop/cli.py
+- enc2sop/crossmedia/...
+- tests/test_crossmedia_...
+- scripts/crossmedia_smoke.ps1
+
+执行命令：
+- python soenc.py cm --help
+- python -m pytest tests/test_crossmedia_crypto_envelope.py
+- python -m pytest tests/test_crossmedia_qr_transport.py
+- python -m pytest tests/test_crossmedia_e2e.py
+- powershell -ExecutionPolicy Bypass -File scripts/crossmedia_smoke.ps1
+
+关键结果：
+- roundtrip sha256 matched
+- wrong key failed
+- tamper failed
+- missing page retake_pages reported
+- CROSSMEDIA_SMOKE_OK
 ```
 
-二者不要混在一起。
+如果任何一项失败，不得宣称施工完成。
 
 ---
 
-## 7. 后续 GPT5.5 的施工顺序
+## 16. 一句话结论
 
-请严格按以下顺序做，不要扩围。
-
-### 第 1 步：入口解耦
-
-目标：`python soenc.py transport --help` 与 `python soenc.py cm --help` 可启动。
-
-允许改动：
+当前项目的正确收敛方向不是继续堆发布治理和证据链，而是先把产品主链路做成两个稳定层：
 
 ```text
-enc2sop/cli.py
-enc2sop/crossmedia/* 新增
-soenc.py 如有必要可轻微改
-requirements-crossmedia.txt 新增
+Crypto Envelope：bytes <-> SOX1
+Visual Transport：SOX1 <-> QR photos <-> SOX1
 ```
 
-禁止改动：
-
-```text
-promotion_*
-release_*
-docs/PLATFORM_LAUNCH_*
-GitHub evidence 相关逻辑
-```
-
-### 第 2 步：实现 SOX1 加密信封
-
-目标：文件 bytes 与 SOX1 字符串双向转换。
-
-新增测试：
-
-```text
-tests/test_crossmedia_crypto_envelope.py
-```
-
-最小测试：
-
-```text
-test_encrypt_decrypt_roundtrip_key_file
-test_decrypt_fails_with_wrong_key
-test_decrypt_fails_after_tamper
-test_envelope_does_not_embed_key_material
-test_binary_file_roundtrip
-```
-
-### 第 3 步：实现 QR render/scan
-
-目标：SOX1 字符串与 QR 图片双向转换。
-
-新增测试：
-
-```text
-tests/test_crossmedia_qr_transport.py
-```
-
-最小测试：
-
-```text
-test_render_scan_roundtrip_png
-test_scan_accepts_duplicate_images
-test_scan_reports_missing_chunks
-test_scan_rejects_crc_tamper
-test_scan_rejects_mixed_artifact_ids
-test_scan_jpeg_roundtrip
-test_scan_rotated_image_roundtrip
-```
-
-### 第 4 步：实现 send/receive
-
-目标：一个命令生成页面，一个命令从照片恢复文件。
-
-新增测试：
-
-```text
-tests/test_crossmedia_e2e.py
-```
-
-最小测试：
-
-```text
-test_send_receive_roundtrip_small_text
-test_send_receive_roundtrip_binary
-test_receive_wrong_key_fails
-test_receive_missing_page_outputs_retake_plan
-```
-
-### 第 5 步：修复现有 OCR/sidecar manifest-less bug
-
-目标：不要让已有 `qrcode_helper.py` 在 OCR-safe + parity + 无 manifest 场景下继续错解。
-
-新增测试：
-
-```text
-test_manifestless_ocr_safe_sidecar_with_parity_roundtrip
-```
-
-这一步可以在 QR 主链路之后做，但必须做，否则旧文档与实际行为会冲突。
-
----
-
-## 8. 关键验收脚本
-
-后续实现完成后，至少提供一个可复制的 smoke 脚本。
-
-建议新增：
-
-```text
-scripts/crossmedia_smoke.sh
-scripts/crossmedia_smoke.ps1
-```
-
-脚本内容：
-
-```bash
-set -euo pipefail
-WORK=.tmp_crossmedia_smoke
-rm -rf "$WORK"
-mkdir -p "$WORK"
-
-python soenc.py cm keygen --key-file "$WORK/key.bin"
-printf 'hello cross media encrypted transport' > "$WORK/plain.txt"
-
-python soenc.py cm send \
-  --input "$WORK/plain.txt" \
-  --key-file "$WORK/key.bin" \
-  --output-dir "$WORK/send" \
-  --mode qr
-
-# 模拟手机照片：把 PNG 转 JPEG，做轻微旋转/缩放
-python scripts/simulate_capture_distortions.py \
-  --input "$WORK/send/pages" \
-  --output "$WORK/photos" \
-  --jpeg-quality 85 \
-  --rotate-deg 1.0
-
-python soenc.py cm receive \
-  --image-input "$WORK/photos" \
-  --key-file "$WORK/key.bin" \
-  --output "$WORK/restored.txt" \
-  --work-dir "$WORK/receive"
-
-cmp "$WORK/plain.txt" "$WORK/restored.txt"
-echo CROSSMEDIA_SMOKE_OK
-```
-
----
-
-## 9. 当前代码中可以复用的实现点
-
-不要重写一切，以下可直接复用：
-
-1. `protocol.crc16_hex()`：分片 CRC。
-2. `protocol.utc_now_iso()`：时间戳。
-3. `protocol.sha256_hex()`：整体 hash。
-4. `qrcode_helper.AirgapTransportLayer.export_artifact()` 的压缩/分片/redundancy 思路。
-5. `parser` 里的 missing chunk / duplicate conflict 思路。
-6. `recover` 里的 analyze report / retake plan 思路。
-7. `scripts/real_capture_text_transport.py` 的 “prepare/certify” 概念，但要改成更简单的 `send/receive`。
-
-不要复用为 P0 主路径：
-
-1. promotion/release evidence。
-2. GitHub CI proof。
-3. capture corpus 全证据链。
-4. local-embedded key 作为真实加密方案。
-
----
-
-## 10. 最终结论
-
-当前项目不是完全卡死，核心编码/渲染/恢复能力已经存在；但它被三个问题拖住了：
-
-1. **产品主链路不清晰**：普通用户需要的是 `send/receive`，不是 `certify/archive/status`。
-2. **加密层和传输层耦合不正确**：现有加密偏 Python 代码保护，缺少通用数据信封；local-embedded 不适合真实保密传输。
-3. **手机照片鲁棒性没有产品化**：生成图可恢复，但真实拍照的旋转、透视、裁剪需要 QR 或自动纠偏进入主流程。
-
-后续 GPT5.5 应先实现：
-
-```text
-P0-S0 入口解耦
-P0-S1 SOX1 通用加密信封
-P0-S2 QR 分片视觉传输
-P0-S5 send/receive 高层命令
-P0-S3 修复旧 sidecar manifest-less 元数据 bug
-```
-
-做到这一步，项目才真正对齐用户最初目标：
-
-```text
-任意数据 -> 加密字符串 -> 图片 -> 手机拍摄 -> 字符串 -> 解密 -> 原始数据
-```
+做到 `send/receive` 两条命令端到端 SHA256 一致，并且错误时能告诉操作者重拍哪一页，才算真正完成“跨介质加密传输”的 P0 落地。
