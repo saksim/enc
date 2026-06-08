@@ -62,8 +62,8 @@ class CrossMediaCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mocked_main.assert_called_once_with(["render", "--input-string", "x", "--output-dir", "out"])
 
-    def test_crossmedia_subcommands_fail_explicitly_until_next_stage(self) -> None:
-        exit_code = crossmedia_cli.main(["render", "--input-string", "SOX1.demo", "--output-dir", "pages"])
+    def test_crossmedia_send_still_fails_explicitly_until_next_stage(self) -> None:
+        exit_code = crossmedia_cli.main(["send", "--input", "plain.bin", "--output-dir", "pages"])
         self.assertEqual(exit_code, 40)
 
 

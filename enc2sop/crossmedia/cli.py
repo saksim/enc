@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -12,7 +13,9 @@ from typing import Optional
 from typing import Sequence
 
 from . import crypto_envelope
+from . import image_scan
 from . import key_material
+from . import qr_transport
 
 
 _NOT_IMPLEMENTED_BY_STAGE = {
@@ -113,6 +116,99 @@ def _run_decrypt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_render(args: argparse.Namespace) -> int:
+    if args.mode != "qr":
+        raise qr_transport.QrTransportError("P0-S2 only supports --mode qr")
+    sox1 = crypto_envelope.read_sox1_string(
+        args.input_string,
+        input_string_file=Path(args.input_string_file) if args.input_string_file else None,
+    )
+    output_dir = Path(args.output_dir)
+    manifest = qr_transport.render_qr_pages(sox1, output_dir, chunk_chars=int(args.chunk_chars))
+    print("output_dir={0}".format(output_dir))
+    print("pages_dir={0}".format(output_dir / "pages"))
+    print("artifact_id={0}".format(manifest.get("artifact_id")))
+    print("chunks_total={0}".format(manifest.get("chunks_total")))
+    return 0
+
+
+def _scan_report_path(args: argparse.Namespace) -> Path:
+    if getattr(args, "work_dir", None):
+        work_dir = Path(args.work_dir)
+    else:
+        work_dir = Path(args.out_string).parent
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir / "scan_report.json"
+
+
+def _parse_reassembly_report(exc: qr_transport.QrReassemblyError) -> dict:
+    try:
+        payload = json.loads(str(exc))
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.setdefault("schema", qr_transport.SCAN_REPORT_SCHEMA)
+    payload.setdefault("success", False)
+    payload.setdefault("reason", "qr_reassembly_failed")
+    payload.setdefault("detail", str(exc))
+    return payload
+
+
+def _scan_exit_code(report: dict) -> int:
+    reason = str(report.get("reason") or "")
+    if reason == "multiple_complete_artifacts":
+        return 22
+    if reason in {
+        "conflicting_duplicate_chunks",
+        "qr_payload_parse_or_crc_failed",
+        "string_sha256_mismatch",
+    }:
+        return 21
+    return 20
+
+
+def _run_scan(args: argparse.Namespace) -> int:
+    image_input = Path(args.image_input)
+    out_string = Path(args.out_string)
+    payloads, scan_meta = image_scan.scan_image_input(image_input)
+    bad_images = scan_meta.get("bad_images") if isinstance(scan_meta.get("bad_images"), list) else []
+    report_path = _scan_report_path(args)
+    try:
+        sox1, report = qr_transport.reassemble_chunks(
+            payloads,
+            artifact_id=getattr(args, "artifact_id", None),
+            image_count=int(scan_meta.get("image_count") or 0),
+            bad_images=bad_images,
+            out_string=out_string,
+        )
+    except qr_transport.QrReassemblyError as exc:
+        report = _parse_reassembly_report(exc)
+        report["scan_report"] = str(report_path)
+        qr_transport.write_json_atomic(report_path, report)
+        print(
+            "cross-media scan error: {0}; retake_pages={1}; scan_report={2}".format(
+                report.get("reason"),
+                report.get("retake_pages", []),
+                report_path,
+            ),
+            file=sys.stderr,
+        )
+        return _scan_exit_code(report)
+
+    crypto_envelope.write_text_atomic(out_string, sox1 + "\n")
+    report["image_count"] = int(scan_meta.get("image_count") or 0)
+    report["bad_images"] = bad_images
+    report["scan_report"] = str(report_path)
+    qr_transport.write_json_atomic(report_path, report)
+    print("out_string={0}".format(out_string))
+    print("scan_report={0}".format(report_path))
+    print("artifact_id={0}".format(report.get("artifact_id")))
+    print("chunks_total={0}".format(report.get("chunks_total")))
+    print("duplicates={0}".format(report.get("duplicates")))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="soenc cm",
@@ -149,14 +245,14 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--output-dir", required=True, help="Output directory for pages.")
     render_parser.add_argument("--mode", choices=["qr"], default="qr", help="Visual transport mode.")
     render_parser.add_argument("--chunk-chars", type=int, default=700, help="SOX1 chars per QR chunk.")
-    render_parser.set_defaults(handler=_run_not_implemented)
+    render_parser.set_defaults(handler=_run_render)
 
     scan_parser = subparsers.add_parser("scan", help="Scan QR photos back into a SOX1 string (P0-S2).")
     scan_parser.add_argument("--image-input", required=True, help="Directory containing captured images.")
     scan_parser.add_argument("--out-string", required=True, help="Output recovered SOX1 string file.")
     scan_parser.add_argument("--work-dir", help="Directory for scan_report.json and intermediates.")
     scan_parser.add_argument("--artifact-id", help="Require a specific artifact id when multiple batches are present.")
-    scan_parser.set_defaults(handler=_run_not_implemented)
+    scan_parser.set_defaults(handler=_run_scan)
 
     send_parser = subparsers.add_parser("send", help="Encrypt and render pages in one command (P0-S3).")
     send_parser.add_argument("--input", required=True, help="Input plaintext file.")
@@ -196,12 +292,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except crypto_envelope.Sox1EnvelopeError as exc:
         print("cross-media envelope error: {0}".format(exc), file=sys.stderr)
         return 11
+    except image_scan.ImageScanError as exc:
+        print("cross-media scan input error: {0}".format(exc), file=sys.stderr)
+        return 30
+    except qr_transport.QrTransportError as exc:
+        print("cross-media QR transport error: {0}".format(exc), file=sys.stderr)
+        return 21
     except CrossMediaNotImplemented as exc:
         print("cross-media command not implemented: {0}".format(exc), file=sys.stderr)
         return 40
     except OSError as exc:
         print("cross-media file error: {0}".format(exc), file=sys.stderr)
         return 30
+    except RuntimeError as exc:
+        message = str(exc)
+        if "OpenCV" in message or "Pillow" in message or "cryptography" in message:
+            print("cross-media optional dependency error: {0}".format(exc), file=sys.stderr)
+            return 40
+        raise
 
 
 __all__ = ["CrossMediaNotImplemented", "build_parser", "main"]
