@@ -21,11 +21,27 @@ from . import qr_transport
 SEND_REPORT_SCHEMA = "enc2sop-cross-media-send-report/v1"
 DECRYPT_REPORT_SCHEMA = "enc2sop-cross-media-decrypt-report/v1"
 
-def _resolve_encrypt_key(args: argparse.Namespace) -> tuple[bytes, str, Optional[dict]]:
-    if bool(getattr(args, "key_file", None)) == bool(getattr(args, "passphrase", False)):
-        raise ValueError("use exactly one of --key-file or --passphrase")
+
+def _count_selected_key_modes(args: argparse.Namespace, names: Sequence[str]) -> int:
+    return sum(1 for name in names if bool(getattr(args, name, None)))
+
+
+def _resolve_encrypt_key(args: argparse.Namespace) -> tuple[bytes, str, Optional[dict], Optional[dict]]:
+    selected = _count_selected_key_modes(args, ("key_file", "passphrase", "recipient_public_key"))
+    if selected != 1:
+        raise ValueError("use exactly one of --key-file, --passphrase, or --recipient-public-key")
     if getattr(args, "key_file", None):
-        return key_material.load_key_file(Path(args.key_file)), "key-file", None
+        return key_material.load_key_file(Path(args.key_file)), "key-file", None, None
+    if getattr(args, "recipient_public_key", None):
+        public_key = key_material.load_public_key(Path(args.recipient_public_key))
+        data_key = os.urandom(key_material.KEY_LEN)
+        wrapped = key_material.wrap_data_key_rsa_oaep_sha256(public_key, data_key)
+        key_wrap = {
+            "algorithm": key_material.PUBLIC_KEY_WRAP_ALGORITHM,
+            "encrypted_key_b64u": crypto_envelope.b64u_encode(wrapped),
+            "recipient_public_key_sha256": key_material.public_key_sha256_hex(public_key),
+        }
+        return data_key, key_material.PUBLIC_KEY_MODE, None, key_wrap
     salt = os.urandom(key_material.SCRYPT_SALT_BYTES)
     passphrase = key_material.passphrase_from_env()
     salt_b64u = crypto_envelope.b64u_encode(salt)
@@ -38,17 +54,32 @@ def _resolve_encrypt_key(args: argparse.Namespace) -> tuple[bytes, str, Optional
         p=int(kdf["p"]),
         key_len=int(kdf["key_len"]),
     )
-    return key, "passphrase-scrypt", kdf
+    return key, "passphrase-scrypt", kdf, None
 
 
 def _resolve_decrypt_key(args: argparse.Namespace, envelope: dict) -> bytes:
-    if bool(getattr(args, "key_file", None)) == bool(getattr(args, "passphrase", False)):
-        raise ValueError("use exactly one of --key-file or --passphrase")
+    selected = _count_selected_key_modes(args, ("key_file", "passphrase", "private_key"))
+    if selected != 1:
+        raise ValueError("use exactly one of --key-file, --passphrase, or --private-key")
     if getattr(args, "key_file", None):
         return key_material.load_key_file(Path(args.key_file))
     crypto = envelope.get("crypto")
     if not isinstance(crypto, dict):
         raise crypto_envelope.Sox1EnvelopeError("SOX1 envelope missing crypto metadata")
+    if getattr(args, "private_key", None):
+        if crypto.get("key_mode") != key_material.PUBLIC_KEY_MODE:
+            raise crypto_envelope.Sox1EnvelopeError("SOX1 envelope is not encrypted for public-key mode")
+        key_wrap = crypto.get("key_wrap")
+        if not isinstance(key_wrap, dict):
+            raise crypto_envelope.Sox1EnvelopeError("SOX1 envelope missing public-key key_wrap metadata")
+        if key_wrap.get("algorithm") != key_material.PUBLIC_KEY_WRAP_ALGORITHM:
+            raise crypto_envelope.Sox1EnvelopeError("unsupported public-key wrap algorithm")
+        wrapped = crypto_envelope.b64u_decode(str(key_wrap.get("encrypted_key_b64u") or ""))
+        private_key = key_material.load_private_key(Path(args.private_key))
+        try:
+            return key_material.unwrap_data_key_rsa_oaep_sha256(private_key, wrapped)
+        except key_material.KeyUnwrapError as exc:
+            raise crypto_envelope.Sox1DecryptError("SOX1 data key unwrap failed") from exc
     kdf = crypto.get("kdf")
     if not isinstance(kdf, dict) or kdf.get("name") != key_material.SCRYPT_NAME:
         raise crypto_envelope.Sox1EnvelopeError("SOX1 envelope does not contain passphrase scrypt metadata")
@@ -70,16 +101,31 @@ def _run_keygen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_keygen_public(args: argparse.Namespace) -> int:
+    public_path, private_path = key_material.generate_public_key_pair(
+        public_path=Path(args.public),
+        private_path=Path(args.private),
+        overwrite=bool(args.overwrite),
+    )
+    public_key = key_material.load_public_key(public_path)
+    print("public_key={0}".format(public_path))
+    print("private_key={0}".format(private_path))
+    print("algorithm={0}".format(key_material.PUBLIC_KEY_WRAP_ALGORITHM))
+    print("recipient_public_key_sha256={0}".format(key_material.public_key_sha256_hex(public_key)))
+    return 0
+
+
 def _run_encrypt(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     plaintext = input_path.read_bytes()
-    key, key_mode, kdf = _resolve_encrypt_key(args)
+    key, key_mode, kdf, key_wrap = _resolve_encrypt_key(args)
     sox1 = crypto_envelope.encrypt_bytes_to_sox1(
         plaintext,
         key=key,
         name=input_path.name,
         key_mode=key_mode,
         kdf=kdf,
+        key_wrap=key_wrap,
     )
     out_path = crypto_envelope.write_text_atomic(Path(args.out_string), sox1 + "\n")
     print("out_string={0}".format(out_path))
@@ -223,7 +269,7 @@ def _run_scan(args: argparse.Namespace) -> int:
 def _run_send(args: argparse.Namespace) -> int:
     if args.mode != "qr":
         raise qr_transport.QrTransportError("P0-S3 send only supports --mode qr")
-    key, key_mode, kdf = _resolve_encrypt_key(args)
+    key, key_mode, kdf, key_wrap = _resolve_encrypt_key(args)
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
     plaintext = input_path.read_bytes()
@@ -234,6 +280,7 @@ def _run_send(args: argparse.Namespace) -> int:
         name=input_path.name,
         key_mode=key_mode,
         kdf=kdf,
+        key_wrap=key_wrap,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     payload_path: Optional[Path] = None
@@ -314,7 +361,7 @@ def _preflight_receive_key(args: argparse.Namespace) -> None:
 
 
 def _run_receive(args: argparse.Namespace) -> int:
-    if bool(getattr(args, "key_file", None)) == bool(getattr(args, "passphrase", False)):
+    if _count_selected_key_modes(args, ("key_file", "passphrase")) != 1:
         raise ValueError("use exactly one of --key-file or --passphrase")
     work_dir = Path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -413,10 +460,17 @@ def build_parser() -> argparse.ArgumentParser:
     keygen_parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing key file.")
     keygen_parser.set_defaults(handler=_run_keygen)
 
+    keygen_public_parser = subparsers.add_parser("keygen-public", help="Generate an RSA-OAEP public/private key pair (P1-S1).")
+    keygen_public_parser.add_argument("--public", required=True, help="Output public PEM path.")
+    keygen_public_parser.add_argument("--private", required=True, help="Output private PEM path.")
+    keygen_public_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing PEM files.")
+    keygen_public_parser.set_defaults(handler=_run_keygen_public)
+
     encrypt_parser = subparsers.add_parser("encrypt", help="Encrypt bytes into a SOX1 string (P0-S1).")
     encrypt_parser.add_argument("--input", required=True, help="Input plaintext file.")
     encrypt_parser.add_argument("--key-file", help="32-byte key file.")
     encrypt_parser.add_argument("--passphrase", action="store_true", help="Read passphrase without putting it in shell history.")
+    encrypt_parser.add_argument("--recipient-public-key", help="Recipient public PEM for P1 hybrid public-key encryption.")
     encrypt_parser.add_argument("--out-string", required=True, help="Output SOX1 string file.")
     encrypt_parser.set_defaults(handler=_run_encrypt)
 
@@ -425,6 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     decrypt_parser.add_argument("--input-string-file", help="SOX1 string file path.")
     decrypt_parser.add_argument("--key-file", help="32-byte key file.")
     decrypt_parser.add_argument("--passphrase", action="store_true", help="Read passphrase without putting it in shell history.")
+    decrypt_parser.add_argument("--private-key", help="Private PEM for P1 hybrid public-key decryption.")
     decrypt_parser.add_argument("--output", required=True, help="Output plaintext file.")
     decrypt_parser.set_defaults(handler=_run_decrypt)
 

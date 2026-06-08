@@ -29,6 +29,7 @@ class CrossMediaCliTests(unittest.TestCase):
         help_text = parser.format_help()
 
         self.assertIn("keygen", help_text)
+        self.assertIn("keygen-public", help_text)
         self.assertIn("encrypt", help_text)
         self.assertIn("decrypt", help_text)
         self.assertIn("render", help_text)

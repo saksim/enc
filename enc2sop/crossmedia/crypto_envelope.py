@@ -78,8 +78,9 @@ def _build_aad_payload(
     crypto_algorithm: str,
     key_mode: str,
     kdf: Optional[Dict[str, object]],
+    key_wrap: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
-    return {
+    payload = {
         "schema": ENVELOPE_SCHEMA,
         "version": ENVELOPE_VERSION,
         "created_at_utc": created_at_utc,
@@ -93,6 +94,9 @@ def _build_aad_payload(
         "original_size": int(original_size),
         "plaintext_sha256": plaintext_sha256,
     }
+    if key_wrap is not None:
+        payload["key_wrap"] = key_wrap
+    return payload
 
 
 def encrypt_bytes_to_sox1(
@@ -104,6 +108,7 @@ def encrypt_bytes_to_sox1(
     compress: bool = True,
     key_mode: str = "key-file",
     kdf: Optional[Dict[str, object]] = None,
+    key_wrap: Optional[Dict[str, object]] = None,
     max_plaintext_bytes: int = DEFAULT_MAX_PLAINTEXT_BYTES,
 ) -> str:
     key_bytes = _require_key(key)
@@ -126,12 +131,24 @@ def encrypt_bytes_to_sox1(
         crypto_algorithm=AES_GCM_ALGORITHM,
         key_mode=key_mode,
         kdf=kdf,
+        key_wrap=key_wrap,
     )
     aad = canonical_json_bytes(aad_payload)
     nonce = os.urandom(12)
     aesgcm = _load_aesgcm_class()(key_bytes)
     encrypted = aesgcm.encrypt(nonce, payload_bytes, aad)
     ciphertext, tag = encrypted[:-16], encrypted[-16:]
+    crypto_payload = {
+        "algorithm": AES_GCM_ALGORITHM,
+        "key_mode": key_mode,
+        "kdf": kdf,
+        "nonce_b64u": b64u_encode(nonce),
+        "aad_b64u": b64u_encode(aad),
+        "ciphertext_b64u": b64u_encode(ciphertext),
+        "tag_b64u": b64u_encode(tag),
+    }
+    if key_wrap is not None:
+        crypto_payload["key_wrap"] = key_wrap
     envelope = {
         "schema": ENVELOPE_SCHEMA,
         "version": ENVELOPE_VERSION,
@@ -146,15 +163,7 @@ def encrypt_bytes_to_sox1(
             "enabled": bool(compress),
             "compressed_size": len(payload_bytes),
         },
-        "crypto": {
-            "algorithm": AES_GCM_ALGORITHM,
-            "key_mode": key_mode,
-            "kdf": kdf,
-            "nonce_b64u": b64u_encode(nonce),
-            "aad_b64u": b64u_encode(aad),
-            "ciphertext_b64u": b64u_encode(ciphertext),
-            "tag_b64u": b64u_encode(tag),
-        },
+        "crypto": crypto_payload,
     }
     return SOX1_PREFIX + b64u_encode(canonical_json_bytes(envelope))
 
@@ -219,6 +228,7 @@ def decrypt_sox1_to_bytes(sox1: str, *, key: bytes) -> Tuple[bytes, Dict[str, ob
         crypto_algorithm=str(crypto.get("algorithm") or ""),
         key_mode=str(crypto.get("key_mode") or ""),
         kdf=crypto.get("kdf") if isinstance(crypto.get("kdf"), dict) else None,
+        key_wrap=crypto.get("key_wrap") if isinstance(crypto.get("key_wrap"), dict) else None,
     )
     expected_aad = canonical_json_bytes(expected_aad_payload)
     if aad != expected_aad:
