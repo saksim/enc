@@ -9,17 +9,49 @@ from pathlib import Path
 from typing import Optional
 from typing import Sequence
 
-import encryption_helper
 from enc2sop import plugin_registry
-from enc2sop import promotion_artifacts
-from enc2sop import promotion_audit
-from enc2sop import promotion_bundle
-from enc2sop import promotion_evidence
 from soenc_config import SoencProjectConfig
 from soenc_config import load_project_config
 from toolchain_profile import DEFAULT_BUILD_PROFILE
 from toolchain_profile import SUPPORTED_BUILD_PROFILES
 from toolchain_profile import resolve_python_executable
+
+
+_LAZY_COMPAT_MODULES = {
+    "promotion_artifacts": "enc2sop.promotion_artifacts",
+    "promotion_audit": "enc2sop.promotion_audit",
+    "promotion_bundle": "enc2sop.promotion_bundle",
+    "promotion_evidence": "enc2sop.promotion_evidence",
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_COMPAT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    import importlib
+
+    module = importlib.import_module(module_name)
+    globals()[name] = module
+    return module
+
+
+def _load_encryption_helper():
+    import encryption_helper
+
+    return encryption_helper
+
+
+def _add_tristate_flag(parser, name: str, enable_help: str, disable_help: str) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--{0}".format(name), dest=name.replace("-", "_"), action="store_true", help=enable_help)
+    group.add_argument(
+        "--no-{0}".format(name),
+        dest=name.replace("-", "_"),
+        action="store_false",
+        help=disable_help,
+    )
+    parser.set_defaults(**{name.replace("-", "_"): None})
 
 
 def _option_present(argv: Sequence[str], option_name: str) -> bool:
@@ -40,6 +72,7 @@ def _project_default(project_config: Optional[SoencProjectConfig], field: str):
 
 
 def _resolve_staging_dir(args, project_config: Optional[SoencProjectConfig]) -> Path:
+    encryption_helper = _load_encryption_helper()
     staging_value = args.staging_dir or _project_default(project_config, "output_dir")
     if not staging_value:
         raise ValueError("--staging-dir is required (or configure [build].output_dir in soenc.toml)")
@@ -50,6 +83,7 @@ def _resolve_staging_dir(args, project_config: Optional[SoencProjectConfig]) -> 
 
 
 def _resolve_build_dir(args, staging_dir: Path) -> Path:
+    encryption_helper = _load_encryption_helper()
     build_value = args.build_dir if getattr(args, "build_dir", None) else str(staging_dir / "build")
     build_dir = encryption_helper.normalize_path(build_value)
     if not build_dir.exists():
@@ -58,6 +92,7 @@ def _resolve_build_dir(args, staging_dir: Path) -> Path:
 
 
 def _resolve_manifest_sign_key(args, project_config: Optional[SoencProjectConfig]):
+    encryption_helper = _load_encryption_helper()
     key_file_text = args.manifest_sign_key_file or _project_default(project_config, "manifest_sign_key_file")
     key_file = encryption_helper.normalize_path(key_file_text) if key_file_text else None
     key_b64 = args.manifest_sign_key_b64
@@ -79,6 +114,7 @@ def _resolve_require_release_approval(args, project_config: Optional[SoencProjec
 
 
 def _run_protect(args) -> int:
+    encryption_helper = _load_encryption_helper()
     forwarded = list(args.forwarded or [])
     if _option_present(forwarded, "--compile") or _option_present(forwarded, "--dist-dir"):
         raise ValueError("soenc protect only supports staging protection; use 'soenc build' and 'soenc package'")
@@ -93,6 +129,7 @@ def _run_protect(args) -> int:
 
 
 def _run_build(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
     build_profile = args.build_profile or _project_default(project_config, "build_profile") or DEFAULT_BUILD_PROFILE
@@ -123,6 +160,7 @@ def _run_build(args) -> int:
 
 
 def _run_package(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
     build_dir = _resolve_build_dir(args, staging_dir)
@@ -148,6 +186,7 @@ def _run_package(args) -> int:
 
 
 def _run_verify(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
     build_dir = _resolve_build_dir(args, staging_dir)
@@ -171,6 +210,7 @@ def _run_verify(args) -> int:
 
 
 def _run_release(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     dist_value = args.dist_dir or _project_default(project_config, "dist_dir")
     if not dist_value:
@@ -213,6 +253,7 @@ def _run_release(args) -> int:
 
 
 def _run_approve_release(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     dist_value = args.dist_dir or _project_default(project_config, "dist_dir")
     if not dist_value:
@@ -265,7 +306,18 @@ def _run_transport(args) -> int:
     return plugin_registry.invoke_plugin_command("transport", forwarded)
 
 
+def _run_cross_media(args) -> int:
+    from enc2sop.crossmedia import cli as crossmedia_cli
+
+    forwarded = list(args.forwarded or [])
+    if forwarded and forwarded[0] == "--":
+        forwarded = forwarded[1:]
+    return int(crossmedia_cli.main(forwarded))
+
+
 def _run_audit_promotion(args) -> int:
+    from enc2sop import promotion_audit
+
     report_path, report = promotion_audit.run_promotion_audit(
         evidence_file=args.evidence_file,
         policy_file=args.policy_file,
@@ -285,6 +337,9 @@ def _run_audit_promotion(args) -> int:
 
 
 def _run_collect_promotion_evidence(args) -> int:
+    from enc2sop import promotion_audit
+    from enc2sop import promotion_evidence
+
     token = args.github_token or os.environ.get("GITHUB_TOKEN")
     if not token:
         raise ValueError(
@@ -313,6 +368,10 @@ def _run_collect_promotion_evidence(args) -> int:
 
 
 def _run_promotion_dry_run(args) -> int:
+    encryption_helper = _load_encryption_helper()
+    from enc2sop import promotion_audit
+    from enc2sop import promotion_evidence
+
     evidence_file = args.evidence_file
     if args.skip_collect:
         if not evidence_file:
@@ -363,6 +422,8 @@ def _run_promotion_dry_run(args) -> int:
 
 
 def _run_verify_promotion_artifacts(args) -> int:
+    from enc2sop import promotion_artifacts
+
     report_path, report = promotion_artifacts.run_promotion_artifact_audit(
         dist_dir=args.dist_dir,
         promotion_evidence_file=args.promotion_evidence_file,
@@ -392,6 +453,8 @@ def _run_verify_promotion_artifacts(args) -> int:
 
 
 def _run_bundle_promotion_artifacts(args) -> int:
+    from enc2sop import promotion_bundle
+
     bundle_path, manifest = promotion_bundle.create_promotion_artifact_bundle(
         dist_dir=args.dist_dir,
         promotion_evidence_file=args.promotion_evidence_file,
@@ -449,7 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-sign-key-b64",
         help="Base64-encoded manifest signing key bytes. Alternative to --manifest-sign-key-file.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         build_parser,
         "require-manifest-signature",
         "Require a valid build_manifest.json signature during runtime delivery validation.",
@@ -465,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     package_parser.add_argument("--staging-dir", "-s", help="Staging directory containing build_manifest.json.")
     package_parser.add_argument("--build-dir", help="Compiled build directory. Defaults to <staging-dir>/build.")
     package_parser.add_argument("--dist-dir", "-d", help="Release output directory.")
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         package_parser,
         "require-manifest-signature",
         "Require build_manifest.json to be signed before release packaging.",
@@ -488,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-sign-key-b64",
         help="Base64-encoded manifest signing key bytes. Alternative to --manifest-sign-key-file.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         verify_parser,
         "require-manifest-signature",
         "Require a valid build_manifest.json signature before runtime validation succeeds.",
@@ -518,13 +581,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--release-approval-key-id",
         help="Expected key_id in release approval signature metadata.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         release_parser,
         "require-manifest-signature",
         "Require build_manifest.json to be signed before release receipt generation.",
         "Allow release receipt generation from unsigned manifest.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         release_parser,
         "require-release-approval",
         "Require signed release approval metadata before release receipt generation.",
@@ -580,6 +643,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to the transport plugin command surface.",
     )
     transport_parser.set_defaults(handler=_run_transport)
+
+    cross_media_parser = subparsers.add_parser(
+        "cm",
+        add_help=False,
+        help="Cross-media encrypted transport commands (SOX1 envelope, QR render/scan, send/receive).",
+    )
+    cross_media_parser.add_argument(
+        "forwarded",
+        nargs=argparse.REMAINDER,
+        help="Arguments forwarded to the cross-media command surface.",
+    )
+    cross_media_parser.set_defaults(handler=_run_cross_media)
 
     audit_promotion_parser = subparsers.add_parser(
         "audit-promotion",
@@ -811,6 +886,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if argv and argv[0] == "protect":
         protect_args = argparse.Namespace(forwarded=list(argv[1:]))
         return _run_protect(protect_args)
+    if argv and argv[0] == "cm":
+        cross_media_args = argparse.Namespace(forwarded=list(argv[1:]))
+        return _run_cross_media(cross_media_args)
     parser = build_parser()
     args = parser.parse_args(argv)
     handler = getattr(args, "handler", None)

@@ -94,6 +94,7 @@ htmlcov/
 *.xlsx
 *.xls
 *.txt
+!requirements-crossmedia.txt
 *.pdf
 *.tar
 *.rar

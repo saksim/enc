@@ -1,0 +1,5 @@
+﻿# Minimal runtime dependencies for the documented cross-media P0 path.
+# P0-S0 intentionally has no hard third-party import requirement for `soenc cm --help`.
+cryptography
+opencv-python
+Pillow
