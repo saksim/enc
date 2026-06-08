@@ -5849,8 +5849,631 @@ Rationale:
   - Verification:
     - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
     - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "report_source_path_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 108 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive_combined_evidence_cli_verifies_replayably or report_source_path_drift"` => `2 passed, 108 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `47 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "not ocr_safe_archive"` => `63 passed, 47 deselected, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "archive_transport_evidence or replay_transport_evidence_archive or certify_capture_evidence_pipeline"` => `19 passed, 70 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "distortion or generated_page or reliable_airgap or profile"` => `7 passed, 82 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "capture_corpus or capture_kit or attach_capture or validate_capture or provenance or physical or perspective or ocr_only"` => `44 passed, 45 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "certify_entrypoint or certification_status or claims"` => `6 passed, 83 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "return_package"` => `6 passed, 83 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ingest_capture"` => `5 passed, 84 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - `git diff --check` => clean except existing CRLF conversion warnings in docs/manual files.
+    - Full unsplit `tests\test_transport_modules.py` and `tests\test_transport_certify.py` exceeded the local wrapper timeout, so the split runs above provide clean exit-code coverage.
   - Certification boundary:
     - this proves OCR-safe report source-path provenance binding for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe report-role uniqueness gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so duplicate or unknown `manifest.reports[]` roles cannot preserve replayability by editing summary report counters to match a tampered report inventory.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_roles_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - malformed `manifest.reports` inventories now fail `archive_report_roles_verified=false` and `archive_report_metadata_verified=false`.
+    - duplicate report roles now fail closed with `duplicate_archive_report_role`.
+    - unknown report roles now fail closed with `unknown_report_role`.
+    - duplicate/unknown role failures now fail the report metadata gate even when `summary.report_count` and `summary.report_roles` are self-consistent with the tampered manifest.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `archive_report_roles_verified=true`.
+    - tamper test appends a duplicate `ocr_safe_confusion_report` entry and updates summary report/source-verification counters to match.
+    - the verifier still fails with `archive_report_roles_verified=false` and `archive_report_metadata_verified=false`, while `summary_report_count_verified=true` and `summary_report_roles_verified=true` prove the failure comes from report-role uniqueness, not summary parity.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_roles_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_roles_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384913`, `failure_count=0`, and archive SHA256 `d3c1cbd8afc019913b73f3b97f988e35ab081e80791d13403b47ae37210990e7`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "duplicate_report_role or ocr_safe_archive_confusion_evidence"` => `2 passed, 109 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (duplicate_report_role or summary_report or summary_role or report_source_path or source_path_identity or source_paths)"` => `5 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (report_metadata or report_state or fixed_path or source_report_member or source_report_metadata or source_verifier)"` => `14 passed, 97 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or file_role or certification_boundary or generated_timestamp or manifest_parameter)"` => `13 passed, 98 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_roles_20260604`.
+    - one unsplit `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` wrapper timed out before returning output, so the split runs above provide clean exit-code coverage for the affected archive groups.
+  - Certification boundary:
+    - this proves OCR-safe report-role uniqueness replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe report-schema binding gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so a report entry cannot keep a valid role while drifting to the wrong schema and still leave report metadata looking clean.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_schemas_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - report-entry schema mismatch now fails `archive_report_schemas_verified=false` and `archive_report_metadata_verified=false`.
+    - embedded rewritten-report schema mismatch, unreadable report JSON, and non-object report JSON now also fail the schema/metadata gate.
+    - malformed report inventories and unknown report roles also fail the schema gate so auditors do not see a green schema result when schema binding could not be established.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `archive_report_schemas_verified=true`.
+    - tamper test changes `manifest.reports[0].schema` to the wrong known schema while leaving role and summary counters unchanged.
+    - the verifier fails with `archive_report_schemas_verified=false` and `archive_report_metadata_verified=false`, while `archive_report_roles_verified=true`, `summary_report_count_verified=true`, and `summary_report_roles_verified=true` prove the failure comes from schema binding, not report-role or summary parity.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384098`, `failure_count=0`, and archive SHA256 `e67b0432a5d657c3e7b82c94362ac56ab1125a4bc5ee1f618e27a9663a1e7c06`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "report_schema_drift or duplicate_report_role or ocr_safe_archive_confusion_evidence"` => `3 passed, 109 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (report_schema_drift or duplicate_report_role or summary_report or summary_role or report_source_path or source_path_identity or source_paths or report_metadata or report_state or fixed_path or source_report_member or source_report_metadata or source_verifier)"` => `20 passed, 92 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or file_role or certification_boundary or generated_timestamp or manifest_parameter)"` => `13 passed, 99 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_schemas_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe report schema/role binding replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe source-verifier schema binding gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level and archived source-verifier JSON cannot drift to the wrong verifier schema while source-verifier archive digest metadata remains self-consistent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_schemas_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - report-level `manifest.reports[].source_verification.schema` now fails the source-verification schema/state gates when it does not match the expected verifier schema for the report role.
+    - archived source-verification JSON member schema drift now fails `source_report_verification_schemas_verified=false`, `source_report_verification_states_verified=false`, and `source_report_verification_archive_metadata_verified=false`, even when archive member SHA256/size metadata is updated to match the tampered member.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `source_report_verification_schemas_verified=true`.
+    - manifest-level source-verifier schema drift fails with `source_report_verification_schema_mismatch` while archive metadata remains otherwise coherent.
+    - archived source-verifier JSON member schema drift fails with `source_report_verification_member_schema_mismatch` while file digest/size and archive-entry metadata stay coherent, proving the failure comes from schema binding rather than payload drift.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384842`, `failure_count=0`, and archive SHA256 `6f859baa51d3f131b01f126a385f44c645a23245039ddfcd4fd3842178e30454`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_schema or source_verifier_member_schema or ocr_safe_archive_confusion_evidence"` => `3 passed, 111 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_schema_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier schema binding replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe source-verifier role ownership gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived source-verification JSON file records must be owned by the expected verifier role for the report they attest.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_roles_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - source-verifier file records now fail the role gate when the expected source-verifier record is missing or the archive member is declared under a wrong source-verifier role, even when ZIP bytes and manifest summary role counters are updated self-consistently.
+    - the verifier still keeps schema/state/archive metadata gates separate, so wrong-role ownership is distinguishable from source-verifier schema drift, digest drift, or malformed state.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `source_report_verification_roles_verified=true`.
+    - a tampered manifest that changes only the archived source-verifier file record role, while updating summary role counters and leaving ZIP bytes intact, fails with `source_report_verification_file_record_missing` and `source_report_verification_file_role_mismatch` while `summary_roles_verified=true`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_roles_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_manifest_entry_set_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384749`, `failure_count=0`, and archive SHA256 `a112dafff1ab4054b39deaa3a64247c011af005b939710a15e2d635e0c813685`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_file_role or source_verifier_schema or source_verifier_member_schema or ocr_safe_archive_confusion_evidence"` => `4 passed, 111 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_verification or report_schema_drift or duplicate_report_role or source_path_identity or report_source_path or confusion_evidence)"` => `17 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_roles_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier role ownership replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe source-report role ownership gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived original source-report file records must be owned by the expected source-report role for the report they attest.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_archive_roles_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - source-report archive file records now fail the role gate when the expected source-report record is missing or the archive member is declared under a wrong source-report role, even when ZIP bytes and manifest summary role counters are updated self-consistently.
+    - the verifier still keeps role ownership, source-report entry metadata, source-report metadata parity, source-verifier role ownership, and embedded report replay separate for audit diagnosis.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `source_report_archive_roles_verified=true`.
+    - a tampered manifest that changes only the archived source-report file record role, while updating summary role counters and leaving ZIP bytes intact, fails with `source_report_archive_file_record_missing` and `source_report_archive_file_role_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_roles_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_verification_roles_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384563`, `failure_count=0`, and archive SHA256 `05c17f4438c23b9d02ed847aa617024528abda16de173ec42794020f4f4a1f67`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_file_role or source_report_file_metadata or source_verifier_file_role or ocr_safe_archive_confusion_evidence"` => `4 passed, 112 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verifier or source_report_verification or report_schema_drift or duplicate_report_role or confusion_evidence)"` => `19 passed, 97 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_roles_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe source-report role ownership replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier report binding gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level and archived source-verifier JSON must remain bound to the archived source report they verify.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_report_binding_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - manifest-level `source_verification.report_sha256`, archived source-verifier `report_sha256`, and archived source-verifier `report_file` now fail the binding gate when they drift from the owning archived source-report member, even if ZIP inventory, manifest file records, source-verifier archive-entry metadata, and embedded report replay remain otherwise coherent.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification asserts `source_report_verification_report_binding_verified=true`.
+    - a tampered archive that rewrites the source-verifier to point at a different self-consistent archive member fails with `source_report_verification_sha256_mismatch`, `source_report_verification_member_report_sha256_mismatch`, and `source_report_verification_report_path_mismatch` while inventory and file metadata gates stay true.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_report_binding_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385568`, `failure_count=0`, and archive SHA256 `4f849c04fb6118bf76ed9c01124c3516ebf12b6620cae592fc7d2783ecede577`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_report_binding_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 115 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_verification or report_binding or report_schema_drift or duplicate_report_role or source_report or source_path_identity or report_source_path or confusion_evidence)"` => `22 passed, 95 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `git diff --check` => passed with existing CRLF conversion warnings in docs/manual files.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier report binding replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-report nested role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level `source_report_archive.role` metadata cannot drift from the expected archived source-report role while ZIP bytes and manifest file records remain otherwise coherent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - `source_report_archive_roles_verified` now also fails on wrong nested `manifest.reports[].source_report_archive.role`, not only wrong `manifest.files[]` source-report file-record ownership.
+    - nested source-report role drift now emits `source_report_archive_metadata_role_mismatch`, marks `source_report_archive_metadata_parity_verified=false`, and preserves separate `source_report_archive_entry_metadata_verified=true` when the archive file record itself remains correct.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - a tampered archive that changes only `source_report_archive.role` fails `source_report_archive_roles_verified` and `source_report_archive_metadata_parity_verified` while `archive_inventory_verified`, `manifest_file_metadata_verified`, `summary_roles_verified`, and `source_report_archive_entry_metadata_verified` remain true.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_roles_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385103`, `failure_count=0`, and archive SHA256 `c74d2b10b79b0e5eeee1cb2fe47dfa8373db35a89cef57e65c6ada2e2c1348a5`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_nested_role_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 116 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verifier or source_report_verification or report_binding or report_schema_drift or duplicate_report_role or confusion_evidence)"` => `21 passed, 97 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_nested_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-report nested role metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier archive-entry aggregate metadata gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so source-verifier archive-entry file-record/member drift also fails the aggregate archive report metadata gate, not only the dedicated source-verifier entry gate.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - source-verifier file-record missing, member missing, archive SHA256 mismatch, archive byte-size mismatch, file-record role drift, file-record SHA256 drift, file-record byte-size drift, and unreferenced source-verifier records now mark `archive_report_metadata_verified=false` as well as `source_report_verification_archive_entry_metadata_verified=false`.
+    - this keeps `archive_report_metadata_verified` aligned with all replay-critical report/source-verifier manifest metadata, while preserving the more specific source-verifier entry and role gates for diagnosis.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - existing missing source-verifier member, unreferenced source-verifier record, source-verifier wrong-role record, and source-verifier fixed-path drift tests now assert `archive_report_metadata_verified=false`.
+    - added a source-verifier member digest drift test that changes only the archived source-verifier JSON member bytes while leaving manifest metadata unchanged; verification fails with `source_report_verification_archive_sha256_mismatch`, `source_report_verification_file_sha256_mismatch`, `source_report_verification_archive_entry_metadata_verified=false`, and `archive_report_metadata_verified=false`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385196`, `failure_count=0`, and archive SHA256 `5d5b3fd5409794c4d4b716e6601cc062817f15d2911735024836c37eccc797ce`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_member_digest_drift or source_verifier_file_role_drift or source_verification_member_missing or unreferenced_source_verification_records or source_verifier_fixed_path_drift or ocr_safe_archive_confusion_evidence"` => `6 passed, 113 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_verification or report_binding or source_report or member_digest or file_role or fixed_path)"` => `21 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or certification_boundary or generated_timestamp or manifest_parameter or summary)"` => `16 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - one unsplit `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` wrapper timed out, so the split runs above provide clean exit-code coverage for the affected archive groups.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier archive-entry aggregate metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-report archive-entry aggregate metadata gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived original source-report file-record/member drift also fails the aggregate archive report metadata gate, not only the dedicated source-report entry/role gates.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - source-report file-record missing, wrong source-report file role, source-report ZIP member missing, source-report file-record SHA256 drift, source-report file-record byte-size drift, and unreferenced source-report records now mark `archive_report_metadata_verified=false`.
+    - this keeps `archive_report_metadata_verified` aligned with all replay-critical report/source-report/source-verifier manifest metadata, while preserving `source_report_archive_entry_metadata_verified` and `source_report_archive_roles_verified` as specific diagnostic gates.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - existing source-report file-record metadata drift and wrong-role tests now assert `archive_report_metadata_verified=false`.
+    - added a source-report member missing test that removes the archived original source-report ZIP member while leaving manifest metadata intact; verification fails with `archive_inventory_verified=false`, `archive_report_metadata_verified=false`, `source_report_archive_entry_metadata_verified=false`, and `source_report_archive_member_missing`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_archive_roles_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385010`, `failure_count=0`, and archive SHA256 `6e8467e7acac5fcf2158ddeb6d539517119eead32852b57b5337ab69dda1c6bd`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_member_missing or source_report_file_metadata or source_report_file_role_drift or unreferenced_source_verification_records or source_report_member_byte_drift"` => `5 passed, 115 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verification or archive_report or member_missing or file_metadata or file_role or report_binding)"` => `17 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_entry_gate_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-report archive-entry aggregate metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier nested role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level `source_verification.role` metadata cannot drift from the expected archived source-verifier role while ZIP bytes, manifest file records, and summary role counters remain otherwise coherent.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archive manifests now write `manifest.reports[].source_verification.role` with the expected source-verifier archive role, such as `ocr_safe_confusion_source_verification_report`.
+    - verification now fails `source_report_verification_roles_verified=false`, `source_report_verification_archive_entry_metadata_verified=false`, and aggregate `archive_report_metadata_verified=false` with `source_report_verification_metadata_role_mismatch` when nested source-verifier role metadata drifts, while preserving separate file-record role checks.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive evidence now asserts `source_verification.role` is written.
+    - a tampered archive that changes only `manifest.reports[].source_verification.role` fails the source-verifier role gate while `archive_inventory_verified`, `manifest_file_metadata_verified`, `summary_roles_verified`, and archived verifier JSON metadata remain true.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_roles_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `summary_roles_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385289`, `failure_count=0`, and archive SHA256 `a513fe06ec17d976150d7d625a91ed19de294e75fed827f35b01aeb62488604f`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_nested_role_drift or source_verification_report_is_archived or ocr_safe_archive_confusion_evidence"` => `3 passed, 118 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_verification or source_report or archive_report or report_binding or role or schema)"` => `31 passed, 90 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or certification_boundary or generated_timestamp or manifest_parameter or summary)"` => `16 passed, 105 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ingest_capture_corpus or attach_capture_corpus or validate_capture_corpus or certify_capture_evidence_pipeline or capture_return_package"` => `25 passed, 64 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "not archive_transport_evidence and not verify_transport_evidence_archive and not replay_evidence_archive and not certification_status and not ingest_capture_corpus and not attach_capture_corpus and not validate_capture_corpus and not certify_capture_evidence_pipeline and not capture_return_package"` => `49 passed, 40 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "archive_transport_evidence"` => `6 passed, 83 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "verify_transport_evidence_archive or replay_transport_evidence_archive or cli_archive_evidence or cli_verify_evidence_archive or cli_replay_evidence_archive"` => `7 passed, 82 deselected`, with one expected duplicate-ZIP-member warning in the tamper test.
+    - Individual certification-status tests: `requires_exactly_one_source` and `rejects_archive_without_verification` passed; CLI certification-status command tests passed `2 passed`.
+    - Promotion suite passed: `95 passed, 1 skipped`.
+    - Mainline suite passed: `85 passed, 6 skipped`.
+    - The full unsplit `tests/test_transport_certify.py` and two heavier certification-status individual tests timed out under the local wrapper and were stopped; split runs above provide clean exit-code coverage for affected groups except those two heavier status tests.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier nested role metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier member role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived source-verification JSON member itself cannot lose or drift its expected source-verifier role while manifest role/SHA/size bindings remain self-consistent.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archived source-verification JSON members now include their expected archive role, such as `ocr_safe_confusion_source_verification_report`.
+    - verification now fails `source_report_verification_roles_verified=false`, `source_report_verification_archive_metadata_verified=false`, and aggregate `archive_report_metadata_verified=false` with `source_report_verification_member_role_mismatch` when the archived verifier JSON member role drifts, even if manifest file metadata, report-level source-verification metadata, and ZIP bytes are otherwise hash-coherent.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive evidence now asserts the archived source-verification JSON carries `role`.
+    - a tampered archive that changes only the archived verifier JSON member role, then updates the manifest file record and report-level verifier archive SHA/size, fails the member-role gate without falling back to generic SHA mismatch failures.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_roles_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `archive_report_metadata_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385348`, `failure_count=0`, and archive SHA256 `b9acd61f2491f2e9246749ce870da28a452d5bf6b7b2e46cca39a9e3426f0e55`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_member_role_drift or source_verification_report_is_archived or ocr_safe_archive_confusion_evidence"` => `3 passed, 119 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_verification or source_report or archive_report or report_binding or role or schema or confusion_evidence)"` => `33 passed, 89 deselected`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_member_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier member role provenance for synthetic OCR-safe evidence only.
+    - it intentionally requires regenerated OCR-safe archives to include the archived source-verifier `role`; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe rewritten report member role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived rewritten report JSON member itself cannot drift from the expected archive-member role while manifest report metadata, file records, ZIP bytes, and summary counters remain otherwise coherent.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archived rewritten report JSON members now include their expected fixed archive role, such as `ocr_safe_confusion_report_rewritten`.
+    - source-report-to-rewritten-report replay parity now includes that deterministic role stamp.
+    - verification now fails `archive_report_roles_verified=false` and aggregate `archive_report_metadata_verified=false` with `archive_report_member_role_mismatch` when the archived rewritten report member role drifts, even if report-level SHA256/size metadata and manifest file metadata are updated to match the tampered member.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive evidence asserts the archived rewritten report JSON carries `role`.
+    - a tampered archive that changes only the archived rewritten report JSON member role, then updates manifest report/file SHA256 and byte-size metadata, fails the member-role gate without generic SHA mismatch failures.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384560`, `failure_count=0`, and archive SHA256 `20a554ffbcdbd7f1a242dfa3fe6460919d2630789c3635b3c6580edc5e84788a`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verification_report_is_archived or report_member_role_drift"` => `2 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_verification or source_report or archive_report or report_binding or role or schema or confusion_evidence or source_rewrite)"` => `35 passed, 88 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_member_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe archived rewritten report member role provenance for synthetic OCR-safe evidence only.
+    - it intentionally requires regenerated OCR-safe archives to include the archived rewritten report `role`; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-report member state gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived original source-report JSON member cannot drift to the wrong source-report schema or success state while source-report file metadata, source-verifier metadata, ZIP bytes, and summary counters remain otherwise coherent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_archive_member_state_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - archived original source-report members must parse as JSON objects.
+    - archived original source-report members must use the expected schema for the owning report role.
+    - archived original source-report members must carry a boolean `success` field that matches `manifest.reports[].success`.
+    - schema/state drift now fails aggregate `archive_report_metadata_verified=false` in addition to the specific source-report member-state gate.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive OCR-safe archive evidence now asserts `source_report_archive_member_state_verified=true`.
+    - a tampered archive changes the archived original source-report member schema to the wrong known report schema, then recomputes source-report SHA256/size metadata, source-verifier `report_sha256` and source-report archive metadata, verifier archive SHA256/size metadata, file records, and summary total size.
+    - verification still fails with `source_report_archive_member_state_verified=false` and `source_report_archive_member_schema_mismatch`, while source-report entry metadata, source-report metadata parity, source-verifier archive metadata, source-verifier entry metadata, and source-verifier report binding stay true.
+  - Updated docs/handoff:
+    - `docs/IMPLEMENTATION_TASK_CARDS.md`.
+    - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`.
+    - `docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md`.
+    - `docs/NEXT_ITERATION_UNIVERSAL_PROMPT.md`.
+    - `QRCODE_AIRGAP_MANUAL.md`.
+    - `USAGE_MANUAL.md`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_member_state_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_archive_roles_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385304`, `failure_count=0`, and archive SHA256 `1a9a7ead043212afffa52fea0b0e01f94077210518e8ad4d98102c7b1deebbfd`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_member_schema_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 122 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verification or archive_report or report_binding or source_rewrite or schema)"` => `18 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report_member_schema_drift or source_report_member_byte_drift or source_report_member_missing or source_report_file_metadata or source_report_metadata_parity or source_report_nested_role)"` => `6 passed, 118 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verification or archive_report or report_binding or source_rewrite or schema or role)"` => `21 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_member_state_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe archived original source-report member schema/state provenance for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verifier member state gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived source-verification JSON member cannot drift to a different success/failure state while source-verifier file metadata, ZIP bytes, and summary counters remain otherwise coherent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_member_state_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - archived source-verification JSON members must parse as JSON objects.
+    - archived source-verification JSON members must use the expected verifier schema for the owning source report.
+    - archived source-verification JSON members must keep `success` and `failure_count` parity with `manifest.reports[].source_verification`.
+    - verifier-member schema/state drift now fails aggregate `archive_report_metadata_verified=false` in addition to the specific member-state/schema gates, even when archive entry SHA256/byte-size metadata is recomputed.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive OCR-safe archive evidence now asserts `source_report_verification_member_state_verified=true`.
+    - a tampered archive rewrites the archived source-verifier JSON member to `success=false` and `failure_count=1`, then recomputes the source-verifier archive SHA256/byte-size metadata, file record, and summary total size.
+    - verification still fails with `source_report_verification_member_state_verified=false`, `source_report_verification_member_success_mismatch`, and `source_report_verification_member_failure_count_mismatch`, while source-verifier archive-entry metadata, archive inventory, manifest file metadata, and summary total-size checks stay true.
+  - Updated docs/handoff:
+    - `docs/IMPLEMENTATION_TASK_CARDS.md`.
+    - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`.
+    - `docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md`.
+    - `docs/NEXT_ITERATION_UNIVERSAL_PROMPT.md`.
+    - `QRCODE_AIRGAP_MANUAL.md`.
+    - `USAGE_MANUAL.md`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_member_state_verified=true`, `archive_report_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_member_state_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385490`, `failure_count=0`, and archive SHA256 `006fba179a232af4a915641a1459a76f48a083fb3ac7217f0d6e6043705552eb`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_member_state_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 123 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier_member or source_verifier_state or source_verifier_schema or source_verifier_nested_role or source_verifier_file_role or source_report_member)"` => `12 passed, 113 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (archive_report or report_binding or source_rewrite or duplicate_report_role or summary_report_role)"` => `4 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (inventory or file_metadata or file_payload_metadata or external_manifest or absolute_archived_report_path or local_requested_output_path or summary_file or summary_source_verification or manifest_parameter or file_role_semantic or certification_boundary or generated_timestamp)"` => `14 passed, 111 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (correction_replay or combined or local_requested_output_path)"` => `3 passed, 122 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_member_state_20260606`.
+    - Full `tests/test_transport_modules.py` and `tests/test_transport_certify.py` wrapper-level runs timed out locally; the split runs above provide clean exit-code coverage for the touched transport archive/certification surface.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier member schema/state provenance for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verifier binding aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived source-verifier JSON report/path/SHA/size binding drift fails the aggregate archive report metadata gate, not only the narrower source-verifier binding gates.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - archived source-verifier JSON `report_sha256`, `report_file`, `archive_path`, and `source_report_archive_*` drift now marks `archive_report_metadata_verified=false`.
+    - dedicated diagnostic fields remain separate: `source_report_verification_report_binding_verified` for report SHA/path binding and `source_report_verification_archive_metadata_verified` for archived verifier metadata.
+    - this preserves existing replay diagnostics while making the aggregate archive-report metadata gate fail closed for replay-critical verifier-member binding drift.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - source-verifier report-binding drift now asserts `archive_report_metadata_verified=false`.
+    - correction-replay source-verifier archive metadata drift now asserts `archive_report_metadata_verified=false` while archive-entry metadata can still stay true when file-record metadata is coherent.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_member_state_verified=true`, `source_report_archive_member_state_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385025`, `failure_count=0`, and archive SHA256 `fd236b46a7802fcc763280703e66c675ade7700d38f4946f4bb12e54f578c4cb`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_report_binding_drift or correction_replay_source_verifier_metadata_drift"` => `2 passed, 123 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_member or report_binding or source_rewrite)"` => `19 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (archive_report or duplicate_report_role or summary_report_role or report_schema or report_member_role)"` => `4 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py` => `125 passed, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_binding_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier binding aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verifier manifest-state aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so manifest-level `source_verification` schema/state/report binding drift also fails the aggregate archive report metadata gate, matching the already hardened archived source-verifier JSON member behavior.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - report-level `source_verification_required`, `source_verification.schema`, `source_verification.success`, `source_verification.failure_count`, and `source_verification.report_sha256` drift now marks `archive_report_metadata_verified=false`.
+    - dedicated diagnostics remain separate: `source_report_verification_schemas_verified`, `source_report_verification_states_verified`, and `source_report_verification_report_binding_verified`.
+    - this preserves narrow verifier diagnostics while making aggregate archive-report metadata fail closed for replay-critical manifest source-verifier envelope drift.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - `test_ocr_safe_archive_verification_fails_on_source_verifier_schema_drift` now asserts `archive_report_metadata_verified=false` for report-level verifier schema drift.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_member_state_verified=true`, `source_report_archive_member_state_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385769`, `failure_count=0`, and archive SHA256 `7ba606e9eb5ebd5c361caae61e9f946b7df047d0cbaa6f3d9580899fcfdbecff`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_schema_drift or source_verification_required_flag or source_report_verification_missing or source_verification_sha256_mismatch"` => `1 passed, 124 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_member or report_binding or source_rewrite or archive_report or duplicate_report_role or summary_report_role or report_schema or report_member_role)"` => `23 passed, 102 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe manifest-level source-verifier schema/state/report-binding aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe manifest summary aggregate rollup):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: `GH_TOKEN`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are unset, and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so all replay-critical manifest summary inventory drift fails the aggregate archive report metadata gate, not only dedicated summary diagnostics.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - malformed or mismatched `summary.report_count` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.report_roles` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.file_count` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.total_size_bytes` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.roles` now marks `archive_report_metadata_verified=false`.
+    - dedicated diagnostics remain available through `summary_report_count_verified`, `summary_report_roles_verified`, `summary_file_count_verified`, `summary_total_size_verified`, and `summary_roles_verified`.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - `test_ocr_safe_archive_verification_fails_on_summary_role_drift` now asserts aggregate metadata failure while archive inventory and file metadata stay clean.
+    - `test_ocr_safe_archive_verification_fails_on_summary_file_inventory_drift` now asserts aggregate metadata failure while archive inventory and file metadata stay clean.
+    - `test_ocr_safe_archive_verification_fails_on_summary_report_role_drift` now asserts aggregate metadata failure while archive inventory and file metadata stay clean.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_roles_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `archive_report_states_verified=true`, `archive_report_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_source_rewrite_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384188`, `failure_count=0`, and archive SHA256 `994285b91a8269fa13a1774b45bb7e4e12a0884320a831b2fa2a81e3df043879`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_summary'; python -m pytest -q tests\test_transport_modules.py -k "summary_role_drift or summary_file_inventory_drift or summary_report_role_drift or summary_source_verification_drift"` => `4 passed, 123 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_ocr_archive'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (summary or archive_report or source_verifier or source_report_member)"` => `22 passed, 105 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_sidecar'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_certify_focus'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_summary_rollup_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe manifest summary aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verification summary aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: `GH_TOKEN`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are unset.
+  - Goal: harden OCR-safe evidence archive verification so manifest summary source-verification inventory drift fails the aggregate archive report metadata gate, not only the dedicated summary diagnostics.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - malformed or mismatched `summary.source_report_verification_count` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.source_report_verification_roles` now marks `archive_report_metadata_verified=false`.
+    - dedicated gates remain available: `summary_source_report_verification_count_verified` and `summary_source_report_verification_roles_verified`.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - `test_ocr_safe_archive_verification_fails_on_summary_source_verification_drift` now asserts the aggregate metadata gate fails while role/schema/inventory/file metadata gates stay clean.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `source_report_verification_count=1`, `source_report_verification_member_state_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_member_state_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=386048`, `failure_count=0`, and archive SHA256 `f0b256beb2ffdc501cf86341e3bb89bf71cc67d1ea8c8673da50cf1bb0cfc724`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "summary_source_verification_drift or source_verifier_schema_drift or source_verifier_file_role_drift or source_verifier_nested_role_drift or source_verifier_member_state or source_verifier_binding or source_verifier_manifest"` => `5 passed, 120 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (summary_source_verification_drift or source_verifier or source_report_member or report_binding or archive_report or duplicate_report_role or summary_report_role or report_schema or report_member_role)"` => `23 passed, 102 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - `git diff --check` => clean except existing CRLF conversion warnings in docs/manual files.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe source-verification summary aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe rewritten-report state aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: `GH_TOKEN`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are unset, and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level or embedded rewritten-report success-state drift fails the aggregate archive report metadata gate, not only the dedicated report-state diagnostic.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - malformed `manifest.reports[].success` now marks `archive_report_metadata_verified=false` in addition to `archive_report_states_verified=false`.
+    - malformed or mismatched archived rewritten-report JSON `success` now marks `archive_report_metadata_verified=false` in addition to `archive_report_states_verified=false`.
+    - dedicated state diagnostics remain available through `archive_report_states_verified`.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - added a manifest-only report-success type drift regression that keeps source-verifier state clean while requiring `archive_report_metadata_verified=false`.
+    - added a self-consistent embedded rewritten-report success type drift regression where SHA256/size metadata is recomputed but aggregate report metadata still fails.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `archive_report_states_verified=true`, `archive_report_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_source_rewrite_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384653`, `failure_count=0`, and archive SHA256 `06d7a64e0be1af6eb05a16519bbc0e699fb1760e91bbdc381a04c6cc5fe2145d`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "report_success_type_only or report_member_success_type or report_state_type_drift or source_verifier_state_type_drift"` => `6 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_modules'; python -m pytest -q tests\test_transport_modules.py -k "report_success_type_only or report_member_success_type or report_state_type_drift or source_verifier_state_type_drift or ocr_safe_archive and (source_verifier or source_report_member or archive_report or report_member or summary_source_verification)"` => `24 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_sidecar'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_certify_focus'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_promotion'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_mainline'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_state_rollup_20260606`.
+    - The unsplit transport suite timed out under the local tool wrapper after completing for too long, so transport verification is represented by the focused changed slices plus the sidecar suite.
+  - Certification boundary:
+    - this proves OCR-safe rewritten-report success-state aggregate metadata behavior for synthetic OCR-safe evidence only.
     - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
   - Remaining product scope:
     - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
