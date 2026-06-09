@@ -2,7 +2,7 @@
 
 > Source blueprint: `docs/current/cross_media_enc_trans_imple_guide_v3.md`  
 > Mapping date: 2026-06-09  
-> Scope for this pass: gap mapping plus P0-B0/B1 only.  
+> Current pass update: P0-B2 smoke script and blocked-state evidence.  
 > Explicitly out of scope: QR/OCR/SOX1 behavior changes and release/promotion/evidence expansion.
 
 ## 1. Current state summary
@@ -34,9 +34,9 @@ boundary.
 | P0-A4 scan report / retake plan | Existing QR reassembly and receive reports include missing/bad image diagnostics. | Done enough for current pass | No change in this pass. |
 | P0-A5 no-secret-leakage | Covered by existing cross-media tests and manifest/report fields. | Mostly done | Dedicated no-secret-leakage test file can be added later if desired. |
 | P0-A6 crossmedia smoke | `scripts/crossmedia_smoke.ps1`, `scripts/crossmedia_smoke.sh`, simulated capture script. | Done | Linux/macOS real shell execution remains environment validation. |
-| P0-B0 Code Protection Layer registration | `encryption_helper.py`, `decryption_helper.py`, `py2_linux_rec_opera.py` existed but lacked explicit V0.3 boundary comments. | This pass | Add explicit responsibility and non-goal comments. |
-| P0-B1 protect/build and cm/transport decoupling | `encryption_helper` is already lazy-loaded for protect/build/package/verify/release handlers; parser still imported build config/toolchain helpers before this pass. | This pass | Keep config/toolchain imports behind build handlers; assert help remains lightweight. |
-| P0-B2 code-protection smoke | Not part of current requested scope. | Pending | Future pass only. |
+| P0-B0 Code Protection Layer registration | `encryption_helper.py`, `decryption_helper.py`, `py2_linux_rec_opera.py` now have explicit V0.3 Code Protection Layer boundary comments. | Done | Keep responsibilities documented separately from QR/OCR/SOX1. |
+| P0-B1 protect/build and cm/transport decoupling | `cm` and `transport` help paths stay decoupled from code-protection heavy imports; covered by CLI regression tests. | Done | Keep config/toolchain imports behind protect/build handlers. |
+| P0-B2 code-protection smoke | `scripts/smoke_code_protection.py` now creates `demo_module.py`, runs `soenc.py protect`, probes native deps, runs `soenc.py build` when possible, then imports native artifacts from a clean directory. | Script added; strict native proof currently blocked on this host | Fix native build environment (`setuptools`/`backports.tarfile` conflict and missing `Cython`) or run on a prepared native-build host. |
 | P0-B3 dist no-source-leakage | Not part of current requested scope. | Pending | Future pass only. |
 | P0-B4 local-embedded insecure marker | Not part of current requested scope. | Pending | Future pass only. |
 | P0-B5 license-file externalization | Existing runtime supports license-file concepts; full policy hardening is not in current scope. | Pending | Future pass only. |
@@ -87,16 +87,49 @@ soenc cm --help must not import encryption_helper, decryption_helper, py2_linux_
 soenc transport --help must not import encryption_helper, decryption_helper, py2_linux_rec_opera, Cython, or native build helpers.
 ```
 
-## 5. Next recommended pass
+## 5. P0-B2 smoke contract
 
-After this P0-B0/B1 pass, continue with:
+`scripts/smoke_code_protection.py` is the V0.3 Code Protection Layer smoke entry:
 
 ```text
-P0-B2: code-protection smoke
+original .py -> protected staging -> .so/.pyd -> clean import -> behavior match
 ```
 
-Do not start P0-B3/B4 until the smoke proves:
+The smoke intentionally has two modes:
 
 ```text
-original .py -> protected staging -> .so/.pyd -> import -> behavior matches
+strict mode:
+  python scripts/smoke_code_protection.py
+  returns non-zero if native packaging cannot be proven
+
+evidence mode for non-build hosts:
+  python scripts/smoke_code_protection.py --allow-blocked
+  returns zero only to record a BLOCKED diagnostic report
+```
+
+Current host evidence:
+
+```text
+protect step: passed
+native dependency probe: blocked
+missing/broken: setuptools, Cython
+setuptools error: ImportError importing backports.tarfile from the current Python environment
+```
+
+The script does not modify QR/OCR/SOX1 behavior and does not add release,
+promotion, or evidence-platform capability.
+
+## 6. Next recommended pass
+
+After the native build environment is available, rerun:
+
+```text
+python scripts/smoke_code_protection.py
+```
+
+Only after strict P0-B2 passes should the next implementation target be:
+
+```text
+P0-B3: dist no-source-leakage
+P0-B4: local-embedded explicit insecure marker
 ```
