@@ -47,6 +47,19 @@ class CrossMediaCliTests(unittest.TestCase):
         self.assertIn("send", help_text)
         self.assertIn("receive", help_text)
 
+    def test_crossmedia_parser_does_not_expose_legacy_evidence_commands(self) -> None:
+        parser = crossmedia_cli.build_parser()
+        help_text = parser.format_help()
+        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        command_names = set(subparsers.choices.keys())
+
+        self.assertNotIn("certify", command_names)
+        self.assertNotIn("archive-evidence", command_names)
+        self.assertNotIn("certification-status", command_names)
+        self.assertNotIn("certify", help_text)
+        self.assertNotIn("archive", help_text)
+        self.assertNotIn("status", help_text)
+
     def test_soenc_cm_help_is_lightweight(self) -> None:
         real_import = builtins.__import__
         imported = []

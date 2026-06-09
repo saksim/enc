@@ -674,6 +674,21 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mocked_print.assert_any_call("available optional plugins:")
         mocked_print.assert_any_call("  transport: optional (available)")
+        mocked_print.assert_any_call(
+            "note: certify/archive/status transport evidence commands are experimental "
+            "legacy tooling; use `soenc cm send` and `soenc cm receive` for the "
+            "current cross-media encrypted user path."
+        )
+
+    def test_transport_help_marks_evidence_tools_experimental(self):
+        parser = soenc_cli.build_parser()
+        transport_parser = parser._subparsers._group_actions[0].choices["transport"]
+        help_text = transport_parser.format_help()
+
+        self.assertIn("experimental", help_text)
+        self.assertIn("certify/archive/status", help_text)
+        self.assertIn("soenc cm send", help_text)
+        self.assertIn("soenc cm receive", help_text)
 
     def test_audit_promotion_command_passes_with_valid_evidence(self):
         root = self.make_case_root("soenc_audit_promotion_pass")

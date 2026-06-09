@@ -96,7 +96,8 @@ class TransportModuleExtractionTests(unittest.TestCase):
 
     def test_qrcode_helper_cli_aliases_use_transport_cli_module(self) -> None:
         parser = qrcode_helper._build_parser()
-        self.assertEqual(parser.description, "Airgap transport layer for encrypted small artifacts.")
+        self.assertIn("Airgap transport layer for encrypted small artifacts.", parser.description)
+        self.assertIn("experimental", parser.description)
         self.assertEqual(parser.prog, cli.build_parser().prog)
         self.assertIs(qrcode_helper._save_json, cli.save_json)
         self.assertIs(qrcode_helper._save_missing_chunks, cli.save_missing_chunks)
@@ -155,6 +156,26 @@ class TransportModuleExtractionTests(unittest.TestCase):
         self.assertIn("--report-file", verify_correction_replay_option_names)
         self.assertIn("--output-file", verify_correction_replay_option_names)
         self.assertIn("--allow-failed-report", verify_correction_replay_option_names)
+
+    def test_transport_evidence_commands_are_marked_experimental(self) -> None:
+        parser = cli.build_parser()
+        subparsers = parser._subparsers._group_actions[0]
+        help_text = parser.format_help()
+        self.assertIn("experimental", help_text)
+
+        for command_name in (
+            "certify",
+            "archive-evidence",
+            "verify-evidence-archive",
+            "replay-evidence-archive",
+            "certification-status",
+            "certify-capture-evidence",
+        ):
+            command_parser = subparsers.choices[command_name]
+            command_help = command_parser.format_help()
+            self.assertIn("EXPERIMENTAL evidence tooling", command_help)
+            self.assertIn("not part of `soenc cm", command_help)
+            self.assertIn("send/receive`", command_help)
         certify_ocr_confusion_parser = parser._subparsers._group_actions[0].choices[
             "certify-ocr-confusion"
         ]

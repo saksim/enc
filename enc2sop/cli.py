@@ -298,6 +298,11 @@ def _run_transport(args) -> int:
         print("usage: soenc transport <plugin-subcommand> [args]")
         print("example: soenc transport export -i artifact.bin -o ./pkg")
         print("example: soenc transport prepare-capture-corpus -o ./capture_kit --classification lab")
+        print(
+            "note: certify/archive/status transport evidence commands are experimental "
+            "legacy tooling; use `soenc cm send` and `soenc cm receive` for the "
+            "current cross-media encrypted user path."
+        )
         return 0
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
@@ -635,7 +640,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     transport_parser = subparsers.add_parser(
         "transport",
-        help="Optional airgap transport plugin commands (export/recover/verify/analyze/ocr/certify).",
+        description=(
+            "Optional legacy airgap transport plugin commands. The current "
+            "cross-media encrypted product path is `soenc cm send` and "
+            "`soenc cm receive`; transport certify/archive/status evidence tools "
+            "are retained as experimental legacy tooling only."
+        ),
+        epilog=(
+            "P1-S5 scope: legacy evidence commands such as certify, archive-evidence, "
+            "verify-evidence-archive, replay-evidence-archive, and "
+            "certification-status are experimental and do not enter the normal "
+            "cross-media user path."
+        ),
+        help=(
+            "Optional legacy airgap transport plugin commands; certify/archive/status "
+            "evidence tools are experimental and outside cm send/receive."
+        ),
     )
     transport_parser.add_argument(
         "forwarded",

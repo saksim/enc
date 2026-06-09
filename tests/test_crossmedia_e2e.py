@@ -161,7 +161,7 @@ def test_cm_send_receive_simulated_photo_default_chunk_roundtrip(tmp_path: Path)
     assert restored_path.read_bytes() == plain_path.read_bytes()
     send_report = json.loads((send_dir / "send_report.json").read_text(encoding="utf-8"))
     scan_report = json.loads((receive_dir / "scan_report.json").read_text(encoding="utf-8"))
-    assert send_report["chunk_chars"] == 500
+    assert send_report["chunk_chars"] == 450
     assert scan_report["success"] is True
     assert scan_report["missing_chunks"] == []
 

@@ -12,6 +12,34 @@ from . import certify as _transport_certify
 from . import protocol
 
 
+EXPERIMENTAL_EVIDENCE_COMMANDS = frozenset(
+    {
+        "certify",
+        "certify-ocr-confusion",
+        "verify-ocr-confusion",
+        "archive-ocr-safe-evidence",
+        "verify-ocr-safe-evidence-archive",
+        "prepare-capture-corpus",
+        "attach-capture-corpus",
+        "package-capture-return",
+        "ingest-capture-corpus",
+        "correct-capture-perspective",
+        "validate-capture-corpus",
+        "certify-capture-evidence",
+        "archive-evidence",
+        "verify-evidence-archive",
+        "replay-evidence-archive",
+        "certification-status",
+    }
+)
+
+EXPERIMENTAL_EVIDENCE_NOTICE = (
+    "EXPERIMENTAL evidence tooling retained for legacy certification/archive/status "
+    "workflows. It is not part of the current cross-media encrypted user path; "
+    "use `soenc cm send` and `soenc cm receive` for normal operation."
+)
+
+
 def print_json(data: Dict[str, object]) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
 
@@ -94,7 +122,11 @@ def parse_metadata_items(items: Optional[List[str]]) -> Dict[str, object]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Airgap transport layer for encrypted small artifacts."
+        description=(
+            "Airgap transport layer for encrypted small artifacts. Legacy OCR/sidecar "
+            "commands remain available; certify/archive/status evidence commands are "
+            "experimental and outside the current `soenc cm send/receive` main path."
+        )
     )
     sub = parser.add_subparsers(dest="cmd")
     # Python 3.6 does not support add_subparsers(..., required=True)
@@ -1878,7 +1910,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional path for the certification status JSON",
     )
 
+    _mark_experimental_evidence_commands(sub)
     return parser
+
+
+def _mark_experimental_evidence_commands(subparsers) -> None:
+    """Label legacy evidence commands as experimental without changing behavior."""
+
+    for command_name in EXPERIMENTAL_EVIDENCE_COMMANDS:
+        command_parser = subparsers.choices.get(command_name)
+        if command_parser is None:
+            continue
+        description = command_parser.description or ""
+        if "EXPERIMENTAL evidence tooling" not in description:
+            command_parser.description = (
+                EXPERIMENTAL_EVIDENCE_NOTICE
+                if not description
+                else EXPERIMENTAL_EVIDENCE_NOTICE + "\n\n" + description
+            )
+        epilog = command_parser.epilog or ""
+        if "not part of `soenc cm send/receive`" not in epilog:
+            command_parser.epilog = (
+                (epilog + "\n\n" if epilog else "")
+                + "P1-S5 scope: retained as experimental evidence tooling; "
+                + "not part of `soenc cm send/receive`."
+            )
+
+    for action in getattr(subparsers, "_choices_actions", []):
+        if getattr(action, "dest", None) not in EXPERIMENTAL_EVIDENCE_COMMANDS:
+            continue
+        help_text = str(getattr(action, "help", "") or "")
+        if not help_text.startswith("[experimental evidence]"):
+            action.help = "[experimental evidence] " + help_text
 
 
 def run_cli(argv: Optional[List[str]], transport_cls) -> int:
