@@ -149,6 +149,25 @@ def test_render_scan_roundtrip_png(tmp_path: Path) -> None:
     assert len(payloads) == manifest["chunks_total"]
 
 
+def test_render_writes_capture_guide_image_and_manifest_metadata(tmp_path: Path) -> None:
+    _require_qr_backend()
+    sox1 = _sample_sox1(b"capture guide image metadata")
+    output_dir = tmp_path / "pages_pkg"
+
+    manifest = qr_transport.render_qr_pages(sox1, output_dir, chunk_chars=700)
+
+    guide_path = output_dir / "capture_guide.png"
+    instructions = (output_dir / "instructions.md").read_text(encoding="utf-8")
+    assert guide_path.exists()
+    assert guide_path.stat().st_size > 1000
+    assert manifest["capture_guide_image"] == "capture_guide.png"
+    assert manifest["capture_guide"]["schema"] == qr_transport.CAPTURE_GUIDE_IMAGE_SCHEMA
+    assert manifest["capture_guide"]["contains_key_material"] is False
+    assert manifest["capture_guide"]["contains_sox1_payload"] is False
+    assert "capture_guide.png" in instructions
+
+
+
 def test_scan_jpeg_roundtrip(tmp_path: Path) -> None:
     _require_qr_backend()
     image_module = pytest.importorskip("PIL.Image")

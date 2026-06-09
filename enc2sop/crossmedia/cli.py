@@ -354,6 +354,7 @@ def _run_send(args: argparse.Namespace) -> int:
         "pages_dir": str(output_dir / "pages"),
         "payload_sox1": str(payload_path) if payload_path is not None else None,
         "manifest": str(output_dir / "manifest.json"),
+        "capture_guide_image": str(output_dir / "capture_guide.png"),
     }
     report_path = output_dir / "send_report.json"
     qr_transport.write_json_atomic(report_path, report)

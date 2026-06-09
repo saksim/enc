@@ -84,11 +84,16 @@ def test_cm_send_receive_restores_original_file_and_reports(tmp_path: Path) -> N
     assert "output_sha256=" in receive.stdout
 
     send_report = json.loads((send_dir / "send_report.json").read_text(encoding="utf-8"))
+    manifest = json.loads((send_dir / "manifest.json").read_text(encoding="utf-8"))
     scan_report = json.loads((receive_dir / "scan_report.json").read_text(encoding="utf-8"))
     decrypt_report = json.loads((receive_dir / "decrypt_report.json").read_text(encoding="utf-8"))
     assert send_report["success"] is True
     assert send_report["input_sha256"] == _sha256(plain_path)
     assert send_report["payload_sox1"] == str(send_dir / "payload.sox1")
+    assert send_report["capture_guide_image"] == str(send_dir / "capture_guide.png")
+    assert (send_dir / "capture_guide.png").exists()
+    assert manifest["capture_guide_image"] == "capture_guide.png"
+    assert manifest["capture_guide"]["contains_key_material"] is False
     assert scan_report["success"] is True
     assert scan_report["missing_chunks"] == []
     assert decrypt_report["success"] is True
@@ -375,3 +380,18 @@ def test_simulate_capture_distortions_script_outputs_jpegs(tmp_path: Path) -> No
     assert report["blur_radius"] == 0.5
     assert len(outputs) == 1
     assert outputs[0].stat().st_size > 0
+
+def test_linux_shell_smoke_script_matches_documented_flow() -> None:
+    script = Path("scripts/crossmedia_smoke.sh")
+    text = script.read_text(encoding="utf-8")
+
+    assert text.startswith("#!/usr/bin/env bash")
+    assert "set -euo pipefail" in text
+    assert "SOENC_CM_SMOKE_WORK" in text
+    assert "python soenc.py cm keygen" in text
+    assert "python soenc.py cm send" in text
+    assert "python scripts/simulate_capture_distortions.py" in text
+    assert "python soenc.py cm receive" in text
+    assert "hashlib.sha256" in text
+    assert "CROSSMEDIA_SMOKE_OK" in text
+

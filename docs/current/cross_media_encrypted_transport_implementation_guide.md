@@ -1090,6 +1090,7 @@ test_manifestless_ocr_safe_sidecar_with_parity_roundtrip
 
 ```text
 scripts/crossmedia_smoke.ps1
+scripts/crossmedia_smoke.sh
 scripts/simulate_capture_distortions.py
 README 或 docs/current 补充最终用户命令
 ```
@@ -1099,6 +1100,53 @@ README 或 docs/current 补充最终用户命令
 ```text
 CROSSMEDIA_SMOKE_OK
 测试命令记录在最终回复/变更说明中
+```
+
+### Step 6 当前用户命令速查
+
+仓库当前没有顶层 `README.md`，因此最终用户命令同步在本施工文档内维护。普通用户主链路只使用两条命令：
+
+```bash
+python soenc.py cm send \
+  --input secret.bin \
+  --key-file key.bin \
+  --output-dir send_pages \
+  --mode qr
+
+python soenc.py cm receive \
+  --image-input phone_photos \
+  --key-file key.bin \
+  --output restored.bin \
+  --work-dir receive_work
+```
+
+首次使用先生成 32-byte key 文件：
+
+```bash
+python soenc.py cm keygen --key-file key.bin
+```
+
+发送包产物中 `payload.sox1`、`manifest.json`、`instructions.md`、`capture_guide.png`、`send_report.json` 都是辅助材料；接收恢复不得依赖 manifest。`capture_guide.png` 是拍摄指引图，不包含密钥、明文或 SOX1 QR payload。
+
+本机 Windows smoke：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\crossmedia_smoke.ps1
+```
+
+Linux/macOS shell smoke（需要 bash、Python、OpenCV、Pillow、cryptography 等跨介质依赖）：
+
+```bash
+bash scripts/crossmedia_smoke.sh
+```
+
+真实手机照片鲁棒性报告：
+
+```bash
+python scripts/crossmedia_capture_corpus_report.py \
+  --corpus phone_photos \
+  --expected-sox1-file send_pages/payload.sox1 \
+  --output capture_corpus_report.json
 ```
 
 ---
