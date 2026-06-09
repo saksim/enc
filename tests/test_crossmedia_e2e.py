@@ -97,6 +97,75 @@ def test_cm_send_receive_restores_original_file_and_reports(tmp_path: Path) -> N
     assert (receive_dir / "recovered.sox1").exists()
 
 
+def test_cm_send_receive_simulated_photo_default_chunk_roundtrip(tmp_path: Path) -> None:
+    _require_qr_backend()
+    key_path = tmp_path / "key.bin"
+    plain_path = tmp_path / "secret.txt"
+    send_dir = tmp_path / "send"
+    photos_dir = tmp_path / "photos"
+    receive_dir = tmp_path / "receive"
+    restored_path = tmp_path / "restored.txt"
+    key_path.write_bytes(KEY)
+    plain_path.write_text("hello cross media encrypted transport", encoding="utf-8")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "send",
+            "--input",
+            str(plain_path),
+            "--key-file",
+            str(key_path),
+            "--output-dir",
+            str(send_dir),
+            "--mode",
+            "qr",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/simulate_capture_distortions.py",
+            "--input",
+            str(send_dir / "pages"),
+            "--output",
+            str(photos_dir),
+            "--jpeg-quality",
+            "85",
+            "--rotate-deg",
+            "1.0",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "receive",
+            "--image-input",
+            str(photos_dir),
+            "--key-file",
+            str(key_path),
+            "--output",
+            str(restored_path),
+            "--work-dir",
+            str(receive_dir),
+        ],
+        check=True,
+    )
+
+    assert restored_path.read_bytes() == plain_path.read_bytes()
+    send_report = json.loads((send_dir / "send_report.json").read_text(encoding="utf-8"))
+    scan_report = json.loads((receive_dir / "scan_report.json").read_text(encoding="utf-8"))
+    assert send_report["chunk_chars"] == 500
+    assert scan_report["success"] is True
+    assert scan_report["missing_chunks"] == []
+
+
 def test_cm_send_no_debug_sox1_omits_payload_file(tmp_path: Path) -> None:
     _require_qr_backend()
     key_path = tmp_path / "key.bin"

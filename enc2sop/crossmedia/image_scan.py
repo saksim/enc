@@ -19,6 +19,11 @@ class ImageScanError(ValueError):
     """Raised when an image input path cannot be scanned safely."""
 
 
+IMAGE_QUALITY_SCHEMA = "enc2sop-cross-media-image-quality/v1"
+_BLUR_CRITICAL_LAPLACIAN_VARIANCE = 35.0
+_BLUR_WARNING_LAPLACIAN_VARIANCE = 90.0
+
+
 def _load_cv2():
     try:
         import cv2
@@ -90,12 +95,19 @@ def _pil_image_to_bgr_array(path: Path):
 def _candidate_arrays(bgr_image):
     cv2 = _load_cv2()
     height, width = bgr_image.shape[:2]
+    for tile in _single_qr_generated_page_candidates(bgr_image):
+        yield tile
     for corrected_page in _page_perspective_candidates(bgr_image):
         yield corrected_page
+        for tile in _single_qr_generated_page_candidates(corrected_page):
+            yield tile
         page_height, page_width = corrected_page.shape[:2]
         if max(page_width, page_height) < 1800:
             scaled_size = (max(1, int(page_width * 1.25)), max(1, int(page_height * 1.25)))
-            yield cv2.resize(corrected_page, scaled_size, interpolation=cv2.INTER_CUBIC)
+            scaled = cv2.resize(corrected_page, scaled_size, interpolation=cv2.INTER_CUBIC)
+            yield scaled
+            for tile in _single_qr_generated_page_candidates(scaled):
+                yield tile
     page_crops = list(_page_crop_candidates(bgr_image))
     for crop in page_crops:
         yield crop
@@ -107,11 +119,17 @@ def _candidate_arrays(bgr_image):
         scaled_size = (max(1, int(width * scale)), max(1, int(height * scale)))
         yield cv2.resize(bgr_image, scaled_size, interpolation=cv2.INTER_CUBIC)
     for angle in (-2.0, -1.0, 1.0, 2.0):
-        yield _rotate_keep_bound(bgr_image, angle)
+        rotated = _rotate_keep_bound(bgr_image, angle)
+        yield rotated
+        for tile in _single_qr_generated_page_candidates(rotated):
+            yield tile
     gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
     yield gray
     for angle in (-2.0, -1.0, 1.0, 2.0):
-        yield _rotate_keep_bound(gray, angle)
+        rotated_gray = _rotate_keep_bound(gray, angle)
+        yield rotated_gray
+        for tile in _single_qr_generated_page_candidates(rotated_gray):
+            yield tile
     yield cv2.GaussianBlur(gray, (3, 3), 0)
     yield cv2.adaptiveThreshold(
         gray,
@@ -124,6 +142,42 @@ def _candidate_arrays(bgr_image):
     for source in (bgr_image, *page_crops):
         for tile in _multi_qr_tile_candidates(source):
             yield tile
+
+
+def _single_qr_generated_page_candidates(image_array):
+    """Yield QR-area crops for single-QR pages rendered by ``qr_transport``."""
+
+    height, width = image_array.shape[:2]
+    margin = 48
+    header_height = 170
+    footer_height = 118
+    cell_pad = 22
+    label_height = 54
+    if width <= margin * 2 or height <= header_height + footer_height + 180:
+        return
+    qr_left = margin + cell_pad
+    qr_top = header_height + cell_pad + label_height
+    qr_right = width - margin - cell_pad
+    qr_bottom = height - footer_height - cell_pad
+    qr_width = max(1, qr_right - qr_left)
+    qr_height = max(1, qr_bottom - qr_top)
+    pad_x = int(qr_width * 0.08)
+    pad_y = int(qr_height * 0.08)
+    boxes = [
+        (qr_left - pad_x, qr_top - pad_y, qr_right + pad_x, qr_bottom + pad_y),
+        (qr_left, qr_top, qr_right, qr_bottom),
+    ]
+    seen = set()
+    for left, top, right, bottom in boxes:
+        left = max(0, min(int(round(left)), width - 1))
+        top = max(0, min(int(round(top)), height - 1))
+        right = max(left + 1, min(int(round(right)), width))
+        bottom = max(top + 1, min(int(round(bottom)), height))
+        key = (left, top, right, bottom)
+        if key in seen or (right - left) < 180 or (bottom - top) < 180:
+            continue
+        seen.add(key)
+        yield image_array[top:bottom, left:right]
 
 
 def _page_perspective_candidates(image_array):
@@ -243,6 +297,8 @@ def _generated_layout_slot_candidates(image_array):
     height, width = image_array.shape[:2]
     margin = 48
     cell_gap = 34
+    cell_pad = 22
+    label_height = 54
     header_height = 170
     footer_height = 118
     if width <= margin * 2 or height <= header_height + footer_height:
@@ -262,6 +318,20 @@ def _generated_layout_slot_candidates(image_array):
                 top = int(round(header_height + row * (cell_height + cell_gap)))
                 right = int(round(left + cell_width))
                 bottom = int(round(top + cell_height))
+                qr_left = int(round(left + cell_pad))
+                qr_top = int(round(top + cell_pad + label_height))
+                qr_right = int(round(right - cell_pad))
+                qr_bottom = int(round(bottom - cell_pad))
+                qr_width = max(1, qr_right - qr_left)
+                qr_height = max(1, qr_bottom - qr_top)
+                qr_pad_x = int(qr_width * 0.06)
+                qr_pad_y = int(qr_height * 0.06)
+                exact_left = max(0, qr_left - qr_pad_x)
+                exact_top = max(0, qr_top - qr_pad_y)
+                exact_right = min(width, qr_right + qr_pad_x)
+                exact_bottom = min(height, qr_bottom + qr_pad_y)
+                if (exact_right - exact_left) >= 120 and (exact_bottom - exact_top) >= 120:
+                    yield image_array[exact_top:exact_bottom, exact_left:exact_right]
                 pad_x = int(cell_width * 0.04)
                 pad_y = int(cell_height * 0.04)
                 left = max(0, left - pad_x)
@@ -510,20 +580,139 @@ def _decode_from_detected_points(
     return _dedupe_preserve_order(decoded)
 
 
-def scan_image_file(path: Path) -> Tuple[List[str], str | None]:
-    """Scan one image and return decoded SOX1QR payload candidates plus reason.
+def _quality_status_from_blur(laplacian_variance: float) -> str:
+    if laplacian_variance < _BLUR_CRITICAL_LAPLACIAN_VARIANCE:
+        return "critical"
+    if laplacian_variance < _BLUR_WARNING_LAPLACIAN_VARIANCE:
+        return "warning"
+    return "ok"
 
-    The reason is ``None`` on at least one parseable SOX1QR payload; otherwise it
-    is suitable for ``scan_report.json`` bad_images entries.
+
+def _quality_status_from_exposure(
+    *,
+    mean_luma: float,
+    std_luma: float,
+    dark_ratio: float,
+    saturated_ratio: float,
+) -> str:
+    if mean_luma >= 245.0 and dark_ratio < 0.005:
+        return "overexposed"
+    if mean_luma <= 25.0 and saturated_ratio < 0.005:
+        return "underexposed"
+    if saturated_ratio >= 0.70 and dark_ratio < 0.03 and std_luma < 45.0:
+        return "glare_risk"
+    return "ok"
+
+
+def _quality_score(*, blur_status: str, exposure_status: str) -> int:
+    score = 100
+    if blur_status == "critical":
+        score -= 45
+    elif blur_status == "warning":
+        score -= 20
+    if exposure_status in {"overexposed", "underexposed"}:
+        score -= 40
+    elif exposure_status == "glare_risk":
+        score -= 20
+    return max(0, min(100, score))
+
+
+def assess_bgr_image_quality(bgr_image) -> Dict[str, object]:
+    """Return a bounded, report-safe capture quality score for one image.
+
+    This is intentionally diagnostic metadata for P1-S4 real-photo handling. It
+    never gates successful QR recovery: a decodable image remains valid even if
+    its heuristic quality score is low.
     """
 
     cv2 = _load_cv2()
-    detector = cv2.QRCodeDetector()
-    try:
-        bgr = _pil_image_to_bgr_array(Path(path))
-    except Exception as exc:
-        return [], "image_read_failed: {0}".format(exc)
+    import numpy as np
 
+    height, width = bgr_image.shape[:2]
+    gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY) if len(bgr_image.shape) == 3 else bgr_image
+    gray = np.asarray(gray)
+    total = float(max(1, int(gray.size)))
+    laplacian_variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    mean_luma = float(gray.mean())
+    std_luma = float(gray.std())
+    dark_ratio = float(np.count_nonzero(gray <= 25)) / total
+    bright_ratio = float(np.count_nonzero(gray >= 245)) / total
+    saturated_ratio = float(np.count_nonzero(gray >= 252)) / total
+    blur_status = _quality_status_from_blur(laplacian_variance)
+    exposure_status = _quality_status_from_exposure(
+        mean_luma=mean_luma,
+        std_luma=std_luma,
+        dark_ratio=dark_ratio,
+        saturated_ratio=saturated_ratio,
+    )
+    return {
+        "schema": IMAGE_QUALITY_SCHEMA,
+        "score": _quality_score(blur_status=blur_status, exposure_status=exposure_status),
+        "width": int(width),
+        "height": int(height),
+        "blur": {
+            "status": blur_status,
+            "laplacian_variance": round(laplacian_variance, 2),
+            "warning_below": _BLUR_WARNING_LAPLACIAN_VARIANCE,
+            "critical_below": _BLUR_CRITICAL_LAPLACIAN_VARIANCE,
+        },
+        "exposure": {
+            "status": exposure_status,
+            "mean_luma": round(mean_luma, 2),
+            "std_luma": round(std_luma, 2),
+            "dark_ratio": round(dark_ratio, 5),
+            "bright_ratio": round(bright_ratio, 5),
+            "saturated_ratio": round(saturated_ratio, 5),
+        },
+    }
+
+
+def assess_image_file_quality(path: Path) -> Dict[str, object]:
+    try:
+        return assess_bgr_image_quality(_pil_image_to_bgr_array(Path(path)))
+    except Exception as exc:
+        return {
+            "schema": IMAGE_QUALITY_SCHEMA,
+            "score": 0,
+            "status": "unreadable",
+            "error": str(exc),
+        }
+
+
+def _bad_image_suggestion(reason: str, quality: Optional[Dict[str, object]] = None) -> str:
+    suggestions = [
+        "retake closer",
+        "keep the full QR border visible",
+    ]
+    reason_text = str(reason or "")
+    if "crc" in reason_text or "parse" in reason_text:
+        suggestions.append("recapture the reported retake page instead of editing QR text")
+    if "not_found" in reason_text or "not_sox1qr" in reason_text:
+        suggestions.append("center the QR page and include the quiet zone")
+    if isinstance(quality, dict):
+        blur = quality.get("blur") if isinstance(quality.get("blur"), dict) else {}
+        exposure = quality.get("exposure") if isinstance(quality.get("exposure"), dict) else {}
+        blur_status = str(blur.get("status") or "")
+        exposure_status = str(exposure.get("status") or "")
+        if blur_status in {"warning", "critical"}:
+            suggestions.append("hold the camera steady and refocus to reduce motion blur")
+        if exposure_status in {"overexposed", "glare_risk"}:
+            suggestions.append("tilt the camera or lower screen brightness to avoid glare/overexposure")
+        elif exposure_status == "underexposed":
+            suggestions.append("add light or increase screen brightness")
+        if str(quality.get("status") or "") == "unreadable":
+            suggestions.append("use a supported, uncorrupted image file")
+    result: List[str] = []
+    seen = set()
+    for item in suggestions:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return "; ".join(result)
+
+
+def _scan_bgr_image(detector, bgr) -> Tuple[List[str], str | None]:
     decoded, initial_point_sets = _decode_from_array_with_points(detector, bgr)
     full_page_payloads = [item for item in decoded if item.startswith(qr_transport.QR_MAGIC + "|")]
     if not full_page_payloads:
@@ -542,6 +731,13 @@ def scan_image_file(path: Path) -> Tuple[List[str], str | None]:
             if parse_errors and len(parse_errors) == len(full_page_payloads):
                 return parseable, "qr_payload_parse_or_crc_failed"
             return _dedupe_preserve_order(parseable), None
+        decoded.extend(_decode_single_qr_generated_page_slots(detector, bgr, initial_payloads=full_page_payloads))
+        full_page_payloads = [item for item in _dedupe_preserve_order(decoded) if item.startswith(qr_transport.QR_MAGIC + "|")]
+        if _payloads_cover_complete_artifact(full_page_payloads):
+            parseable, parse_errors = _classify_sox1qr_payloads(full_page_payloads)
+            if parse_errors and len(parse_errors) == len(full_page_payloads):
+                return parseable, "qr_payload_parse_or_crc_failed"
+            return _dedupe_preserve_order(parseable), None
         decoded.extend(_decode_multi_qr_slots(detector, bgr, initial_payloads=full_page_payloads))
         full_page_payloads = [item for item in _dedupe_preserve_order(decoded) if item.startswith(qr_transport.QR_MAGIC + "|")]
         parseable, parse_errors = _classify_sox1qr_payloads(full_page_payloads)
@@ -550,6 +746,7 @@ def scan_image_file(path: Path) -> Tuple[List[str], str | None]:
         return _dedupe_preserve_order(parseable), None
 
     decoded = list(decoded)
+    deferred_point_retries: List[Tuple[object, List[object]]] = []
     for candidate in _candidate_arrays(bgr):
         candidate_decoded, candidate_points = _decode_from_array_with_points(detector, candidate)
         decoded.extend(candidate_decoded)
@@ -559,7 +756,9 @@ def scan_image_file(path: Path) -> Tuple[List[str], str | None]:
             if item.startswith(qr_transport.QR_MAGIC + "|")
         ]
         if candidate_points and not candidate_payloads and not decoded:
-            decoded.extend(_decode_from_detected_points(detector, candidate, point_sets=candidate_points))
+            height, width = candidate.shape[:2]
+            if len(deferred_point_retries) < 2 and max(width, height) <= 1600:
+                deferred_point_retries.append((candidate, candidate_points))
         current_payloads = [
             item
             for item in _dedupe_preserve_order(decoded)
@@ -570,12 +769,55 @@ def scan_image_file(path: Path) -> Tuple[List[str], str | None]:
     decoded = _dedupe_preserve_order(decoded)
     payloads = [item for item in decoded if item.startswith(qr_transport.QR_MAGIC + "|")]
     if not payloads:
+        for candidate, candidate_points in deferred_point_retries:
+            decoded.extend(_decode_from_detected_points(detector, candidate, point_sets=candidate_points))
+            decoded = _dedupe_preserve_order(decoded)
+            payloads = [item for item in decoded if item.startswith(qr_transport.QR_MAGIC + "|")]
+            if _has_valid_sox1qr_payload(payloads):
+                break
+    if not payloads:
         return [], "qr_not_found_or_not_sox1qr"
 
     parseable, parse_errors = _classify_sox1qr_payloads(payloads)
     if parse_errors and len(parse_errors) == len(payloads):
         return parseable, "qr_payload_parse_or_crc_failed"
     return _dedupe_preserve_order(parseable), None
+
+
+def scan_image_file(path: Path) -> Tuple[List[str], str | None]:
+    """Scan one image and return decoded SOX1QR payload candidates plus reason.
+
+    The reason is ``None`` on at least one parseable SOX1QR payload; otherwise it
+    is suitable for ``scan_report.json`` bad_images entries.
+    """
+
+    cv2 = _load_cv2()
+    detector = cv2.QRCodeDetector()
+    try:
+        bgr = _pil_image_to_bgr_array(Path(path))
+    except Exception as exc:
+        return [], "image_read_failed: {0}".format(exc)
+    return _scan_bgr_image(detector, bgr)
+
+
+def scan_image_file_with_quality(path: Path) -> Tuple[List[str], str | None, Dict[str, object]]:
+    """Scan one image and return decoded payloads, failure reason, and P1-S4 quality."""
+
+    cv2 = _load_cv2()
+    detector = cv2.QRCodeDetector()
+    try:
+        bgr = _pil_image_to_bgr_array(Path(path))
+    except Exception as exc:
+        reason = "image_read_failed: {0}".format(exc)
+        return [], reason, {
+            "schema": IMAGE_QUALITY_SCHEMA,
+            "score": 0,
+            "status": "unreadable",
+            "error": str(exc),
+        }
+    quality = assess_bgr_image_quality(bgr)
+    decoded, reason = _scan_bgr_image(detector, bgr)
+    return decoded, reason, quality
 
 
 def _classify_sox1qr_payloads(payloads: Iterable[str]) -> Tuple[List[str], List[str]]:
@@ -638,6 +880,33 @@ def _decode_multi_qr_slots(detector, bgr_image, *, initial_payloads: Iterable[st
     return _dedupe_preserve_order(decoded)
 
 
+def _decode_single_qr_generated_page_slots(detector, bgr_image, *, initial_payloads: Iterable[str] = ()) -> List[str]:
+    decoded: List[str] = list(initial_payloads)
+    cv2 = _load_cv2()
+    for tile in _single_qr_generated_page_candidates(bgr_image):
+        before = len(_dedupe_preserve_order(decoded))
+        decoded.extend(_decode_from_array(detector, tile))
+        payloads = [item for item in _dedupe_preserve_order(decoded) if item.startswith(qr_transport.QR_MAGIC + "|")]
+        if _payloads_cover_complete_artifact(payloads):
+            break
+        if len(payloads) > before:
+            continue
+        height, width = tile.shape[:2]
+        for scale in (0.9, 1.25, 1.5):
+            scaled = cv2.resize(
+                tile,
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            decoded.extend(_decode_from_array(detector, scaled))
+            payloads = [item for item in _dedupe_preserve_order(decoded) if item.startswith(qr_transport.QR_MAGIC + "|")]
+            if _payloads_cover_complete_artifact(payloads):
+                break
+        if _payloads_cover_complete_artifact(payloads):
+            break
+    return _dedupe_preserve_order(decoded)
+
+
 def _likely_multi_qr_grids(image_array) -> List[Tuple[int, int]]:
     height, width = image_array.shape[:2]
     ratio = float(width) / float(max(1, height))
@@ -662,14 +931,15 @@ def scan_image_input(image_input: Path) -> Tuple[List[str], Dict[str, object]]:
     payloads: List[str] = []
     bad_images: List[Dict[str, object]] = []
     for image_path in images:
-        decoded, reason = scan_image_file(image_path)
+        decoded, reason, quality = scan_image_file_with_quality(image_path)
         payloads.extend(decoded)
         if reason is not None:
             bad_images.append(
                 {
                     "path": _relative_report_path(image_path, root),
                     "reason": reason,
-                    "suggestion": "retake closer, keep the full QR border visible, avoid glare and motion blur",
+                    "quality": quality,
+                    "suggestion": _bad_image_suggestion(reason, quality),
                 }
             )
     return payloads, {
@@ -680,8 +950,12 @@ def scan_image_input(image_input: Path) -> Tuple[List[str], Dict[str, object]]:
 
 
 __all__ = [
+    "IMAGE_QUALITY_SCHEMA",
     "ImageScanError",
+    "assess_bgr_image_quality",
+    "assess_image_file_quality",
     "list_image_files",
     "scan_image_file",
+    "scan_image_file_with_quality",
     "scan_image_input",
 ]

@@ -234,6 +234,67 @@ def test_scan_perspective_distorted_image_roundtrip(tmp_path: Path) -> None:
     assert restored == sox1
 
 
+def test_scan_bad_image_report_includes_capture_quality_and_retake_suggestion(tmp_path: Path) -> None:
+    _require_qr_backend()
+    image_module = pytest.importorskip("PIL.Image")
+    photos_dir = tmp_path / "bad_photos"
+    photos_dir.mkdir()
+    image_module.new("RGB", (640, 640), "white").save(photos_dir / "blank_overexposed.jpg", quality=90)
+
+    payloads, meta = image_scan.scan_image_input(photos_dir)
+
+    assert payloads == []
+    assert meta["image_count"] == 1
+    assert meta["payload_count"] == 0
+    bad_image = meta["bad_images"][0]
+    quality = bad_image["quality"]
+    assert bad_image["path"] == "blank_overexposed.jpg"
+    assert bad_image["reason"] == "qr_not_found_or_not_sox1qr"
+    assert quality["schema"] == image_scan.IMAGE_QUALITY_SCHEMA
+    assert quality["blur"]["status"] == "critical"
+    assert quality["exposure"]["status"] == "overexposed"
+    assert quality["score"] < 50
+    assert "QR border" in bad_image["suggestion"]
+    assert "glare/overexposure" in bad_image["suggestion"]
+
+
+def test_cli_scan_bad_image_writes_quality_guidance(tmp_path: Path) -> None:
+    _require_qr_backend()
+    image_module = pytest.importorskip("PIL.Image")
+    photos_dir = tmp_path / "bad_cli_photos"
+    recovered_path = tmp_path / "recovered.sox1"
+    work_dir = tmp_path / "scan_work"
+    photos_dir.mkdir()
+    image_module.new("RGB", (640, 640), "white").save(photos_dir / "blank.jpg", quality=90)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "scan",
+            "--image-input",
+            str(photos_dir),
+            "--out-string",
+            str(recovered_path),
+            "--work-dir",
+            str(work_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 20
+    assert not recovered_path.exists()
+    report = json.loads((work_dir / "scan_report.json").read_text(encoding="utf-8"))
+    assert report["success"] is False
+    assert report["reason"] == "no_valid_qr_chunks"
+    assert report["bad_images"][0]["quality"]["schema"] == image_scan.IMAGE_QUALITY_SCHEMA
+    assert report["bad_images"][0]["quality"]["exposure"]["status"] == "overexposed"
+    assert "glare/overexposure" in report["bad_images"][0]["suggestion"]
+
+
 
 def test_render_multi_qr_repeated_layout_manifest_and_scan(tmp_path: Path) -> None:
     _require_qr_backend()

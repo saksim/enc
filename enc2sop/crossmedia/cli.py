@@ -551,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--input-string-file", help="SOX1 string file path.")
     render_parser.add_argument("--output-dir", required=True, help="Output directory for pages.")
     render_parser.add_argument("--mode", choices=["qr"], default="qr", help="Visual transport mode.")
-    render_parser.add_argument("--chunk-chars", type=int, default=700, help="SOX1 chars per QR chunk.")
+    render_parser.add_argument("--chunk-chars", type=int, default=qr_transport.DEFAULT_CHUNK_CHARS, help="SOX1 chars per QR chunk.")
     render_parser.add_argument(
         "--qrs-per-page",
         type=int,

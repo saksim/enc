@@ -24,7 +24,7 @@ QR_MAGIC = "SOX1QR"
 QR_SCHEMA = "enc2sop-cross-media-qr/v1"
 SCAN_REPORT_SCHEMA = "enc2sop-cross-media-scan-report/v1"
 QR_VERSION = "1"
-DEFAULT_CHUNK_CHARS = 700
+DEFAULT_CHUNK_CHARS = 500
 MIN_CHUNK_CHARS = 200
 MAX_CHUNK_CHARS = 1200
 MAX_QR_CHUNKS = 500
@@ -399,7 +399,13 @@ def _load_cv2():
 
 def render_qr_payload_image(payload: str, *, min_size_px: int = DEFAULT_QR_MIN_SIZE_PX, border_modules: int = DEFAULT_QR_BORDER_MODULES):
     cv2 = _load_cv2()
-    encoder = cv2.QRCodeEncoder_create()
+    if hasattr(cv2, "QRCodeEncoder_Params"):
+        params = cv2.QRCodeEncoder_Params()
+        if hasattr(params, "correction_level") and hasattr(cv2, "QRCodeEncoder_CORRECT_LEVEL_M"):
+            params.correction_level = cv2.QRCodeEncoder_CORRECT_LEVEL_M
+        encoder = cv2.QRCodeEncoder_create(params)
+    else:
+        encoder = cv2.QRCodeEncoder_create()
     image = encoder.encode(payload)
     image = cv2.copyMakeBorder(image, border_modules, border_modules, border_modules, border_modules, cv2.BORDER_CONSTANT, value=255)
     module_size = max(1, int(math.ceil(float(min_size_px) / float(min(image.shape[:2])))))
