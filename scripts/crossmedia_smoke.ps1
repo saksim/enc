@@ -1,7 +1,12 @@
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path -LiteralPath '.').Path
-$work = Join-Path $root '.tmp_crossmedia_smoke'
+if ($env:SOENC_CM_SMOKE_WORK) {
+    $work = $env:SOENC_CM_SMOKE_WORK
+} else {
+    $suffix = "{0}_{1}" -f ([DateTime]::UtcNow.ToString('yyyyMMddHHmmss')), ([System.Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $work = Join-Path $root ".tmp_crossmedia_smoke_$suffix"
+}
 
 function Assert-LastExitCode {
     param(
@@ -12,27 +17,37 @@ function Assert-LastExitCode {
     }
 }
 
-function Assert-WorkspaceChild {
+function Assert-AllowedChild {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Root
+        [Parameter(Mandatory = $true)][string[]]$Roots
     )
     $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
-    $rootWithSep = $Root
-    if (-not $rootWithSep.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
-        $rootWithSep = $rootWithSep + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($allowedRoot in $Roots) {
+        $rootWithSep = $allowedRoot
+        if (-not $rootWithSep.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+            $rootWithSep = $rootWithSep + [System.IO.Path]::DirectorySeparatorChar
+        }
+        if ($resolvedPath.StartsWith($rootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $resolvedPath
+        }
     }
-    if (-not $resolvedPath.StartsWith($rootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "refuse to operate outside workspace: $resolvedPath"
-    }
-    return $resolvedPath
+    throw "refuse to operate outside allowed smoke roots: $resolvedPath"
 }
 
-if (Test-Path -LiteralPath $work) {
-    $resolvedWork = Assert-WorkspaceChild -Path $work -Root $root
-    Remove-Item -LiteralPath $resolvedWork -Recurse -Force
+$allowedRoots = @($root)
+
+if ($env:SOENC_CM_SMOKE_WORK -and (Test-Path -LiteralPath $work)) {
+    $resolvedWork = Assert-AllowedChild -Path $work -Roots $allowedRoots
+    try {
+        Remove-Item -LiteralPath $resolvedWork -Recurse -Force
+    } catch {
+        $suffix = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+        $work = Join-Path $root ".tmp_crossmedia_smoke_$suffix"
+        Write-Warning "Could not clean previous smoke directory; using $work. Cause: $($_.Exception.Message)"
+    }
 }
-New-Item -ItemType Directory -Path $work | Out-Null
+New-Item -ItemType Directory -Path $work -Force | Out-Null
 
 $keyFile = Join-Path $work 'key.bin'
 $plainFile = Join-Path $work 'plain.txt'

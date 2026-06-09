@@ -17,6 +17,7 @@ from . import crypto_envelope
 from . import image_scan
 from . import key_material
 from . import qr_transport
+from . import volume_transport
 
 SEND_REPORT_SCHEMA = "enc2sop-cross-media-send-report/v1"
 DECRYPT_REPORT_SCHEMA = "enc2sop-cross-media-decrypt-report/v1"
@@ -115,6 +116,36 @@ def _run_keygen_public(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_volume_encrypt(args: argparse.Namespace) -> int:
+    key = key_material.load_key_file(Path(args.key_file))
+    manifest = volume_transport.encrypt_file_to_volumes(
+        input_path=Path(args.input),
+        output_dir=Path(args.output_dir),
+        key=key,
+        volume_bytes=int(args.volume_bytes),
+    )
+    output_dir = Path(args.output_dir)
+    print("output_dir={0}".format(output_dir))
+    print("manifest={0}".format(output_dir / volume_transport.VOLUME_MANIFEST_NAME))
+    print("volumes={0}".format(manifest.get("volume_count")))
+    print("input_sha256={0}".format(manifest.get("plaintext_sha256")))
+    return 0
+
+
+def _run_volume_decrypt(args: argparse.Namespace) -> int:
+    key = key_material.load_key_file(Path(args.key_file))
+    report = volume_transport.decrypt_volumes_to_file(
+        input_dir=Path(args.input_dir),
+        output_path=Path(args.output),
+        key=key,
+    )
+    print("output={0}".format(report.get("output")))
+    print("output_size={0}".format(report.get("output_size")))
+    print("output_sha256={0}".format(report.get("output_sha256")))
+    print("volumes={0}".format(report.get("volume_count")))
+    return 0
+
+
 def _run_encrypt(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     plaintext = input_path.read_bytes()
@@ -163,11 +194,18 @@ def _run_render(args: argparse.Namespace) -> int:
         input_string_file=Path(args.input_string_file) if args.input_string_file else None,
     )
     output_dir = Path(args.output_dir)
-    manifest = qr_transport.render_qr_pages(sox1, output_dir, chunk_chars=int(args.chunk_chars))
+    manifest = qr_transport.render_qr_pages(
+        sox1,
+        output_dir,
+        chunk_chars=int(args.chunk_chars),
+        qrs_per_page=int(args.qrs_per_page),
+        repeat_copies=int(args.repeat_copies),
+    )
     print("output_dir={0}".format(output_dir))
     print("pages_dir={0}".format(output_dir / "pages"))
     print("artifact_id={0}".format(manifest.get("artifact_id")))
     print("chunks_total={0}".format(manifest.get("chunks_total")))
+    print("page_count={0}".format(manifest.get("page_count")))
     return 0
 
 
@@ -291,7 +329,13 @@ def _run_send(args: argparse.Namespace) -> int:
         stale_payload = output_dir / "payload.sox1"
         if stale_payload.exists() and stale_payload.is_file():
             stale_payload.unlink()
-    manifest = qr_transport.render_qr_pages(sox1, output_dir, chunk_chars=qr_transport.DEFAULT_CHUNK_CHARS)
+    manifest = qr_transport.render_qr_pages(
+        sox1,
+        output_dir,
+        chunk_chars=int(args.chunk_chars),
+        qrs_per_page=int(args.qrs_per_page),
+        repeat_copies=int(args.repeat_copies),
+    )
     report = {
         "schema": SEND_REPORT_SCHEMA,
         "success": True,
@@ -299,7 +343,12 @@ def _run_send(args: argparse.Namespace) -> int:
         "input_size": len(plaintext),
         "input_sha256": input_sha256,
         "artifact_id": manifest.get("artifact_id"),
-        "pages": manifest.get("chunks_total"),
+        "pages": manifest.get("page_count"),
+        "chunks_total": manifest.get("chunks_total"),
+        "transmissions_total": manifest.get("transmissions_total"),
+        "qrs_per_page": manifest.get("qrs_per_page"),
+        "repeat_copies": manifest.get("repeat_copies"),
+        "chunk_chars": manifest.get("chunk_chars"),
         "mode": args.mode,
         "output_dir": str(output_dir),
         "pages_dir": str(output_dir / "pages"),
@@ -313,6 +362,7 @@ def _run_send(args: argparse.Namespace) -> int:
     print("send_report={0}".format(report_path))
     print("artifact_id={0}".format(report.get("artifact_id")))
     print("pages={0}".format(report.get("pages")))
+    print("chunks_total={0}".format(report.get("chunks_total")))
     print("input_sha256={0}".format(input_sha256))
     return 0
 
@@ -483,12 +533,38 @@ def build_parser() -> argparse.ArgumentParser:
     decrypt_parser.add_argument("--output", required=True, help="Output plaintext file.")
     decrypt_parser.set_defaults(handler=_run_decrypt)
 
+    volume_encrypt_parser = subparsers.add_parser("volume-encrypt", help="Split a large file into independent SOX1 volumes (P1-S2).")
+    volume_encrypt_parser.add_argument("--input", required=True, help="Input file to split and encrypt.")
+    volume_encrypt_parser.add_argument("--key-file", required=True, help="32-byte key file for all volumes.")
+    volume_encrypt_parser.add_argument("--output-dir", required=True, help="Output directory for volume_XXXX.sox1 files and group_manifest.json.")
+    volume_encrypt_parser.add_argument("--volume-bytes", type=int, default=volume_transport.DEFAULT_VOLUME_BYTES, help="Plaintext bytes per SOX1 volume.")
+    volume_encrypt_parser.set_defaults(handler=_run_volume_encrypt)
+
+    volume_decrypt_parser = subparsers.add_parser("volume-decrypt", help="Restore a large file from a SOX1 volume group (P1-S2).")
+    volume_decrypt_parser.add_argument("--input-dir", required=True, help="Directory containing group_manifest.json and volume_XXXX.sox1 files.")
+    volume_decrypt_parser.add_argument("--key-file", required=True, help="32-byte key file for all volumes.")
+    volume_decrypt_parser.add_argument("--output", required=True, help="Output restored file.")
+    volume_decrypt_parser.set_defaults(handler=_run_volume_decrypt)
+
     render_parser = subparsers.add_parser("render", help="Render a SOX1 string into QR pages (P0-S2).")
     render_parser.add_argument("--input-string", help="SOX1 string literal or file path.")
     render_parser.add_argument("--input-string-file", help="SOX1 string file path.")
     render_parser.add_argument("--output-dir", required=True, help="Output directory for pages.")
     render_parser.add_argument("--mode", choices=["qr"], default="qr", help="Visual transport mode.")
     render_parser.add_argument("--chunk-chars", type=int, default=700, help="SOX1 chars per QR chunk.")
+    render_parser.add_argument(
+        "--qrs-per-page",
+        type=int,
+        default=qr_transport.DEFAULT_QRS_PER_PAGE,
+        choices=sorted(qr_transport.SUPPORTED_QRS_PER_PAGE),
+        help="QR codes per rendered page for P1-S3 dense layout.",
+    )
+    render_parser.add_argument(
+        "--repeat-copies",
+        type=int,
+        default=qr_transport.DEFAULT_REPEAT_COPIES,
+        help="Repeat every chunk this many times across pages for P1-S3 loss tolerance.",
+    )
     render_parser.set_defaults(handler=_run_render)
 
     scan_parser = subparsers.add_parser("scan", help="Scan QR photos back into a SOX1 string (P0-S2).")
@@ -504,6 +580,20 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--passphrase", action="store_true", help="Read passphrase without putting it in shell history.")
     send_parser.add_argument("--output-dir", required=True, help="Output send package directory.")
     send_parser.add_argument("--mode", choices=["qr"], default="qr", help="Visual transport mode.")
+    send_parser.add_argument("--chunk-chars", type=int, default=qr_transport.DEFAULT_CHUNK_CHARS, help="SOX1 chars per QR chunk.")
+    send_parser.add_argument(
+        "--qrs-per-page",
+        type=int,
+        default=qr_transport.DEFAULT_QRS_PER_PAGE,
+        choices=sorted(qr_transport.SUPPORTED_QRS_PER_PAGE),
+        help="QR codes per rendered page for P1-S3 dense layout.",
+    )
+    send_parser.add_argument(
+        "--repeat-copies",
+        type=int,
+        default=qr_transport.DEFAULT_REPEAT_COPIES,
+        help="Repeat every chunk this many times across pages for P1-S3 loss tolerance.",
+    )
     send_parser.add_argument("--no-debug-sox1", action="store_true", help="Do not persist payload.sox1 debug output.")
     send_parser.set_defaults(handler=_run_send)
 
@@ -541,6 +631,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 30
     except qr_transport.QrTransportError as exc:
         print("cross-media QR transport error: {0}".format(exc), file=sys.stderr)
+        return 21
+    except volume_transport.VolumeTransportError as exc:
+        print("cross-media volume error: {0}".format(exc), file=sys.stderr)
         return 21
     except OSError as exc:
         print("cross-media file error: {0}".format(exc), file=sys.stderr)

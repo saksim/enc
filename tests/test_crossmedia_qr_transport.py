@@ -183,6 +183,139 @@ def test_scan_rotated_image_roundtrip(tmp_path: Path) -> None:
     assert restored == sox1
 
 
+def test_scan_perspective_distorted_image_roundtrip(tmp_path: Path) -> None:
+    _require_qr_backend()
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    sox1 = _sample_sox1(b"perspective corrected qr image roundtrip")
+    output_dir = tmp_path / "pages_pkg"
+    photos_dir = tmp_path / "perspective"
+    photos_dir.mkdir()
+    qr_transport.render_qr_pages(sox1, output_dir, chunk_chars=700)
+    for page in sorted((output_dir / "pages").glob("*.png")):
+        image = cv2.imread(str(page), cv2.IMREAD_COLOR)
+        height, width = image.shape[:2]
+        canvas_width = int(round(width * 1.25))
+        canvas_height = int(round(height * 1.20))
+        source = np.float32(
+            [
+                [0, 0],
+                [width - 1, 0],
+                [width - 1, height - 1],
+                [0, height - 1],
+            ]
+        )
+        target = np.float32(
+            [
+                [canvas_width * 0.09, canvas_height * 0.04],
+                [canvas_width * 0.92, canvas_height * 0.10],
+                [canvas_width * 0.85, canvas_height * 0.96],
+                [canvas_width * 0.14, canvas_height * 0.90],
+            ]
+        )
+        matrix = cv2.getPerspectiveTransform(source, target)
+        distorted = cv2.warpPerspective(
+            image,
+            matrix,
+            (canvas_width, canvas_height),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(96, 96, 96),
+        )
+        cv2.imwrite(str(photos_dir / page.name), distorted)
+
+    payloads, meta = image_scan.scan_image_input(photos_dir)
+    restored, _report = qr_transport.reassemble_chunks(
+        payloads,
+        image_count=int(meta["image_count"]),
+        bad_images=meta["bad_images"],
+    )
+
+    assert restored == sox1
+
+
+
+def test_render_multi_qr_repeated_layout_manifest_and_scan(tmp_path: Path) -> None:
+    _require_qr_backend()
+    sox1 = _sample_sox1((b"multi qr repeated layout" * 12) + bytes(range(128)))
+    output_dir = tmp_path / "multi_pages_pkg"
+
+    manifest = qr_transport.render_qr_pages(
+        sox1,
+        output_dir,
+        chunk_chars=200,
+        qrs_per_page=6,
+        repeat_copies=3,
+    )
+    payloads, meta = image_scan.scan_image_input(output_dir / "pages")
+    restored, report = qr_transport.reassemble_chunks(
+        payloads,
+        image_count=int(meta["image_count"]),
+        bad_images=meta["bad_images"],
+    )
+
+    assert restored == sox1
+    assert report["success"] is True
+    assert report["duplicates"] >= manifest["chunks_total"]
+    assert manifest["qrs_per_page"] == 6
+    assert manifest["repeat_copies"] == 3
+    assert manifest["transmissions_total"] == manifest["chunks_total"] * 3
+    assert manifest["page_count"] < manifest["transmissions_total"]
+    assert len(list((output_dir / "pages").glob("page_*.png"))) == manifest["page_count"]
+    assert all("items" in page for page in manifest["pages"])
+
+
+def test_cli_render_multi_qr_repeated_layout_roundtrip(tmp_path: Path) -> None:
+    _require_qr_backend()
+    sox1_path = tmp_path / "payload.sox1"
+    pages_dir = tmp_path / "rendered_multi"
+    recovered_path = tmp_path / "recovered.sox1"
+    work_dir = tmp_path / "scan_work"
+    sox1 = _sample_sox1((b"cli multi qr" * 12) + bytes(range(64)))
+    sox1_path.write_text(sox1 + "\n", encoding="utf-8")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "render",
+            "--input-string-file",
+            str(sox1_path),
+            "--output-dir",
+            str(pages_dir),
+            "--chunk-chars",
+            "200",
+            "--qrs-per-page",
+            "6",
+            "--repeat-copies",
+            "3",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "scan",
+            "--image-input",
+            str(pages_dir / "pages"),
+            "--out-string",
+            str(recovered_path),
+            "--work-dir",
+            str(work_dir),
+        ],
+        check=True,
+    )
+
+    manifest = json.loads((pages_dir / "manifest.json").read_text(encoding="utf-8"))
+    report = json.loads((work_dir / "scan_report.json").read_text(encoding="utf-8"))
+    assert recovered_path.read_text(encoding="utf-8").strip() == sox1
+    assert manifest["page_count"] < manifest["transmissions_total"]
+    assert report["success"] is True
+    assert report["duplicates"] >= manifest["chunks_total"]
+
 def test_cli_render_scan_roundtrip(tmp_path: Path) -> None:
     _require_qr_backend()
     sox1_path = tmp_path / "payload.sox1"

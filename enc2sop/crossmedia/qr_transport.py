@@ -28,7 +28,12 @@ DEFAULT_CHUNK_CHARS = 700
 MIN_CHUNK_CHARS = 200
 MAX_CHUNK_CHARS = 1200
 MAX_QR_CHUNKS = 500
+DEFAULT_QRS_PER_PAGE = 1
+SUPPORTED_QRS_PER_PAGE = {1, 4, 6, 8}
+DEFAULT_REPEAT_COPIES = 1
+MAX_REPEAT_COPIES = 4
 DEFAULT_QR_MIN_SIZE_PX = 900
+MULTI_QR_MIN_SIZE_PX = 640
 DEFAULT_QR_BORDER_MODULES = 4
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -59,6 +64,18 @@ class QrChunk:
         return self.chunk_index + 1
 
 
+@dataclass(frozen=True)
+class QrPagePlacement:
+    page_number: int
+    slot_index: int
+    copy_index: int
+    chunk: QrChunk
+
+    @property
+    def retake_id(self) -> int:
+        return self.chunk.chunk_index + 1
+
+
 def sox1_sha256(sox1: str) -> str:
     return transport_protocol.sha256_hex(str(sox1).encode("ascii"))
 
@@ -74,6 +91,37 @@ def _validate_chunk_chars(chunk_chars: int) -> int:
             "chunk_chars must be between {0} and {1}".format(MIN_CHUNK_CHARS, MAX_CHUNK_CHARS)
         )
     return value
+
+
+def _validate_qrs_per_page(qrs_per_page: int) -> int:
+    value = int(qrs_per_page)
+    if value not in SUPPORTED_QRS_PER_PAGE:
+        raise QrTransportError(
+            "qrs_per_page must be one of {0}".format(
+                ",".join(str(item) for item in sorted(SUPPORTED_QRS_PER_PAGE))
+            )
+        )
+    return value
+
+
+def _validate_repeat_copies(repeat_copies: int) -> int:
+    value = int(repeat_copies)
+    if value < 1 or value > MAX_REPEAT_COPIES:
+        raise QrTransportError(
+            "repeat_copies must be between 1 and {0}".format(MAX_REPEAT_COPIES)
+        )
+    return value
+
+
+def _grid_for_qrs_per_page(qrs_per_page: int) -> Tuple[int, int]:
+    value = _validate_qrs_per_page(qrs_per_page)
+    if value == 1:
+        return 1, 1
+    if value == 4:
+        return 2, 2
+    if value == 6:
+        return 3, 2
+    return 4, 2
 
 
 def split_sox1_string(sox1: str, *, chunk_chars: int = DEFAULT_CHUNK_CHARS) -> List[QrChunk]:
@@ -359,17 +407,167 @@ def render_qr_payload_image(payload: str, *, min_size_px: int = DEFAULT_QR_MIN_S
     return image
 
 
+def _placements_for_pages(
+    chunks: Sequence[QrChunk],
+    *,
+    qrs_per_page: int,
+    repeat_copies: int,
+) -> List[QrPagePlacement]:
+    per_page = _validate_qrs_per_page(qrs_per_page)
+    copies = _validate_repeat_copies(repeat_copies)
+    placements: List[QrPagePlacement] = []
+    transmission_index = 0
+    for copy_index in range(copies):
+        chunk_count = len(chunks)
+        if chunk_count <= 0:
+            break
+        if copy_index % 2 == 0:
+            ordered_chunks = list(chunks)
+        else:
+            ordered_chunks = list(reversed(chunks))
+        offset = (copy_index * max(1, per_page // 2)) % chunk_count
+        ordered_chunks = ordered_chunks[offset:] + ordered_chunks[:offset]
+        for chunk in ordered_chunks:
+            placements.append(
+                QrPagePlacement(
+                    page_number=(transmission_index // per_page) + 1,
+                    slot_index=transmission_index % per_page,
+                    copy_index=copy_index,
+                    chunk=chunk,
+                )
+            )
+            transmission_index += 1
+    return placements
+
+
+def _qr_min_size_for_layout(qrs_per_page: int) -> int:
+    if int(qrs_per_page) == 1:
+        return DEFAULT_QR_MIN_SIZE_PX
+    return MULTI_QR_MIN_SIZE_PX
+
+
+def _pil_font(size: int):
+    try:
+        from PIL import ImageFont
+    except Exception:  # pragma: no cover
+        return None
+    for font_name in ("arial.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(font_name, int(size))
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _render_qr_page_image(
+    placements: Sequence[QrPagePlacement],
+    *,
+    artifact_id: str,
+    page_number: int,
+    page_count: int,
+    chunk_total: int,
+    qrs_per_page: int,
+    repeat_copies: int,
+):
+    cv2 = _load_cv2()
+    from PIL import Image, ImageDraw
+
+    rows, cols = _grid_for_qrs_per_page(qrs_per_page)
+    qr_size = _qr_min_size_for_layout(qrs_per_page)
+    rendered_items = []
+    for placement in placements:
+        payload = encode_qr_payload(placement.chunk)
+        qr = render_qr_payload_image(payload, min_size_px=qr_size)
+        qr_rgb = cv2.cvtColor(qr, cv2.COLOR_GRAY2RGB)
+        rendered_items.append((placement, Image.fromarray(qr_rgb)))
+
+    sample_width = rendered_items[0][1].width if rendered_items else qr_size
+    sample_height = rendered_items[0][1].height if rendered_items else qr_size
+    margin = 48
+    cell_gap = 34
+    cell_pad = 22
+    label_height = 54
+    header_height = 170
+    footer_height = 118
+    cell_width = sample_width + (cell_pad * 2)
+    cell_height = sample_height + label_height + (cell_pad * 2)
+    page_width = margin * 2 + cols * cell_width + (cols - 1) * cell_gap
+    page_height = header_height + rows * cell_height + (rows - 1) * cell_gap + footer_height
+    page = Image.new("RGB", (page_width, page_height), "white")
+    draw = ImageDraw.Draw(page)
+    title_font = _pil_font(36)
+    body_font = _pil_font(24)
+    small_font = _pil_font(20)
+    title = "SOX1QR {0} page {1} / {2}".format(artifact_id, page_number, page_count)
+    subtitle = "chunks={0} | qrs/page={1} | repeat copies={2}".format(
+        chunk_total,
+        qrs_per_page,
+        repeat_copies,
+    )
+    hint = "Keep all QR borders visible; avoid glare; one photo per physical page."
+    draw.text((margin, 30), title, fill="black", font=title_font)
+    draw.text((margin, 86), subtitle, fill="black", font=body_font)
+    draw.text((margin, 122), hint, fill="black", font=small_font)
+
+    by_slot = {placement.slot_index: (placement, image) for placement, image in rendered_items}
+    for slot_index in range(rows * cols):
+        row = slot_index // cols
+        col = slot_index % cols
+        x0 = margin + col * (cell_width + cell_gap)
+        y0 = header_height + row * (cell_height + cell_gap)
+        draw.rectangle((x0, y0, x0 + cell_width, y0 + cell_height), outline=(205, 205, 205), width=2)
+        item = by_slot.get(slot_index)
+        if item is None:
+            draw.text((x0 + cell_pad, y0 + cell_pad), "empty slot", fill=(120, 120, 120), font=small_font)
+            continue
+        placement, qr_image = item
+        label = "retake ID {0} | chunk {1}/{2} | copy {3}/{4}".format(
+            placement.retake_id,
+            placement.chunk.chunk_index + 1,
+            placement.chunk.chunk_total,
+            placement.copy_index + 1,
+            repeat_copies,
+        )
+        draw.text((x0 + cell_pad, y0 + cell_pad), label, fill="black", font=small_font)
+        qr_x = x0 + (cell_width - qr_image.width) // 2
+        qr_y = y0 + cell_pad + label_height
+        page.paste(qr_image, (qr_x, qr_y))
+
+    retake_ids = sorted({placement.retake_id for placement in placements})
+    footer = "Retake IDs on this page: {0}".format(",".join(str(item) for item in retake_ids))
+    footer_y = header_height + rows * cell_height + (rows - 1) * cell_gap + 30
+    draw.text((margin, footer_y), footer, fill="black", font=body_font)
+    draw.text(
+        (margin, footer_y + 40),
+        "If scan reports missing chunk/retake ID X, recapture a page containing X.",
+        fill="black",
+        font=small_font,
+    )
+    return page
+
+
 def write_json_atomic(path: Path, payload: Dict[str, object]) -> Path:
     return write_text_atomic(Path(path), json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
-def render_qr_pages(sox1: str, output_dir: Path, *, chunk_chars: int = DEFAULT_CHUNK_CHARS) -> Dict[str, object]:
-    cv2 = _load_cv2()
+def render_qr_pages(
+    sox1: str,
+    output_dir: Path,
+    *,
+    chunk_chars: int = DEFAULT_CHUNK_CHARS,
+    qrs_per_page: int = DEFAULT_QRS_PER_PAGE,
+    repeat_copies: int = DEFAULT_REPEAT_COPIES,
+) -> Dict[str, object]:
+    _load_cv2()
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        import PIL  # noqa: F401
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("Pillow is required to render titled QR pages") from exc
     chunks = split_sox1_string(sox1, chunk_chars=chunk_chars)
+    per_page = _validate_qrs_per_page(qrs_per_page)
+    copies = _validate_repeat_copies(repeat_copies)
+    placements = _placements_for_pages(chunks, qrs_per_page=per_page, repeat_copies=copies)
+    page_count = int(math.ceil(len(placements) / float(per_page)))
     output = Path(output_dir)
     pages_dir = output / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -377,38 +575,45 @@ def render_qr_pages(sox1: str, output_dir: Path, *, chunk_chars: int = DEFAULT_C
         if old_page.is_file():
             old_page.unlink()
     page_records = []
-    for chunk in chunks:
-        payload = encode_qr_payload(chunk)
-        qr = render_qr_payload_image(payload)
-        qr_rgb = cv2.cvtColor(qr, cv2.COLOR_GRAY2RGB)
-        qr_image = Image.fromarray(qr_rgb)
-        margin = 48
-        header_height = 150
-        footer_height = 90
-        page = Image.new("RGB", (qr_image.width + margin * 2, qr_image.height + header_height + footer_height), "white")
-        draw = ImageDraw.Draw(page)
-        try:
-            title_font = ImageFont.truetype("arial.ttf", 36)
-            body_font = ImageFont.truetype("arial.ttf", 24)
-        except Exception:
-            title_font = ImageFont.load_default()
-            body_font = ImageFont.load_default()
-        title = "SOX1QR {0} page {1} / {2}".format(chunk.artifact_id, chunk.page_number, chunk.chunk_total)
-        hint = "Keep full border visible, avoid glare, capture one page at a time."
-        draw.text((margin, 34), title, fill="black", font=title_font)
-        draw.text((margin, 92), hint, fill="black", font=body_font)
-        page.paste(qr_image, (margin, header_height))
-        draw.text((margin, header_height + qr_image.height + 28), "Retake page {0} if scan reports missing chunk {1}.".format(chunk.page_number, chunk.chunk_index), fill="black", font=body_font)
-        page_path = pages_dir / "page_{0:04d}.png".format(chunk.page_number)
-        page.save(str(page_path), format="PNG")
-        page_records.append(
-            {
-                "page": chunk.page_number,
-                "chunk_index": chunk.chunk_index,
-                "payload_crc16": chunk.crc16,
-                "path": str(page_path.relative_to(output)),
-            }
+    for page_number in range(1, page_count + 1):
+        page_placements = [placement for placement in placements if placement.page_number == page_number]
+        page = _render_qr_page_image(
+            page_placements,
+            artifact_id=chunks[0].artifact_id,
+            page_number=page_number,
+            page_count=page_count,
+            chunk_total=len(chunks),
+            qrs_per_page=per_page,
+            repeat_copies=copies,
         )
+        page_path = pages_dir / "page_{0:04d}.png".format(page_number)
+        page.save(str(page_path), format="PNG")
+        items = [
+            {
+                "slot": placement.slot_index,
+                "copy": placement.copy_index + 1,
+                "chunk_index": placement.chunk.chunk_index,
+                "retake_id": placement.retake_id,
+                "payload_crc16": placement.chunk.crc16,
+            }
+            for placement in page_placements
+        ]
+        page_record = {
+            "page": page_number,
+            "path": str(page_path.relative_to(output)),
+            "qrs": len(page_placements),
+            "retake_ids": sorted({placement.retake_id for placement in page_placements}),
+            "items": items,
+        }
+        if len(page_placements) == 1:
+            only = page_placements[0]
+            page_record.update(
+                {
+                    "chunk_index": only.chunk.chunk_index,
+                    "payload_crc16": only.chunk.crc16,
+                }
+            )
+        page_records.append(page_record)
     manifest = {
         "schema": QR_SCHEMA,
         "version": 1,
@@ -416,7 +621,11 @@ def render_qr_pages(sox1: str, output_dir: Path, *, chunk_chars: int = DEFAULT_C
         "string_sha256": sox1_sha256(sox1),
         "string_sha16": chunks[0].string_sha16,
         "chunk_chars": int(chunk_chars),
+        "qrs_per_page": per_page,
+        "repeat_copies": copies,
         "chunks_total": len(chunks),
+        "transmissions_total": len(placements),
+        "page_count": page_count,
         "pages": page_records,
         "recovery_requires_manifest": False,
     }
@@ -425,6 +634,8 @@ def render_qr_pages(sox1: str, output_dir: Path, *, chunk_chars: int = DEFAULT_C
         output / "instructions.md",
         "# SOX1QR Capture Instructions\n\n"
         "- Capture each page fully.\n"
+        "- A page may contain multiple QR codes; keep every QR quiet zone inside the photo.\n"
+        "- Repeated copies are intentional and improve recovery after lost/blurred pages.\n"
         "- Avoid glare, motion blur, and cropped QR borders.\n"
         "- Recovery does not require this manifest; photos are self-contained.\n",
     )
@@ -433,14 +644,19 @@ def render_qr_pages(sox1: str, output_dir: Path, *, chunk_chars: int = DEFAULT_C
 
 __all__ = [
     "DEFAULT_CHUNK_CHARS",
+    "DEFAULT_QRS_PER_PAGE",
+    "DEFAULT_REPEAT_COPIES",
     "IMAGE_SUFFIXES",
     "MAX_CHUNK_CHARS",
     "MAX_QR_CHUNKS",
+    "MAX_REPEAT_COPIES",
     "MIN_CHUNK_CHARS",
+    "MULTI_QR_MIN_SIZE_PX",
     "QR_MAGIC",
     "QR_SCHEMA",
     "QR_VERSION",
     "QrChunk",
+    "QrPagePlacement",
     "QrPayloadError",
     "QrReassemblyError",
     "QrTransportError",

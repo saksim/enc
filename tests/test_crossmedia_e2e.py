@@ -146,6 +146,68 @@ def test_cm_send_no_debug_sox1_omits_payload_file(tmp_path: Path) -> None:
     assert list((send_dir / "pages").glob("page_*.png"))
 
 
+def test_cm_send_multi_qr_repeated_layout_reduces_pages_and_receives(tmp_path: Path) -> None:
+    _require_qr_backend()
+    key_path = tmp_path / "key.bin"
+    plain_path = tmp_path / "secret.bin"
+    send_dir = tmp_path / "send_multi"
+    receive_dir = tmp_path / "receive_multi"
+    restored_path = tmp_path / "restored.bin"
+    key_path.write_bytes(KEY)
+    plain = (b"multi qr repeated e2e" * 12) + bytes(range(256))
+    plain_path.write_bytes(plain)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "send",
+            "--input",
+            str(plain_path),
+            "--key-file",
+            str(key_path),
+            "--output-dir",
+            str(send_dir),
+            "--chunk-chars",
+            "200",
+            "--qrs-per-page",
+            "6",
+            "--repeat-copies",
+            "3",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "soenc.py",
+            "cm",
+            "receive",
+            "--image-input",
+            str(send_dir / "pages"),
+            "--key-file",
+            str(key_path),
+            "--output",
+            str(restored_path),
+            "--work-dir",
+            str(receive_dir),
+        ],
+        check=True,
+    )
+
+    assert restored_path.read_bytes() == plain
+    send_report = json.loads((send_dir / "send_report.json").read_text(encoding="utf-8"))
+    manifest = json.loads((send_dir / "manifest.json").read_text(encoding="utf-8"))
+    scan_report = json.loads((receive_dir / "scan_report.json").read_text(encoding="utf-8"))
+    assert send_report["qrs_per_page"] == 6
+    assert send_report["repeat_copies"] == 3
+    assert send_report["pages"] == manifest["page_count"]
+    assert manifest["page_count"] < manifest["transmissions_total"]
+    assert scan_report["success"] is True
+    assert scan_report["duplicates"] >= manifest["chunks_total"]
+
+
 def test_cm_receive_wrong_key_fails_and_writes_decrypt_report(tmp_path: Path) -> None:
     _require_qr_backend()
     key_path = tmp_path / "key.bin"

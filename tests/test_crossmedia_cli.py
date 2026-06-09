@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import builtins
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,12 +28,21 @@ class CrossMediaCliTests(unittest.TestCase):
     def test_crossmedia_parser_help_lists_documented_commands(self) -> None:
         parser = crossmedia_cli.build_parser()
         help_text = parser.format_help()
+        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        render_help = subparsers.choices["render"].format_help()
+        send_help = subparsers.choices["send"].format_help()
 
         self.assertIn("keygen", help_text)
         self.assertIn("keygen-public", help_text)
         self.assertIn("encrypt", help_text)
         self.assertIn("decrypt", help_text)
+        self.assertIn("volume-encrypt", help_text)
+        self.assertIn("volume-decrypt", help_text)
         self.assertIn("render", help_text)
+        self.assertIn("--qrs-per-page", render_help)
+        self.assertIn("--repeat-copies", render_help)
+        self.assertIn("--qrs-per-page", send_help)
+        self.assertIn("--repeat-copies", send_help)
         self.assertIn("scan", help_text)
         self.assertIn("send", help_text)
         self.assertIn("receive", help_text)
