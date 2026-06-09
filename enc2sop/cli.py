@@ -6,15 +6,24 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 from typing import Optional
 from typing import Sequence
 
 from enc2sop import plugin_registry
-from soenc_config import SoencProjectConfig
-from soenc_config import load_project_config
-from toolchain_profile import DEFAULT_BUILD_PROFILE
-from toolchain_profile import SUPPORTED_BUILD_PROFILES
-from toolchain_profile import resolve_python_executable
+
+
+# P0-B1 lazy-import boundary:
+# - `cm` and legacy `transport` help must not import the Code Protection Layer.
+# - Keep encryption_helper / decryption_helper / py2_linux_rec_opera / Cython /
+#   native build helpers behind protect/build/package/verify/release handlers.
+# - Keep build-profile choices as a tiny local CLI constant so parser creation
+#   for `transport --help` does not import toolchain_profile.
+BUILD_PROFILE_CHOICES = (
+    "auto",
+    "windows-msvc",
+    "native",
+)
 
 
 _LAZY_COMPAT_MODULES = {
@@ -42,6 +51,24 @@ def _load_encryption_helper():
     return encryption_helper
 
 
+def _load_project_config(path: Optional[str]) -> Optional[Any]:
+    from soenc_config import load_project_config
+
+    return load_project_config(config_path=path, base_dir=Path.cwd())
+
+
+def _resolve_python_executable(value: Optional[str]) -> Path:
+    from toolchain_profile import resolve_python_executable
+
+    return resolve_python_executable(value)
+
+
+def _default_build_profile() -> str:
+    from toolchain_profile import DEFAULT_BUILD_PROFILE
+
+    return DEFAULT_BUILD_PROFILE
+
+
 def _add_tristate_flag(parser, name: str, enable_help: str, disable_help: str) -> None:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--{0}".format(name), dest=name.replace("-", "_"), action="store_true", help=enable_help)
@@ -61,17 +88,13 @@ def _option_present(argv: Sequence[str], option_name: str) -> bool:
     return False
 
 
-def _load_project_config(path: Optional[str]) -> Optional[SoencProjectConfig]:
-    return load_project_config(config_path=path, base_dir=Path.cwd())
-
-
-def _project_default(project_config: Optional[SoencProjectConfig], field: str):
+def _project_default(project_config: Optional[Any], field: str):
     if project_config is None:
         return None
     return project_config.cli_defaults.get(field)
 
 
-def _resolve_staging_dir(args, project_config: Optional[SoencProjectConfig]) -> Path:
+def _resolve_staging_dir(args, project_config: Optional[Any]) -> Path:
     encryption_helper = _load_encryption_helper()
     staging_value = args.staging_dir or _project_default(project_config, "output_dir")
     if not staging_value:
@@ -91,7 +114,7 @@ def _resolve_build_dir(args, staging_dir: Path) -> Path:
     return build_dir
 
 
-def _resolve_manifest_sign_key(args, project_config: Optional[SoencProjectConfig]):
+def _resolve_manifest_sign_key(args, project_config: Optional[Any]):
     encryption_helper = _load_encryption_helper()
     key_file_text = args.manifest_sign_key_file or _project_default(project_config, "manifest_sign_key_file")
     key_file = encryption_helper.normalize_path(key_file_text) if key_file_text else None
@@ -99,14 +122,14 @@ def _resolve_manifest_sign_key(args, project_config: Optional[SoencProjectConfig
     return encryption_helper._load_manifest_sign_key(key_file=key_file, key_b64=key_b64)
 
 
-def _resolve_require_manifest_signature(args, project_config: Optional[SoencProjectConfig]) -> bool:
+def _resolve_require_manifest_signature(args, project_config: Optional[Any]) -> bool:
     if args.require_manifest_signature is not None:
         return bool(args.require_manifest_signature)
     config_value = _project_default(project_config, "require_manifest_signature")
     return bool(config_value) if config_value is not None else False
 
 
-def _resolve_require_release_approval(args, project_config: Optional[SoencProjectConfig]) -> bool:
+def _resolve_require_release_approval(args, project_config: Optional[Any]) -> bool:
     if args.require_release_approval is not None:
         return bool(args.require_release_approval)
     config_value = _project_default(project_config, "require_release_approval")
@@ -132,12 +155,12 @@ def _run_build(args) -> int:
     encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
-    build_profile = args.build_profile or _project_default(project_config, "build_profile") or DEFAULT_BUILD_PROFILE
+    build_profile = args.build_profile or _project_default(project_config, "build_profile") or _default_build_profile()
     vcvars_text = args.vcvars_path or _project_default(project_config, "vcvars_path")
     vcvars_path = encryption_helper.normalize_path(vcvars_text) if vcvars_text else None
     # Explicit CLI override must win over config defaults to avoid venv/system interpreter drift.
     python_exe_text = args.python_exe if args.python_exe is not None else _project_default(project_config, "python_exe")
-    python_exe = resolve_python_executable(python_exe_text)
+    python_exe = _resolve_python_executable(python_exe_text)
     if not python_exe.exists():
         raise FileNotFoundError("python executable not found: {0}".format(python_exe))
     manifest_sign_key = _resolve_manifest_sign_key(args, project_config)
@@ -505,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--python-exe", help="Python interpreter used for batch compile.")
     build_parser.add_argument(
         "--build-profile",
-        choices=SUPPORTED_BUILD_PROFILES,
+        choices=BUILD_PROFILE_CHOICES,
         help="Build profile used for native compile.",
     )
     build_parser.add_argument("--vcvars-path", help="Optional explicit vcvars64.bat path for windows-msvc profile.")

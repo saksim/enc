@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Batch compile a Python tree into .pyd/.so files with Cython."""
+"""Batch compile a Python tree into .pyd/.so files with Cython.
+
+V0.3 Code Protection Layer boundary:
+  - This utility owns native packaging of an already protected staging tree into
+    .so/.pyd artifacts.
+  - It is not part of SOX1, QR, OCR, scan_report, or retake_plan flows.
+  - Missing Cython/native build tooling must not prevent `soenc cm` or legacy
+    `soenc transport` help/startup from working.
+"""
 
 import os
 import shutil

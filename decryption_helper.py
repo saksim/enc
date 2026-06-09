@@ -4,6 +4,14 @@
 
 This file is intentionally small. The build tool copies an equivalent runtime
 into a randomized .pyx file and compiles it into a native extension.
+
+V0.3 Code Protection Layer boundary:
+  - This runtime owns protected-module payload decryption, compile/exec
+    injection, license-file lookup, and runtime integrity checks.
+  - It is not an OCR/QR scanner and is not part of SOX1 cross-media recovery.
+  - It must remain decoupled from `soenc cm receive`; possession of this runtime
+    never substitutes for keeping key-file/passphrase/private-key material out
+    of images, manifests, reports, logs, and dist artifacts.
 """
 
 import base64

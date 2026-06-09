@@ -4,6 +4,15 @@
 
 New workflow:
   original .py -> encrypted .py staging tree -> batch Cython -> .pyd/.so
+
+V0.3 Code Protection Layer boundary:
+  - This module owns source selection, snippet encryption, protected staging
+    generation, build manifests, and release/package integrity helpers.
+  - It is intentionally separate from cross-media SOX1/QR transport; `soenc cm`
+    and legacy `soenc transport` must not import this module for help/startup.
+  - Cython/native packaging raises reverse-engineering cost only. It does not
+    replace SOX1 data encryption and must not be documented as absolute
+    protection against strong reverse engineering.
 """
 
 import argparse
@@ -2458,4 +2467,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

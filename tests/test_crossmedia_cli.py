@@ -17,6 +17,10 @@ from enc2sop.crossmedia import cli as crossmedia_cli
 
 _HEAVY_MODULES = {
     "encryption_helper",
+    "decryption_helper",
+    "py2_linux_rec_opera",
+    "toolchain_profile",
+    "soenc_config",
     "enc2sop.promotion_artifacts",
     "enc2sop.promotion_audit",
     "enc2sop.promotion_bundle",
@@ -76,6 +80,31 @@ class CrossMediaCliTests(unittest.TestCase):
 
         self.assertEqual(exc_info.exception.code, 0)
         self.assertNotIn("encryption_helper", imported)
+        self.assertNotIn("decryption_helper", imported)
+        self.assertNotIn("py2_linux_rec_opera", imported)
+        self.assertNotIn("toolchain_profile", imported)
+        self.assertNotIn("soenc_config", imported)
+
+    def test_soenc_transport_help_is_decoupled_from_code_protection_layer(self) -> None:
+        real_import = builtins.__import__
+        imported = []
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in _HEAVY_MODULES:
+                raise AssertionError("heavy module imported during transport help: {0}".format(name))
+            imported.append(name)
+            return real_import(name, globals, locals, fromlist, level)
+
+        with mock.patch("builtins.__import__", side_effect=guarded_import):
+            with self.assertRaises(SystemExit) as exc_info:
+                soenc_cli.main(["transport", "--help"])
+
+        self.assertEqual(exc_info.exception.code, 0)
+        self.assertNotIn("encryption_helper", imported)
+        self.assertNotIn("decryption_helper", imported)
+        self.assertNotIn("py2_linux_rec_opera", imported)
+        self.assertNotIn("toolchain_profile", imported)
+        self.assertNotIn("soenc_config", imported)
 
     def test_soenc_cm_without_args_prints_crossmedia_help(self) -> None:
         exit_code = soenc_cli.main(["cm"])
