@@ -40,6 +40,10 @@ class SoencConfigTests(unittest.TestCase):
                         "require_manifest_signature = true",
                         "license_file = \"licenses/customer.license.json\"",
                         "license_id = \"customer-a\"",
+                        "bundle_license = true",
+                        "license_machine_fingerprint = \"machine-a\"",
+                        "license_sign_key_file = \"./keys/license.key\"",
+                        "license_sign_key_id = \"lic-signer\"",
                         "kms_profile = \"prod\"",
                         "kms_endpoint = \"https://kms.example.local/v1\"",
                         "kms_key_id = \"team-main\"",
@@ -122,6 +126,10 @@ class SoencConfigTests(unittest.TestCase):
                         "require_manifest_signature = true",
                         "license_file = \"licenses/customer.license.json\"",
                         "license_id = \"customer-a\"",
+                        "bundle_license = true",
+                        "license_machine_fingerprint = \"machine-a\"",
+                        "license_sign_key_file = \"./keys/license.key\"",
+                        "license_sign_key_id = \"lic-signer\"",
                         "kms_profile = \"prod\"",
                         "kms_endpoint = \"https://kms.example.local/v1\"",
                         "kms_key_id = \"team-main\"",
@@ -161,6 +169,13 @@ class SoencConfigTests(unittest.TestCase):
             self.assertTrue(project.cli_defaults["require_manifest_signature"])
             self.assertEqual(project.cli_defaults["license_file"], "licenses/customer.license.json")
             self.assertEqual(project.cli_defaults["license_id"], "customer-a")
+            self.assertTrue(project.cli_defaults["bundle_license"])
+            self.assertEqual(project.cli_defaults["license_machine_fingerprint"], "machine-a")
+            self.assertEqual(
+                project.cli_defaults["license_sign_key_file"],
+                str((root / "keys" / "license.key").resolve()),
+            )
+            self.assertEqual(project.cli_defaults["license_sign_key_id"], "lic-signer")
             self.assertEqual(project.cli_defaults["kms_profile"], "prod")
             self.assertEqual(project.cli_defaults["kms_endpoint"], "https://kms.example.local/v1")
             self.assertEqual(project.cli_defaults["kms_key_id"], "team-main")

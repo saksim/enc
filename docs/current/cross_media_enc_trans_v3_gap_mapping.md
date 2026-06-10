@@ -1,8 +1,8 @@
 # Cross-media V0.3 gap mapping
 
 > Source blueprint: `docs/current/cross_media_enc_trans_imple_guide_v3.md`  
-> Mapping date: 2026-06-09  
-> Current pass update: P0-B2 smoke script and blocked-state evidence.  
+> Mapping date: 2026-06-10  
+> Current pass update: P0-B5 license-file externalization.  
 > Explicitly out of scope: QR/OCR/SOX1 behavior changes and release/promotion/evidence expansion.
 
 ## 1. Current state summary
@@ -19,9 +19,9 @@ bytes
 ```
 
 The V0.3 blueprint is still valid, but its phase order must be interpreted
-against the current codebase: most P0-A items are already implemented, while the
-next unfinished area is the Code Protection Layer registration and dependency
-boundary.
+against the current codebase: most P0-A items are already implemented, and the
+remaining hard gaps are now concentrated in strict native-build proof plus
+license/runtime hardening under P0-B.
 
 ## 2. V0.3 phase mapping
 
@@ -37,9 +37,9 @@ boundary.
 | P0-B0 Code Protection Layer registration | `encryption_helper.py`, `decryption_helper.py`, `py2_linux_rec_opera.py` now have explicit V0.3 Code Protection Layer boundary comments. | Done | Keep responsibilities documented separately from QR/OCR/SOX1. |
 | P0-B1 protect/build and cm/transport decoupling | `cm` and `transport` help paths stay decoupled from code-protection heavy imports; covered by CLI regression tests. | Done | Keep config/toolchain imports behind protect/build handlers. |
 | P0-B2 code-protection smoke | `scripts/smoke_code_protection.py` now creates `demo_module.py`, runs `soenc.py protect`, probes native deps, runs `soenc.py build` when possible, then imports native artifacts from a clean directory. | Script added; strict native proof currently blocked on this host | Fix native build environment (`setuptools`/`backports.tarfile` conflict and missing `Cython`) or run on a prepared native-build host. |
-| P0-B3 dist no-source-leakage | Not part of current requested scope. | Pending | Future pass only. |
-| P0-B4 local-embedded insecure marker | Not part of current requested scope. | Pending | Future pass only. |
-| P0-B5 license-file externalization | Existing runtime supports license-file concepts; full policy hardening is not in current scope. | Pending | Future pass only. |
+| P0-B3 dist no-source-leakage | `enc2sop/protect/dist_check.py`, `scripts/check_dist_no_source_leak.py`, and `copy_release` now reject `.py` source leaks, generated `.c/.pyx`, temp build/cache dirs, and forbidden source/secret tokens. | Done | Keep default allow-list limited to `__init__.py`; add explicit `--allow-py` only for known bootstrap files. |
+| P0-B4 local-embedded insecure marker | `encryption_helper.py` now requires `--dev-insecure-ok` for local-embedded, emits a warning, and marks manifests as `local-embedded-dev-insecure` while preserving runtime provider compatibility. | Done | Do not use this mode for strong secrecy; keep license/remote modes separate. |
+| P0-B5 license-file externalization | `license-file` now defaults to external runtime delivery via `SOENC_LICENSE_FILE`; `copy_release` does not place license JSON in `dist_native` unless `--bundle-license` is explicit, and bundled delivery emits an insecure warning. Optional machine binding, HMAC license signing, and revocation-list checks are wired into the license runtime path. | Done | Keep default externalized; use `--bundle-license` only for explicit demo/lab bundles. |
 | P0-B6 runtime integrity smoke | Existing runtime/build manifests have integrity concepts; dedicated smoke is not in current scope. | Pending | Future pass only. |
 
 ## 3. P0-B0 Code Protection Layer registration
@@ -127,9 +127,70 @@ After the native build environment is available, rerun:
 python scripts/smoke_code_protection.py
 ```
 
-Only after strict P0-B2 passes should the next implementation target be:
+With P0-B3/B4/B5 now implemented, the remaining P0-B items are:
 
 ```text
-P0-B3: dist no-source-leakage
-P0-B4: local-embedded explicit insecure marker
+P0-B2 strict native proof: still blocked by local native-build dependencies
+P0-B6: runtime integrity smoke
+```
+
+## 7. P0-B3/B4 current pass evidence
+
+Implemented P0-B3:
+
+```text
+enc2sop/protect/dist_check.py
+scripts/check_dist_no_source_leak.py
+copy_release(...) fail-closed hook after release bundle metadata is written
+```
+
+Implemented P0-B4:
+
+```text
+keys.mode=local-embedded requires --dev-insecure-ok
+manifest key_management.mode = local-embedded-dev-insecure
+manifest key_management.provider_mode = local-embedded
+stderr warning explains dev/demo/anti-casual boundary
+```
+
+This pass still does not modify QR/OCR/SOX1 behavior and does not implement
+remote-kms or promotion/evidence platform expansion.
+
+## 8. P0-B5 current pass evidence
+
+Implemented P0-B5:
+
+```text
+enc2sop/keys/license.py
+  license_path_policy defaults to env-only
+  runtime_env = SOENC_LICENSE_FILE
+  optional machine binding = SOENC_MACHINE_FINGERPRINT
+  optional HMAC signature verification = SOENC_LICENSE_VERIFY_KEY_B64
+  optional revocation list = SOENC_LICENSE_REVOCATION_FILE
+
+decryption_helper.py
+  env-only license lookup fails closed when SOENC_LICENSE_FILE is absent
+  bundled-relative fallback is only allowed when key_ref records that policy
+  signed, machine-bound, and revoked licenses fail closed at runtime
+
+encryption_helper.py / enc2sop/cli.py
+  package/copy_release defaults to externalized license sidecar
+  --bundle-license is explicit and emits an insecure warning
+  release bundle metadata distinguishes external vs bundled license delivery
+```
+
+Validation executed:
+
+```text
+python -m pytest tests/test_key_provider.py tests/test_soenc_config.py tests/test_soenc_cli.py tests/test_encryption_helper.py -q
+95 passed, 6 skipped
+```
+
+Scope check:
+
+```text
+QR/OCR/SOX1 main path unchanged.
+Release/promotion/evidence surfaces were not expanded; existing package/receipt
+license-sidecar validation was narrowed to represent externalized license
+delivery correctly.
 ```

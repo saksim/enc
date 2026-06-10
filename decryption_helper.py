@@ -16,6 +16,7 @@ V0.3 Code Protection Layer boundary:
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -28,8 +29,14 @@ from Crypto.Cipher import AES
 
 Payload = Tuple[str, str, str]
 LICENSE_FILE_ENV = "SOENC_LICENSE_FILE"
+LICENSE_MACHINE_FINGERPRINT_ENV = "SOENC_MACHINE_FINGERPRINT"
+LICENSE_REVOCATION_FILE_ENV = "SOENC_LICENSE_REVOCATION_FILE"
+LICENSE_VERIFY_KEY_ENV = "SOENC_LICENSE_VERIFY_KEY_B64"
 LICENSE_SCHEMA = "enc2sop-license/v1"
 LICENSE_VERSION = 1
+LICENSE_PATH_POLICY_ENV_ONLY = "env-only"
+LICENSE_PATH_POLICY_BUNDLED_RELATIVE = "bundled-relative"
+LICENSE_SIGNATURE_ALGORITHM = "hmac-sha256"
 REMOTE_KMS_MODE = "remote-kms"
 SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 SOENC_RUNTIME_API_VERSION = 1
@@ -68,10 +75,29 @@ def _decode_license_key(key_b64) -> bytes:
     return key
 
 
+def _decode_license_verify_key(key_b64) -> bytes:
+    if not isinstance(key_b64, str) or not key_b64.strip():
+        raise ValueError("{0} is required for signed license verification".format(LICENSE_VERIFY_KEY_ENV))
+    try:
+        key = base64.b64decode(key_b64, validate=True)
+    except Exception as exc:
+        raise ValueError("{0} is not valid base64".format(LICENSE_VERIFY_KEY_ENV)) from exc
+    key = key.strip()
+    if len(key) < 16:
+        raise ValueError("license verify key must be at least 16 bytes")
+    return key
+
+
 def _resolve_license_path(key_ref) -> Path:
     env_override = os.environ.get(LICENSE_FILE_ENV, "").strip()
     if env_override:
         return Path(env_override).expanduser().resolve()
+
+    path_policy = str(key_ref.get("license_path_policy") or LICENSE_PATH_POLICY_ENV_ONLY).strip().lower()
+    if path_policy == LICENSE_PATH_POLICY_ENV_ONLY:
+        raise ValueError("{0} is required for license-file key mode".format(LICENSE_FILE_ENV))
+    if path_policy != LICENSE_PATH_POLICY_BUNDLED_RELATIVE:
+        raise ValueError("unsupported license path policy: {0}".format(path_policy or "<empty>"))
 
     license_file = str(key_ref.get("license_file") or "").strip().replace("\\", "/")
     if not license_file:
@@ -88,6 +114,68 @@ def _resolve_license_path(key_ref) -> Path:
         if candidate.exists():
             return candidate
     raise ValueError("license file not found: {0}".format(license_file))
+
+
+def _verify_license_signature(payload) -> None:
+    signature = payload.get("signature")
+    if not isinstance(signature, dict):
+        raise ValueError("license signature missing")
+    if signature.get("algorithm") != LICENSE_SIGNATURE_ALGORITHM:
+        raise ValueError("unsupported license signature algorithm")
+    digest_hex = signature.get("digest_hex")
+    if not isinstance(digest_hex, str) or not digest_hex:
+        raise ValueError("license signature digest missing")
+    signing_payload = dict(payload)
+    signing_payload.pop("signature", None)
+    key = _decode_license_verify_key(os.environ.get(LICENSE_VERIFY_KEY_ENV, ""))
+    expected = hmac.new(key, _canonical_json_bytes(signing_payload), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, digest_hex):
+        raise ValueError("license signature mismatch")
+
+
+def _license_revocation_ids(payload):
+    revocation_path = os.environ.get(LICENSE_REVOCATION_FILE_ENV, "").strip()
+    if not revocation_path:
+        return set()
+    try:
+        data = json.loads(Path(revocation_path).expanduser().read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError("failed to parse license revocation file: {0}".format(revocation_path)) from exc
+    if isinstance(data, list):
+        return {str(item).strip() for item in data if str(item).strip()}
+    if isinstance(data, dict):
+        ids = data.get("revoked_license_ids", data.get("revoked"))
+        if isinstance(ids, list):
+            return {str(item).strip() for item in ids if str(item).strip()}
+    raise ValueError("license revocation file must be a JSON list or object with revoked_license_ids")
+
+
+def _validate_license_status(payload) -> None:
+    status = str(payload.get("status") or "active").strip().lower()
+    if payload.get("revoked") is True or status == "revoked":
+        raise ValueError("license has been revoked")
+    if status not in ("active",):
+        raise ValueError("unsupported license status: {0}".format(status or "<empty>"))
+    license_id = str(payload.get("license_id") or "").strip()
+    if license_id and license_id in _license_revocation_ids(payload):
+        raise ValueError("license has been revoked")
+
+
+def _validate_machine_binding(payload) -> None:
+    binding = payload.get("machine_binding")
+    if not isinstance(binding, dict) or not binding.get("required"):
+        return
+    if binding.get("algorithm") != "sha256-exact-env-v1":
+        raise ValueError("unsupported license machine binding algorithm")
+    expected = str(binding.get("fingerprint_sha256") or "").strip().lower()
+    if not expected:
+        raise ValueError("license machine fingerprint digest missing")
+    observed = os.environ.get(str(binding.get("env") or LICENSE_MACHINE_FINGERPRINT_ENV), "").strip()
+    if not observed:
+        raise ValueError("{0} is required by this license".format(binding.get("env") or LICENSE_MACHINE_FINGERPRINT_ENV))
+    actual = hashlib.sha256(observed.encode("utf-8")).hexdigest()
+    if actual != expected:
+        raise ValueError("license machine fingerprint mismatch")
 
 
 def _load_license_payload(key_ref):
@@ -131,9 +219,18 @@ def _license_key_from_ref(key_ref) -> bytes:
         raise ValueError("license integrity digest missing")
     unsigned = dict(payload)
     unsigned.pop("integrity", None)
+    unsigned.pop("signature", None)
     expected = hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
     if expected != digest_hex:
         raise ValueError("license integrity mismatch")
+
+    signature_policy = key_ref.get("license_signature")
+    signature_required = bool(signature_policy.get("required")) if isinstance(signature_policy, dict) else False
+    if signature_required or (payload.get("signature") is not None and os.environ.get(LICENSE_VERIFY_KEY_ENV, "").strip()):
+        _verify_license_signature(payload)
+
+    _validate_license_status(payload)
+    _validate_machine_binding(payload)
 
     keys = payload.get("keys")
     if not isinstance(keys, dict):
@@ -206,14 +303,21 @@ def runtime_pyx_source() -> str:
     return '''# cython: language_level=3, binding=False, embedsignature=False
 import base64 as _b
 import hashlib as _h
+import hmac as _hm
 import json as _jso
 import os as _os
 from pathlib import Path as _P
 from Crypto.Cipher import AES as _A
 
 _ENV = "SOENC_LICENSE_FILE"
+_MENV = "SOENC_MACHINE_FINGERPRINT"
+_RENV = "SOENC_LICENSE_REVOCATION_FILE"
+_VENV = "SOENC_LICENSE_VERIFY_KEY_B64"
 _SCHEMA = "enc2sop-license/v1"
 _VER = 1
+_POLICY_ENV = "env-only"
+_POLICY_BUNDLED = "bundled-relative"
+_SIG_ALGO = "hmac-sha256"
 _KMS_MODE = "remote-kms"
 SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 SOENC_RUNTIME_API_VERSION = 1
@@ -250,10 +354,91 @@ def _dk(_key_b64):
     return _key
 
 
+def _dv(_key_b64):
+    if not isinstance(_key_b64, str) or not _key_b64.strip():
+        raise ValueError("{0} is required for signed license verification".format(_VENV))
+    try:
+        _key = _b.b64decode(_key_b64, validate=True)
+    except Exception as _exc:
+        raise ValueError("{0} is not valid base64".format(_VENV)) from _exc
+    _key = _key.strip()
+    if len(_key) < 16:
+        raise ValueError("license verify key must be at least 16 bytes")
+    return _key
+
+
+def _vs(_payload):
+    _sig = _payload.get("signature")
+    if not isinstance(_sig, dict):
+        raise ValueError("license signature missing")
+    if _sig.get("algorithm") != _SIG_ALGO:
+        raise ValueError("unsupported license signature algorithm")
+    _digest = _sig.get("digest_hex")
+    if not isinstance(_digest, str) or not _digest:
+        raise ValueError("license signature digest missing")
+    _unsigned = dict(_payload)
+    _unsigned.pop("signature", None)
+    _key = _dv(_os.environ.get(_VENV, ""))
+    _expected = _hm.new(_key, _c(_unsigned), _h.sha256).hexdigest()
+    if not _hm.compare_digest(_expected, _digest):
+        raise ValueError("license signature mismatch")
+
+
+def _rev(_payload):
+    _path = _os.environ.get(_RENV, "").strip()
+    if not _path:
+        return set()
+    try:
+        _data = _jso.loads(_P(_path).expanduser().read_text(encoding="utf-8"))
+    except Exception as _exc:
+        raise ValueError("failed to parse license revocation file: {0}".format(_path)) from _exc
+    if isinstance(_data, list):
+        return {str(_item).strip() for _item in _data if str(_item).strip()}
+    if isinstance(_data, dict):
+        _ids = _data.get("revoked_license_ids", _data.get("revoked"))
+        if isinstance(_ids, list):
+            return {str(_item).strip() for _item in _ids if str(_item).strip()}
+    raise ValueError("license revocation file must be a JSON list or object with revoked_license_ids")
+
+
+def _vl(_payload):
+    _status = str(_payload.get("status") or "active").strip().lower()
+    if _payload.get("revoked") is True or _status == "revoked":
+        raise ValueError("license has been revoked")
+    if _status not in ("active",):
+        raise ValueError("unsupported license status: {0}".format(_status or "<empty>"))
+    _lic = str(_payload.get("license_id") or "").strip()
+    if _lic and _lic in _rev(_payload):
+        raise ValueError("license has been revoked")
+
+
+def _vm(_payload):
+    _binding = _payload.get("machine_binding")
+    if not isinstance(_binding, dict) or not _binding.get("required"):
+        return
+    if _binding.get("algorithm") != "sha256-exact-env-v1":
+        raise ValueError("unsupported license machine binding algorithm")
+    _expected = str(_binding.get("fingerprint_sha256") or "").strip().lower()
+    if not _expected:
+        raise ValueError("license machine fingerprint digest missing")
+    _env = str(_binding.get("env") or _MENV)
+    _observed = _os.environ.get(_env, "").strip()
+    if not _observed:
+        raise ValueError("{0} is required by this license".format(_env))
+    _actual = _h.sha256(_observed.encode("utf-8")).hexdigest()
+    if _actual != _expected:
+        raise ValueError("license machine fingerprint mismatch")
+
+
 def _lp(_key_ref):
     _env = _os.environ.get(_ENV, "").strip()
     if _env:
         return _P(_env).expanduser().resolve()
+    _policy = str(_key_ref.get("license_path_policy") or _POLICY_ENV).strip().lower()
+    if _policy == _POLICY_ENV:
+        raise ValueError("{0} is required for license-file key mode".format(_ENV))
+    if _policy != _POLICY_BUNDLED:
+        raise ValueError("unsupported license path policy: {0}".format(_policy or "<empty>"))
     _license_file = str(_key_ref.get("license_file") or "").strip().replace("\\\\", "/")
     if not _license_file:
         raise ValueError("license-file key_ref missing license_file")
@@ -304,9 +489,16 @@ def _lk(_key_ref):
         raise ValueError("license integrity digest missing")
     _unsigned = dict(_payload)
     _unsigned.pop("integrity", None)
+    _unsigned.pop("signature", None)
     _expected = _h.sha256(_c(_unsigned)).hexdigest()
     if _expected != _digest_hex:
         raise ValueError("license integrity mismatch")
+    _sig_policy = _key_ref.get("license_signature")
+    _sig_required = bool(_sig_policy.get("required")) if isinstance(_sig_policy, dict) else False
+    if _sig_required or (_payload.get("signature") is not None and _os.environ.get(_VENV, "").strip()):
+        _vs(_payload)
+    _vl(_payload)
+    _vm(_payload)
     _keys = _payload.get("keys")
     if not isinstance(_keys, dict):
         raise ValueError("license keys missing")
@@ -377,14 +569,21 @@ def runtime_py_source() -> str:
 # -*- coding: utf-8 -*-
 import base64 as _b
 import hashlib as _h
+import hmac as _hm
 import json as _jso
 import os as _os
 from pathlib import Path as _P
 from Crypto.Cipher import AES as _A
 
 _ENV = "SOENC_LICENSE_FILE"
+_MENV = "SOENC_MACHINE_FINGERPRINT"
+_RENV = "SOENC_LICENSE_REVOCATION_FILE"
+_VENV = "SOENC_LICENSE_VERIFY_KEY_B64"
 _SCHEMA = "enc2sop-license/v1"
 _VER = 1
+_POLICY_ENV = "env-only"
+_POLICY_BUNDLED = "bundled-relative"
+_SIG_ALGO = "hmac-sha256"
 _KMS_MODE = "remote-kms"
 SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 SOENC_RUNTIME_API_VERSION = 1
@@ -421,10 +620,91 @@ def _dk(_key_b64):
     return _key
 
 
+def _dv(_key_b64):
+    if not isinstance(_key_b64, str) or not _key_b64.strip():
+        raise ValueError("{0} is required for signed license verification".format(_VENV))
+    try:
+        _key = _b.b64decode(_key_b64, validate=True)
+    except Exception as _exc:
+        raise ValueError("{0} is not valid base64".format(_VENV)) from _exc
+    _key = _key.strip()
+    if len(_key) < 16:
+        raise ValueError("license verify key must be at least 16 bytes")
+    return _key
+
+
+def _vs(_payload):
+    _sig = _payload.get("signature")
+    if not isinstance(_sig, dict):
+        raise ValueError("license signature missing")
+    if _sig.get("algorithm") != _SIG_ALGO:
+        raise ValueError("unsupported license signature algorithm")
+    _digest = _sig.get("digest_hex")
+    if not isinstance(_digest, str) or not _digest:
+        raise ValueError("license signature digest missing")
+    _unsigned = dict(_payload)
+    _unsigned.pop("signature", None)
+    _key = _dv(_os.environ.get(_VENV, ""))
+    _expected = _hm.new(_key, _c(_unsigned), _h.sha256).hexdigest()
+    if not _hm.compare_digest(_expected, _digest):
+        raise ValueError("license signature mismatch")
+
+
+def _rev(_payload):
+    _path = _os.environ.get(_RENV, "").strip()
+    if not _path:
+        return set()
+    try:
+        _data = _jso.loads(_P(_path).expanduser().read_text(encoding="utf-8"))
+    except Exception as _exc:
+        raise ValueError("failed to parse license revocation file: {0}".format(_path)) from _exc
+    if isinstance(_data, list):
+        return {str(_item).strip() for _item in _data if str(_item).strip()}
+    if isinstance(_data, dict):
+        _ids = _data.get("revoked_license_ids", _data.get("revoked"))
+        if isinstance(_ids, list):
+            return {str(_item).strip() for _item in _ids if str(_item).strip()}
+    raise ValueError("license revocation file must be a JSON list or object with revoked_license_ids")
+
+
+def _vl(_payload):
+    _status = str(_payload.get("status") or "active").strip().lower()
+    if _payload.get("revoked") is True or _status == "revoked":
+        raise ValueError("license has been revoked")
+    if _status not in ("active",):
+        raise ValueError("unsupported license status: {0}".format(_status or "<empty>"))
+    _lic = str(_payload.get("license_id") or "").strip()
+    if _lic and _lic in _rev(_payload):
+        raise ValueError("license has been revoked")
+
+
+def _vm(_payload):
+    _binding = _payload.get("machine_binding")
+    if not isinstance(_binding, dict) or not _binding.get("required"):
+        return
+    if _binding.get("algorithm") != "sha256-exact-env-v1":
+        raise ValueError("unsupported license machine binding algorithm")
+    _expected = str(_binding.get("fingerprint_sha256") or "").strip().lower()
+    if not _expected:
+        raise ValueError("license machine fingerprint digest missing")
+    _env = str(_binding.get("env") or _MENV)
+    _observed = _os.environ.get(_env, "").strip()
+    if not _observed:
+        raise ValueError("{0} is required by this license".format(_env))
+    _actual = _h.sha256(_observed.encode("utf-8")).hexdigest()
+    if _actual != _expected:
+        raise ValueError("license machine fingerprint mismatch")
+
+
 def _lp(_key_ref):
     _env = _os.environ.get(_ENV, "").strip()
     if _env:
         return _P(_env).expanduser().resolve()
+    _policy = str(_key_ref.get("license_path_policy") or _POLICY_ENV).strip().lower()
+    if _policy == _POLICY_ENV:
+        raise ValueError("{0} is required for license-file key mode".format(_ENV))
+    if _policy != _POLICY_BUNDLED:
+        raise ValueError("unsupported license path policy: {0}".format(_policy or "<empty>"))
     _license_file = str(_key_ref.get("license_file") or "").strip().replace("\\\\", "/")
     if not _license_file:
         raise ValueError("license-file key_ref missing license_file")
@@ -475,9 +755,16 @@ def _lk(_key_ref):
         raise ValueError("license integrity digest missing")
     _unsigned = dict(_payload)
     _unsigned.pop("integrity", None)
+    _unsigned.pop("signature", None)
     _expected = _h.sha256(_c(_unsigned)).hexdigest()
     if _expected != _digest_hex:
         raise ValueError("license integrity mismatch")
+    _sig_policy = _key_ref.get("license_signature")
+    _sig_required = bool(_sig_policy.get("required")) if isinstance(_sig_policy, dict) else False
+    if _sig_required or (_payload.get("signature") is not None and _os.environ.get(_VENV, "").strip()):
+        _vs(_payload)
+    _vl(_payload)
+    _vm(_payload)
     _keys = _payload.get("keys")
     if not isinstance(_keys, dict):
         raise ValueError("license keys missing")

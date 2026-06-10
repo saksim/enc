@@ -1,3 +1,5 @@
+import base64
+import os
 import unittest
 import json
 from pathlib import Path
@@ -10,6 +12,7 @@ from enc2sop.keys import get_key_provider
 from enc2sop.keys import unpack_local_embedded_key
 from enc2sop.keys.provider import KeyProvider
 from enc2sop.keys.provider import register_key_provider
+from decryption_helper import _license_key_from_ref
 
 
 class _UnitTestProvider(KeyProvider):
@@ -68,6 +71,83 @@ class KeyProviderTests(unittest.TestCase):
                 updated["key_management"]["license_file"],
                 "keys/runtime.license.json",
             )
+            self.assertEqual(updated["key_management"]["license_path_policy"], "env-only")
+            self.assertEqual(updated["key_management"]["runtime_env"], "SOENC_LICENSE_FILE")
+            self.assertEqual(key_ref["license_path_policy"], "env-only")
+
+    def test_license_file_runtime_requires_env_by_default(self):
+        provider = LicenseFileKeyProvider()
+        key = b"0123456789abcdef0123456789abcdef"
+        with TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            provider.begin_run({"license_file": "runtime.license.json", "license_id": "lic-env"})
+            key_ref = provider.pack_key(key)
+            provider.finalize_run(out_dir, {"key_management": {"mode": "license-file"}})
+
+            old_license = os.environ.pop("SOENC_LICENSE_FILE", None)
+            try:
+                with self.assertRaisesRegex(ValueError, "SOENC_LICENSE_FILE is required"):
+                    _license_key_from_ref(key_ref)
+                os.environ["SOENC_LICENSE_FILE"] = str(out_dir / "runtime.license.json")
+                self.assertEqual(_license_key_from_ref(key_ref), key)
+            finally:
+                if old_license is None:
+                    os.environ.pop("SOENC_LICENSE_FILE", None)
+                else:
+                    os.environ["SOENC_LICENSE_FILE"] = old_license
+
+    def test_license_file_provider_supports_binding_signature_and_revocation(self):
+        provider = LicenseFileKeyProvider()
+        key = b"0123456789abcdef0123456789abcdef"
+        sign_key = b"fedcba9876543210fedcba9876543210"
+        with TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            provider.begin_run(
+                {
+                    "license_file": "runtime.license.json",
+                    "license_id": "lic-bound",
+                    "license_machine_fingerprint": "machine-a",
+                    "license_sign_key": sign_key,
+                    "license_sign_key_id": "lic-signer",
+                }
+            )
+            key_ref = provider.pack_key(key)
+            provider.finalize_run(out_dir, {"key_management": {"mode": "license-file"}})
+            license_path = out_dir / "runtime.license.json"
+            revocation_path = out_dir / "revoked.json"
+
+            old_env = {
+                name: os.environ.get(name)
+                for name in (
+                    "SOENC_LICENSE_FILE",
+                    "SOENC_MACHINE_FINGERPRINT",
+                    "SOENC_LICENSE_VERIFY_KEY_B64",
+                    "SOENC_LICENSE_REVOCATION_FILE",
+                )
+            }
+            try:
+                os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+                os.environ["SOENC_MACHINE_FINGERPRINT"] = "wrong-machine"
+                os.environ["SOENC_LICENSE_VERIFY_KEY_B64"] = base64.b64encode(sign_key).decode("ascii")
+                with self.assertRaisesRegex(ValueError, "machine fingerprint mismatch"):
+                    _license_key_from_ref(key_ref)
+
+                os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-a"
+                self.assertEqual(_license_key_from_ref(key_ref), key)
+
+                revocation_path.write_text(
+                    json.dumps({"revoked_license_ids": ["lic-bound"]}),
+                    encoding="utf-8",
+                )
+                os.environ["SOENC_LICENSE_REVOCATION_FILE"] = str(revocation_path)
+                with self.assertRaisesRegex(ValueError, "license has been revoked"):
+                    _license_key_from_ref(key_ref)
+            finally:
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
 
     def test_remote_kms_provider_contract_and_manifest_metadata(self):
         provider = RemoteKmsKeyProvider()

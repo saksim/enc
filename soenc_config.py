@@ -223,6 +223,10 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
             "require_manifest_signature",
             "license_file",
             "license_id",
+            "bundle_license",
+            "license_machine_fingerprint",
+            "license_sign_key_file",
+            "license_sign_key_id",
             "kms_profile",
             "kms_endpoint",
             "kms_key_id",
@@ -250,6 +254,16 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
     )
     license_file = _optional_text(keys_table.get("license_file"), "keys.license_file")
     license_id = _optional_text(keys_table.get("license_id"), "keys.license_id")
+    bundle_license = _optional_bool(keys_table.get("bundle_license"), "keys.bundle_license")
+    license_machine_fingerprint = _optional_text(
+        keys_table.get("license_machine_fingerprint"),
+        "keys.license_machine_fingerprint",
+    )
+    license_sign_key_file = _resolve_path_text(
+        _optional_text(keys_table.get("license_sign_key_file"), "keys.license_sign_key_file"),
+        config_dir,
+    )
+    license_sign_key_id = _optional_text(keys_table.get("license_sign_key_id"), "keys.license_sign_key_id")
     kms_profile = _optional_text(keys_table.get("kms_profile"), "keys.kms_profile")
     kms_endpoint = _optional_text(keys_table.get("kms_endpoint"), "keys.kms_endpoint")
     kms_key_id = _optional_text(keys_table.get("kms_key_id"), "keys.kms_key_id")
@@ -280,6 +294,10 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
         "require_manifest_signature": require_manifest_signature,
         "license_file": license_file,
         "license_id": license_id,
+        "bundle_license": bundle_license,
+        "license_machine_fingerprint": license_machine_fingerprint,
+        "license_sign_key_file": license_sign_key_file,
+        "license_sign_key_id": license_sign_key_id,
         "kms_profile": kms_profile,
         "kms_endpoint": kms_endpoint,
         "kms_key_id": kms_key_id,
@@ -359,6 +377,10 @@ def load_project_config(
             "require_manifest_signature": keys.get("require_manifest_signature"),
             "license_file": keys.get("license_file"),
             "license_id": keys.get("license_id"),
+            "bundle_license": keys.get("bundle_license"),
+            "license_machine_fingerprint": keys.get("license_machine_fingerprint"),
+            "license_sign_key_file": keys.get("license_sign_key_file"),
+            "license_sign_key_id": keys.get("license_sign_key_id"),
             "kms_profile": keys.get("kms_profile"),
             "kms_endpoint": keys.get("kms_endpoint"),
             "kms_key_id": keys.get("kms_key_id"),

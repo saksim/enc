@@ -193,6 +193,9 @@ def _run_package(args) -> int:
     dist_dir = encryption_helper.normalize_path(dist_value)
     require_manifest_signature = _resolve_require_manifest_signature(args, project_config)
     package_metadata = project_config.package_metadata if project_config is not None else None
+    bundle_license = args.bundle_license
+    if bundle_license is None:
+        bundle_license = bool(_project_default(project_config, "bundle_license"))
 
     actual_dist_dir, copied_files = encryption_helper.copy_release(
         build_dir=build_dir,
@@ -200,6 +203,7 @@ def _run_package(args) -> int:
         staging_dir=staging_dir,
         package_metadata=package_metadata,
         require_manifest_signature=require_manifest_signature,
+        bundle_license=bool(bundle_license),
     )
     print("staging_dir={0}".format(staging_dir))
     print("build_dir={0}".format(build_dir))
@@ -561,6 +565,12 @@ def build_parser() -> argparse.ArgumentParser:
         "require-manifest-signature",
         "Require build_manifest.json to be signed before release packaging.",
         "Allow release packaging from unsigned manifest.",
+    )
+    _add_tristate_flag(
+        package_parser,
+        "bundle-license",
+        "Bundle license-file sidecar into dist output (insecure; emits warning).",
+        "Keep license-file sidecar external to dist output and require runtime SOENC_LICENSE_FILE.",
     )
     package_parser.set_defaults(handler=_run_package)
 

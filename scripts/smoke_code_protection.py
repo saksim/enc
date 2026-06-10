@@ -230,6 +230,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             str(staging_dir),
             "--namespace-root",
             "demo_pkg",
+            "--dev-insecure-ok",
         ],
         cwd=root,
         env=os.environ.copy(),

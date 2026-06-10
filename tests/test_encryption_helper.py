@@ -100,6 +100,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "--compile",
             "--python-exe",
             sys.executable,
+            "--dev-insecure-ok",
         ]
         if require_native_runtime_loader:
             argv.append("--runtime-native-loader")
@@ -527,6 +528,8 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "key_management": {
                 "mode": "license-file",
                 "license_file": "licenses/customer.license.json",
+                "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY,
+                "runtime_env": encryption_helper.LICENSE_FILE_ENV,
             },
             "config": {
                 "source": str((root / "soenc.toml").resolve()),
@@ -560,7 +563,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(out_dir, dist_dir.resolve())
         copied_rel = {str(path.relative_to(out_dir)).replace("\\", "/") for path in copied}
         self.assertIn("build_manifest.json", copied_rel)
-        self.assertIn("licenses/customer.license.json", copied_rel)
+        self.assertNotIn("licenses/customer.license.json", copied_rel)
         self.assertIn(encryption_helper.RELEASE_BUNDLE_FILENAME, copied_rel)
         self.assertIn("pkg/__init__.py", copied_rel)
         self.assertIn("pkg/mod.pyd", copied_rel)
@@ -575,10 +578,11 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertIn("pkg/mod.pyd", bundle.get("bundle_contents", {}).get("native_extension_files", []))
         self.assertIn("pkg/enc_rt_pkg_1234.pyd", bundle.get("bundle_contents", {}).get("runtime_compiled_files", []))
         self.assertIn("pkg/__init__.py", bundle.get("bundle_contents", {}).get("package_init_files", []))
-        self.assertEqual(
-            (bundle.get("bundle_contents", {}).get("license_file") or {}).get("relative_path"),
-            "licenses/customer.license.json",
-        )
+        license_payload = bundle.get("bundle_contents", {}).get("license_file") or {}
+        self.assertTrue(license_payload.get("externalized"))
+        self.assertFalse(license_payload.get("bundled"))
+        self.assertEqual(license_payload.get("source_relative_path"), "licenses/customer.license.json")
+        self.assertEqual(license_payload.get("runtime_env"), encryption_helper.LICENSE_FILE_ENV)
         self.assertEqual(
             bundle.get("runtime_integrity", {}).get("compiled_runtime_fingerprints", [{}])[0].get("digest_hex"),
             runtime_digest,
@@ -638,13 +642,10 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "key_management": {
                 "mode": "license-file",
                 "license_file": "licenses/customer.license.json",
+                "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY,
+                "runtime_env": encryption_helper.LICENSE_FILE_ENV,
             },
         }
-        (release_dir / "licenses").mkdir(parents=True, exist_ok=True)
-        (release_dir / "licenses" / "customer.license.json").write_text(
-            json.dumps({"schema": "enc2sop-license/v1"}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
         encryption_helper.write_manifest(
             release_dir,
             manifest_payload,
@@ -666,7 +667,11 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
                 "package_init_files": ["pkg/__init__.py"],
                 "license_file": {
-                    "relative_path": "licenses/customer.license.json",
+                    "delivery": "external",
+                    "externalized": True,
+                    "bundled": False,
+                    "source_relative_path": "licenses/customer.license.json",
+                    "runtime_env": encryption_helper.LICENSE_FILE_ENV,
                     "required_for_runtime": True,
                 },
             },
@@ -1384,6 +1389,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(output_dir),
                 "--scope-config",
                 str(scope_path),
+                "--dev-insecure-ok",
             ]
         )
 
@@ -1425,6 +1431,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(output_dir),
                 "--namespace-root",
                 "A",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1468,6 +1475,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "-o",
                 str(output_dir),
                 "--infer-namespace",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1506,6 +1514,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(project_root),
                 "-o",
                 str(output_dir),
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1534,6 +1543,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     "native",
                     "--vcvars-path",
                     str(fake_vcvars),
+                    "--dev-insecure-ok",
                 ]
             )
 
@@ -1551,6 +1561,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     "-o",
                     str(output_dir),
                     "--require-manifest-signature",
+                    "--dev-insecure-ok",
                 ]
             )
 
@@ -1572,6 +1583,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(key_file),
                 "--manifest-key-id",
                 "ops-signing",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1579,7 +1591,24 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertIn("signature", manifest)
         self.assertEqual(manifest["signature"]["key_id"], "ops-signing")
-        self.assertEqual(manifest["key_management"]["mode"], "local-embedded")
+        self.assertEqual(manifest["key_management"]["mode"], encryption_helper.LOCAL_EMBEDDED_DEV_INSECURE_MODE)
+        self.assertEqual(manifest["key_management"]["provider_mode"], "local-embedded")
+
+    def test_local_embedded_requires_explicit_dev_insecure_ok(self):
+        root = self.make_case_root("local_embedded_requires_dev_ok")
+        source = root / "main.py"
+        source.write_text("def ok():\n    return 1\n", encoding="utf-8")
+        output_dir = root / "out"
+
+        with self.assertRaisesRegex(ValueError, "requires --dev-insecure-ok"):
+            encryption_helper.main(
+                [
+                    "-t",
+                    str(source),
+                    "-o",
+                    str(output_dir),
+                ]
+            )
 
     def test_main_rejects_manifest_sign_key_source_conflict(self):
         root = self.make_case_root("manifest_sign_key_conflict")
@@ -1600,6 +1629,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     str(key_file),
                     "--manifest-sign-key-b64",
                     "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+                    "--dev-insecure-ok",
                 ]
             )
 
@@ -1667,7 +1697,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         cwd_before = Path.cwd()
         os.chdir(project_root)
         try:
-            exit_code = encryption_helper.main([])
+            exit_code = encryption_helper.main(["--dev-insecure-ok"])
         finally:
             os.chdir(cwd_before)
         self.assertEqual(exit_code, 0)
@@ -1675,8 +1705,10 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         output_dir = project_root / "build_out"
         manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["config"]["source"], str(cfg_path.resolve()))
-        self.assertEqual(manifest["config"]["key_mode"], "local-embedded")
-        self.assertEqual(manifest["key_management"]["mode"], "local-embedded")
+        self.assertEqual(manifest["config"]["key_mode"], encryption_helper.LOCAL_EMBEDDED_DEV_INSECURE_MODE)
+        self.assertEqual(manifest["config"]["provider_key_mode"], "local-embedded")
+        self.assertEqual(manifest["key_management"]["mode"], encryption_helper.LOCAL_EMBEDDED_DEV_INSECURE_MODE)
+        self.assertEqual(manifest["key_management"]["provider_mode"], "local-embedded")
         self.assertEqual(manifest["config"]["package_metadata"]["name"], "demo-protect")
         self.assertTrue((output_dir / "m.py").exists())
 
@@ -2140,6 +2172,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "-o",
                 str(output_dir),
                 "--runtime-native-loader",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -2205,6 +2238,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "--output-dir",
                 str(output_override),
                 "--no-compile",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -2258,11 +2292,20 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(key_mgmt.get("mode"), "license-file")
         self.assertEqual(key_mgmt.get("license_file"), "licenses/customer.license.json")
         self.assertEqual(key_mgmt.get("license_id"), "customer-a")
+        self.assertEqual(key_mgmt.get("license_path_policy"), encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY)
 
         license_path = output_dir / "licenses" / "customer.license.json"
         self.assertTrue(license_path.exists())
-        module = self._import_module_from_root(output_dir, "pkg", "mod")
-        self.assertEqual(module.protected_sum(4, 5), 12)
+        old_license = os.environ.get("SOENC_LICENSE_FILE")
+        try:
+            os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+            module = self._import_module_from_root(output_dir, "pkg", "mod")
+            self.assertEqual(module.protected_sum(4, 5), 12)
+        finally:
+            if old_license is None:
+                os.environ.pop("SOENC_LICENSE_FILE", None)
+            else:
+                os.environ["SOENC_LICENSE_FILE"] = old_license
 
     def test_license_file_mode_rejects_tampered_license(self):
         root = self.make_case_root("license_mode_tamper")
@@ -2309,8 +2352,16 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         payload["keys"][first_key] = "AAAAAAAAAAAAAAAAAAAAAA=="
         license_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "license integrity mismatch"):
-            self._import_module_from_root(output_dir, "pkg", "mod")
+        old_license = os.environ.get("SOENC_LICENSE_FILE")
+        try:
+            os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+            with self.assertRaisesRegex(ValueError, "license integrity mismatch"):
+                self._import_module_from_root(output_dir, "pkg", "mod")
+        finally:
+            if old_license is None:
+                os.environ.pop("SOENC_LICENSE_FILE", None)
+            else:
+                os.environ["SOENC_LICENSE_FILE"] = old_license
 
     def test_remote_kms_mode_emits_stub_key_contract_and_runtime_fails_closed(self):
         root = self.make_case_root("remote_kms_mode")
@@ -2395,11 +2446,10 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     str(output_dir),
                     "--kms-profile",
                     "prod",
+                    "--dev-insecure-ok",
                 ]
             )
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
