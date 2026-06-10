@@ -1,6 +1,8 @@
 # Cross-media V0.3 gap mapping
 
 > Source blueprint: `docs/current/cross_media_enc_trans_imple_guide_v3.md`
+> Completion report: `docs/current/cross_media_enc_trans_v3_completion_report.md`
+> Completion status: remaining documented feature items = 0; remaining documented hard blockers = 0.
 > Mapping date: 2026-06-11
 > Current pass update: P0-B2 strict native proof, P1-A OCR candidate interface, P2-B assistive-only visual model boundary, and P1-E release artifact tamper report.
 > This pass touched Code Protection/native build, OCR provider candidate handling, visual-assist reporting, and release package integrity reports; SOX1 crypto, key material, QR payload format, and release/promotion/evidence platform expansion remain out of scope.

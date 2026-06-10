@@ -1389,3 +1389,39 @@ Cython/SO/PYD 是逆向成本加固，不是密钥安全；
 - 下一步只建议 P0-A1。
 ```
 
+---
+
+## 17. Current implementation completion handoff (2026-06-11)
+
+The V0.3 implementation status for this blueprint is now tracked in:
+
+```text
+docs/current/cross_media_enc_trans_v3_gap_mapping.md
+docs/current/cross_media_enc_trans_v3_completion_report.md
+```
+
+Current documented status:
+
+```text
+Remaining documented feature items: 0
+Remaining documented hard blockers: 0
+```
+
+The final completed items are:
+
+```text
+P0-B2 strict native code-protection smoke
+P1-A OCR candidate interface
+P1-B manifestless OCR-safe sidecar verification
+P2-B assistive-only visual model boundary
+P1-E release artifact tamper report
+```
+
+This handoff does not change the blueprint boundaries:
+
+```text
+visual/OCR/model output remains assistive-only;
+release_tamper_report.json is anti-tamper / integrity hardening only;
+SOX1 crypto, key material, QR payload format, and promotion/evidence platform
+expansion remain out of scope unless a later blueprint explicitly adds them.
+```
