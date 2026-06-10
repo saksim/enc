@@ -638,6 +638,13 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "runtime_delivery": {
                 "validated": True,
                 "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "loader_mode": encryption_helper.RUNTIME_LOADER_MODE_NATIVE_ONLY,
+                "loader_enforced": True,
+                "trust_policy": {
+                    "require_runtime_fingerprint": True,
+                    "runtime_fingerprint_binding": encryption_helper.RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED,
+                    "runtime_path_policy": encryption_helper.RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
+                },
             },
             "key_management": {
                 "mode": "license-file",
@@ -710,6 +717,26 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(receipt["native_artifacts_verified"], 2)
         self.assertEqual(receipt["key_mode"], "license-file")
         self.assertEqual(receipt["package_metadata"]["version"], "2.0.0")
+        self.assertEqual(receipt["release_tamper_report_relative_path"], encryption_helper.RELEASE_TAMPER_REPORT_FILENAME)
+        tamper_report_path = release_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME
+        self.assertTrue(tamper_report_path.exists())
+        self.assertEqual(receipt["release_tamper_report_sha256"], encryption_helper._sha256_file(tamper_report_path))
+        tamper_report = json.loads(tamper_report_path.read_text(encoding="utf-8"))
+        self.assertEqual(tamper_report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertTrue(tamper_report["success"])
+        self.assertEqual(tamper_report["classification"], encryption_helper.RELEASE_TAMPER_CLASSIFICATION)
+        self.assertFalse(tamper_report["strong_secrecy_boundary"])
+        self.assertTrue(tamper_report["checks"]["manifest_signature"]["present"])
+        binary_paths = {
+            item["relative_path"]: item
+            for item in tamper_report["checks"]["binary_digest"]["artifacts"]
+        }
+        self.assertEqual(binary_paths["pkg/mod.pyd"]["sha256"], hashlib.sha256(module_native.read_bytes()).hexdigest())
+        self.assertEqual(binary_paths["pkg/enc_rt_pkg_1234.pyd"]["role"], "runtime_native_extension")
+        runtime_record = tamper_report["checks"]["runtime_digest"]["artifacts"][0]
+        self.assertEqual(runtime_record["expected_sha256"], runtime_digest)
+        self.assertTrue(runtime_record["matches_expected"])
+        self.assertIn("import", tamper_report["checks"]["import_time_check"]["failure_mode"])
 
     def test_write_release_receipt_rejects_runtime_fingerprint_mismatch(self):
         root = self.make_case_root("release_receipt_digest_mismatch")
@@ -767,6 +794,34 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "release runtime fingerprint mismatch"):
             encryption_helper.write_release_receipt(dist_dir=release_dir)
+
+    def test_write_release_failure_report_records_tamper_failure(self):
+        root = self.make_case_root("release_failure_report")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "mod.pyd").write_bytes(b"module-binary")
+        (release_dir / "build_manifest.json").write_text(
+            json.dumps({"runtime_files": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        report_path, report = encryption_helper.write_release_failure_report(
+            dist_dir=release_dir,
+            error=RuntimeError("release runtime fingerprint mismatch for artifact: pkg/mod.pyd"),
+            required_manifest_signature=True,
+            require_approval=False,
+        )
+
+        self.assertEqual(report_path, release_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME)
+        self.assertFalse(report["success"])
+        self.assertEqual(report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertIn("fingerprint mismatch", report["failure"]["message"])
+        self.assertTrue(report["checks"]["manifest_signature"]["required"])
+        self.assertFalse(report["checks"]["manifest_signature"]["present"])
+        binary_records = report["checks"]["binary_digest"]["artifacts"]
+        self.assertEqual(binary_records[0]["relative_path"], "pkg/mod.pyd")
+        self.assertEqual(binary_records[0]["sha256"], hashlib.sha256(b"module-binary").hexdigest())
+        self.assertFalse(report["strong_secrecy_boundary"])
 
     def test_write_release_receipt_requires_signed_approval_when_enabled(self):
         root = self.make_case_root("release_receipt_with_approval")

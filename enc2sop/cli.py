@@ -260,19 +260,32 @@ def _run_release(args) -> int:
     package_metadata = project_config.package_metadata if project_config is not None else None
     key_mode = project_config.key_mode if project_config is not None else None
 
-    receipt_path, receipt = encryption_helper.write_release_receipt(
-        dist_dir=dist_dir,
-        required_manifest_signature=require_manifest_signature,
-        key_mode=key_mode,
-        package_metadata=package_metadata,
-        require_approval=require_release_approval,
-        approval_file=approval_file_value,
-        approval_key=approval_key,
-        approval_key_id=approval_key_id,
-    )
+    try:
+        receipt_path, receipt = encryption_helper.write_release_receipt(
+            dist_dir=dist_dir,
+            required_manifest_signature=require_manifest_signature,
+            key_mode=key_mode,
+            package_metadata=package_metadata,
+            require_approval=require_release_approval,
+            approval_file=approval_file_value,
+            approval_key=approval_key,
+            approval_key_id=approval_key_id,
+        )
+    except Exception as exc:
+        try:
+            encryption_helper.write_release_failure_report(
+                dist_dir=dist_dir,
+                error=exc,
+                required_manifest_signature=require_manifest_signature,
+                require_approval=require_release_approval,
+            )
+        except Exception:
+            pass
+        raise
     print("dist_dir={0}".format(dist_dir))
     print("release_bundle={0}".format(encryption_helper.release_bundle_path(dist_dir)))
     print("release_receipt={0}".format(receipt_path))
+    print("release_tamper_report={0}".format(encryption_helper.release_tamper_report_path(dist_dir)))
     print("manifest_signature_present={0}".format(receipt.get("manifest_signature_present")))
     print("runtime_artifacts_verified={0}".format(receipt.get("runtime_artifacts_verified")))
     print("release_approval_verified={0}".format(receipt.get("release_approval_verified")))

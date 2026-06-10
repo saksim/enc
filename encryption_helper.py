@@ -97,6 +97,9 @@ RELEASE_BUNDLE_FILENAME = "release_bundle.json"
 RELEASE_LAYOUT_VERSION = "v1"
 RELEASE_RECEIPT_SCHEMA = "enc2sop-release-receipt/v1"
 RELEASE_RECEIPT_FILENAME = "release_receipt.json"
+RELEASE_TAMPER_REPORT_SCHEMA = "enc2sop-release-tamper-report/v1"
+RELEASE_TAMPER_REPORT_FILENAME = "release_tamper_report.json"
+RELEASE_TAMPER_CLASSIFICATION = "anti-tamper / integrity hardening"
 RELEASE_APPROVAL_SCHEMA = "enc2sop-release-approval/v1"
 DEFAULT_RELEASE_APPROVAL_KEY_ID = "release-approval-hmac-v1"
 GITHUB_CONTEXT_KEYS = (
@@ -1499,6 +1502,185 @@ def release_receipt_path(dist_dir):
     return release_dir / RELEASE_RECEIPT_FILENAME
 
 
+def release_tamper_report_path(dist_dir):
+    release_dir = normalize_path(dist_dir)
+    return release_dir / RELEASE_TAMPER_REPORT_FILENAME
+
+
+def _release_digest_record(path, release_dir, role, expected_sha256=None):
+    actual_sha256 = _sha256_file(path)
+    record = {
+        "role": str(role),
+        "relative_path": _normalized_relpath_text(path.relative_to(release_dir)),
+        "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+        "sha256": actual_sha256,
+        "size": path.stat().st_size,
+    }
+    if expected_sha256 is not None:
+        expected = str(expected_sha256 or "").strip().lower()
+        record["expected_sha256"] = expected
+        record["matches_expected"] = bool(expected) and hmac.compare_digest(actual_sha256, expected)
+    return record
+
+
+def _release_manifest_signature_report(manifest, required):
+    signature = manifest.get("signature") if isinstance(manifest, dict) else None
+    present = isinstance(signature, dict)
+    return {
+        "required": bool(required),
+        "present": present,
+        "algorithm": signature.get("algorithm") if present else None,
+        "key_id": signature.get("key_id") if present else None,
+        "digest_hex": signature.get("digest_hex") if present else None,
+    }
+
+
+def _release_import_time_check_report(manifest, runtime_compiled_rel):
+    runtime_delivery = (manifest.get("runtime_delivery") or {}) if isinstance(manifest, dict) else {}
+    trust_policy = runtime_delivery.get("trust_policy") if isinstance(runtime_delivery, dict) else {}
+    if not isinstance(trust_policy, dict):
+        trust_policy = {}
+    require_runtime_fingerprint = bool(trust_policy.get("require_runtime_fingerprint"))
+    return {
+        "available": bool(runtime_compiled_rel),
+        "loader_mode": runtime_delivery.get("loader_mode") if isinstance(runtime_delivery, dict) else None,
+        "loader_enforced": bool(runtime_delivery.get("loader_enforced")) if isinstance(runtime_delivery, dict) else False,
+        "require_runtime_fingerprint": require_runtime_fingerprint,
+        "runtime_fingerprint_binding": trust_policy.get("runtime_fingerprint_binding"),
+        "runtime_path_policy": trust_policy.get("runtime_path_policy"),
+        "failure_mode": (
+            "import raises RuntimeError on runtime path or digest mismatch"
+            if require_runtime_fingerprint
+            else "not required by manifest trust_policy"
+        ),
+    }
+
+
+def _release_binary_digest_records(release_dir, native_rel, runtime_compiled_rel):
+    runtime_set = set(_normalized_relpath_text(item) for item in runtime_compiled_rel)
+    records = []
+    for rel in native_rel:
+        path = release_dir / rel
+        role = "runtime_native_extension" if rel in runtime_set else "native_extension"
+        records.append(_release_digest_record(path, release_dir, role))
+    return records
+
+
+def _release_runtime_digest_records(release_dir, runtime_compiled_rel, bundle_fingerprint_by_path):
+    records = []
+    for runtime_rel in runtime_compiled_rel:
+        entry = bundle_fingerprint_by_path.get(runtime_rel) or {}
+        expected_digest = str(entry.get("digest_hex") or "").strip().lower() or None
+        record = _release_digest_record(
+            release_dir / runtime_rel,
+            release_dir,
+            "runtime_digest",
+            expected_sha256=expected_digest,
+        )
+        record["module_name"] = entry.get("module_name")
+        record["source_relative_path"] = entry.get("source_relative_path")
+        record["package_relative_path"] = entry.get("package_relative_path")
+        records.append(record)
+    return records
+
+
+def _write_release_tamper_report(release_dir, payload):
+    report_path = release_tamper_report_path(release_dir)
+    report_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report_path, payload
+
+
+def _release_tamper_report_payload(
+    *,
+    release_dir,
+    manifest,
+    current_bundle_digest,
+    native_rel,
+    runtime_compiled_rel,
+    bundle_fingerprint_by_path,
+    required_manifest_signature=False,
+    require_approval=False,
+    success=True,
+    failure=None,
+):
+    binary_digests = _release_binary_digest_records(release_dir, native_rel, runtime_compiled_rel)
+    runtime_digests = _release_runtime_digest_records(release_dir, runtime_compiled_rel, bundle_fingerprint_by_path)
+    payload = {
+        "schema": RELEASE_TAMPER_REPORT_SCHEMA,
+        "generated_at_utc": _utc_now_iso8601_seconds(),
+        "success": bool(success),
+        "classification": RELEASE_TAMPER_CLASSIFICATION,
+        "strong_secrecy_boundary": False,
+        "release_root": str(release_dir),
+        "release_bundle_relative_path": RELEASE_BUNDLE_FILENAME,
+        "release_bundle_sha256": current_bundle_digest,
+        "release_approval_required": bool(require_approval),
+        "checks": {
+            "manifest_signature": _release_manifest_signature_report(
+                manifest,
+                required_manifest_signature,
+            ),
+            "binary_digest": {
+                "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                "artifact_count": len(binary_digests),
+                "artifacts": binary_digests,
+            },
+            "runtime_digest": {
+                "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                "artifact_count": len(runtime_digests),
+                "artifacts": runtime_digests,
+            },
+            "import_time_check": _release_import_time_check_report(manifest, runtime_compiled_rel),
+        },
+        "failure": failure,
+    }
+    return payload
+
+
+def write_release_failure_report(
+    *,
+    dist_dir,
+    error,
+    required_manifest_signature=False,
+    require_approval=False,
+):
+    release_dir = normalize_path(dist_dir)
+    if not release_dir.exists():
+        raise FileNotFoundError("release directory not found: {0}".format(release_dir))
+    native_rel = sorted(
+        set(_normalized_relpath_text(path.relative_to(release_dir)) for path in native_extension_files(release_dir))
+    )
+    manifest = {}
+    manifest_path = release_dir / "build_manifest.json"
+    manifest_sha256 = None
+    if manifest_path.exists():
+        manifest_sha256 = _sha256_file(manifest_path)
+        try:
+            manifest = read_manifest(manifest_path)
+        except Exception:
+            manifest = {}
+    bundle_path = release_bundle_path(release_dir)
+    bundle_sha256 = _sha256_file(bundle_path) if bundle_path.exists() else None
+    failure = {
+        "type": type(error).__name__,
+        "message": str(error),
+    }
+    payload = _release_tamper_report_payload(
+        release_dir=release_dir,
+        manifest=manifest,
+        current_bundle_digest=bundle_sha256,
+        native_rel=native_rel,
+        runtime_compiled_rel=[],
+        bundle_fingerprint_by_path={},
+        required_manifest_signature=required_manifest_signature,
+        require_approval=require_approval,
+        success=False,
+        failure=failure,
+    )
+    payload["build_manifest_sha256"] = manifest_sha256
+    return _write_release_tamper_report(release_dir, payload)
+
+
 def write_release_approval(
     *,
     dist_dir,
@@ -1802,6 +1984,21 @@ def write_release_receipt(
         "release_approval_github_context": approval_github_context if isinstance(approval_github_context, dict) else None,
         "package_metadata": package_payload,
     }
+    tamper_report_payload = _release_tamper_report_payload(
+        release_dir=release_dir,
+        manifest=manifest,
+        current_bundle_digest=current_bundle_digest,
+        native_rel=native_rel,
+        runtime_compiled_rel=runtime_compiled_rel,
+        bundle_fingerprint_by_path=bundle_fingerprint_by_path,
+        required_manifest_signature=required_manifest_signature,
+        require_approval=require_approval,
+        success=True,
+        failure=None,
+    )
+    tamper_report_path, _tamper_report = _write_release_tamper_report(release_dir, tamper_report_payload)
+    receipt["release_tamper_report_relative_path"] = RELEASE_TAMPER_REPORT_FILENAME
+    receipt["release_tamper_report_sha256"] = _sha256_file(tamper_report_path)
     receipt_path = release_receipt_path(release_dir)
     receipt_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False), encoding="utf-8")
     return receipt_path, receipt
@@ -2087,6 +2284,7 @@ def compile_with_batch_builder(
         signing_key=manifest_sign_key,
         require_manifest_signature=require_manifest_signature,
     )
+    shutil.copy2(output_dir / "build_manifest.json", build_dir / "build_manifest.json")
     return build_dir
 
 

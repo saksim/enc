@@ -1,9 +1,9 @@
 # Cross-media V0.3 gap mapping
 
-> Source blueprint: `docs/current/cross_media_enc_trans_imple_guide_v3.md`  
-> Mapping date: 2026-06-10  
-> Current pass update: P2-C native hardening profile baseline.  
-> Explicitly out of scope: QR/OCR/SOX1 behavior changes and release/promotion/evidence expansion.
+> Source blueprint: `docs/current/cross_media_enc_trans_imple_guide_v3.md`
+> Mapping date: 2026-06-11
+> Current pass update: P0-B2 strict native proof, P1-A OCR candidate interface, P2-B assistive-only visual model boundary, and P1-E release artifact tamper report.
+> This pass touched Code Protection/native build, OCR provider candidate handling, visual-assist reporting, and release package integrity reports; SOX1 crypto, key material, QR payload format, and release/promotion/evidence platform expansion remain out of scope.
 
 ## 1. Current state summary
 
@@ -19,9 +19,10 @@ bytes
 ```
 
 The V0.3 blueprint is still valid, but its phase order must be interpreted
-against the current codebase: most P0-A items are already implemented, and the
-only remaining P0-B gap is strict native-build proof, which is currently
-blocked by this host's native-build Python dependencies.
+against the current codebase: most P0-A items are already implemented, and
+P0-B strict native-build proof now passes on the user-specified py312
+interpreter, and P1-A/P1-B transport enhancements are now verified against
+the current OCR/sidecar implementation.
 
 ## 2. V0.3 phase mapping
 
@@ -36,7 +37,7 @@ blocked by this host's native-build Python dependencies.
 | P0-A6 crossmedia smoke | `scripts/crossmedia_smoke.ps1`, `scripts/crossmedia_smoke.sh`, simulated capture script. | Done | Linux/macOS real shell execution remains environment validation. |
 | P0-B0 Code Protection Layer registration | `encryption_helper.py`, `decryption_helper.py`, `py2_linux_rec_opera.py` now have explicit V0.3 Code Protection Layer boundary comments. | Done | Keep responsibilities documented separately from QR/OCR/SOX1. |
 | P0-B1 protect/build and cm/transport decoupling | `cm` and `transport` help paths stay decoupled from code-protection heavy imports; covered by CLI regression tests. | Done | Keep config/toolchain imports behind protect/build handlers. |
-| P0-B2 code-protection smoke | `scripts/smoke_code_protection.py` now creates `demo_module.py`, runs `soenc.py protect`, probes native deps, runs `soenc.py build` when possible, then imports native artifacts from a clean directory. | Script added; strict native proof currently blocked on this host | Fix native build environment (`setuptools`/`backports.tarfile` conflict and missing `Cython`) or run on a prepared native-build host. |
+| P0-B2 code-protection smoke | `scripts/smoke_code_protection.py` creates `demo_module.py`, runs `soenc.py protect`, probes native deps, runs `soenc.py build`, then imports native artifacts from a clean directory. Verified with `D:\code_environment\anaconda_all_css\py312\python.exe`. | Done | Keep Cython sources staging-relative and module names explicit so package-shaped `.pyd/.so` outputs remain importable. |
 | P0-B3 dist no-source-leakage | `enc2sop/protect/dist_check.py`, `scripts/check_dist_no_source_leak.py`, and `copy_release` now reject `.py` source leaks, generated `.c/.pyx`, temp build/cache dirs, and forbidden source/secret tokens. | Done | Keep default allow-list limited to `__init__.py`; add explicit `--allow-py` only for known bootstrap files. |
 | P0-B4 local-embedded insecure marker | `encryption_helper.py` now requires `--dev-insecure-ok` for local-embedded, emits a warning, and marks manifests as `local-embedded-dev-insecure` while preserving runtime provider compatibility. | Done | Do not use this mode for strong secrecy; keep license/remote modes separate. |
 | P0-B5 license-file externalization | `license-file` now defaults to external runtime delivery via `SOENC_LICENSE_FILE`; `copy_release` does not place license JSON in `dist_native` unless `--bundle-license` is explicit, and bundled delivery emits an insecure warning. Optional machine binding, HMAC license signing, and revocation-list checks are wired into the license runtime path. | Done | Keep default externalized; use `--bundle-license` only for explicit demo/lab bundles. |
@@ -108,46 +109,57 @@ evidence mode for non-build hosts:
   returns zero only to record a BLOCKED diagnostic report
 ```
 
-Current host evidence:
+Current host evidence on 2026-06-10:
 
 ```text
+interpreter: D:\code_environment\anaconda_all_css\py312\python.exe
 protect step: passed
-native dependency probe: blocked
-missing/broken: setuptools, Cython
-setuptools error: ImportError importing backports.tarfile from the current Python environment
+native dependency probe: passed
+setuptools: 80.9.0
+Cython: 0.29.36
+Crypto: 3.20.0
+native build: passed
+native outputs: demo_pkg/demo_module.pyd, demo_pkg/enc_rt_root_*.pyd
+clean import observed: {"add": 5, "scale": 42}
 ```
+
+The earlier blocker was specific to the previous/default Python environment.
+With py312 available, the remaining failure was Windows path-length/package
+shape in native build: absolute source paths caused long `build/temp/...`
+paths and flat `.pyd` outputs. `py2_linux_rec_opera.py` now compiles
+staging-relative sources through explicit `Extension("package.module", ...)`
+objects, which preserves package-shaped native artifacts and short temp paths.
 
 The script does not modify QR/OCR/SOX1 behavior and does not add release,
 promotion, or evidence-platform capability.
 
 ## 6. Next recommended pass
 
-After the native build environment is available, rerun:
+P0-B2 is now verified with the prepared py312 native-build interpreter:
 
 ```text
-python scripts/smoke_code_protection.py
+D:\code_environment\anaconda_all_css\py312\python.exe scripts\smoke_code_protection.py --python-exe D:\code_environment\anaconda_all_css\py312\python.exe --keep-work
+CODE_PROTECTION_SMOKE_OK
 ```
 
-With P0-B3/B4/B5/B6 now implemented, the remaining P0-B item is:
+With P0-B2/B3/B4/B5/B6 implemented, the remaining P0-B item count is:
 
 ```text
-P0-B2 strict native proof: still blocked by local native-build dependencies
+0
 ```
 
-After the P2-C native hardening profile baseline pass, the remaining P1/P2 enhancement
+After the P1-A/P1-B verification pass, P2-B visual-assist boundary work, and
+P1-E release tamper report work, the remaining P1/P2 enhancement
 items are:
 
 ```text
-P1-A OCR fallback and multi-model candidates
-P1-B manifest-less sidecar metadata
-P1-C public/private key mode
-P1-E release artifact tamper report
-P2-B visual model assistance
+0
 ```
 
-Under the current scope locks, P1-A/P1-B/P1-C/P2-B require explicit care before
-touching QR/OCR/SOX1 paths, and P1-E must not expand release/promotion/evidence
-without a separate confirmation.
+P2-B must remain assistive only: locate QR regions, assess blur/glare/crop,
+assist candidate generation, and generate retake suggestions. It must not guess
+ciphertext or bypass verifier checks. P1-E must stay a narrow anti-tamper
+report and must not expand into release/promotion/evidence platform governance.
 
 ## 7. P0-B3/B4 current pass evidence
 
@@ -400,6 +412,309 @@ Boundary statement:
 ```text
 P2-C hardening raises reverse-engineering cost only.
 It does not replace key security, license-file, remote-KMS, or runtime integrity.
-Actual strip-symbol proof remains tied to the existing P0-B2 native-build environment blocker on this host.
+P0-B2 native-build proof is now available for the strict off-profile smoke on this host; balanced strip-symbol behavior remains best-effort and host-toolchain dependent.
 QR/OCR/SOX1 and release/promotion/evidence surfaces remain untouched.
+```
+
+
+## 13. P1-C current pass verification
+
+Verified that P1-C public/private key mode is already implemented in the current
+runtime path, without changing QR/OCR/SOX1 code:
+
+```text
+enc2sop/crossmedia/key_material.py
+  RSA-OAEP-SHA256 hybrid envelope support
+  generate_public_key_pair(public_path, private_path)
+  wrap_data_key_rsa_oaep_sha256(public_key, data_key)
+  unwrap_data_key_rsa_oaep_sha256(private_key, wrapped_data_key)
+
+enc2sop/crossmedia/cli.py
+  soenc.py cm keygen-public
+  soenc.py cm encrypt --recipient-public-key
+  soenc.py cm decrypt --private-key
+
+tests/test_crossmedia_public_key.py
+  public-key encrypt/decrypt roundtrip
+  wrong private key fails without output
+  ambiguous key modes are rejected
+```
+
+Validation executed:
+
+```text
+python -m pytest tests/test_crossmedia_public_key.py tests/test_crossmedia_cli.py -q
+13 passed
+```
+
+Boundary statement:
+
+```text
+This pass records existing P1-C behavior and test evidence only.
+No QR/OCR/SOX1 implementation files were modified.
+Private key material stays outside the sealed-side encrypt path; SOX1/manifest leakage does not directly include the private key.
+```
+
+## 14. P0-B2 current pass evidence
+
+Unlocked and verified the strict Code Protection native packaging smoke using
+the user-specified interpreter:
+
+```text
+D:\code_environment\anaconda_all_css\py312\python.exe
+Python 3.12.12 / Anaconda / MSC v.1929 64 bit
+setuptools 80.9.0
+Cython 0.29.36
+wheel 0.45.1
+Crypto 3.20.0
+```
+
+Implementation fix:
+
+```text
+py2_linux_rec_opera.py
+  compiles paths relative to the staging root instead of absolute paths
+  creates explicit setuptools.Extension names from package-relative paths
+  preserves package-shaped output such as demo_pkg/demo_module.pyd
+
+scripts/smoke_code_protection.py
+  captures native build stdout/stderr with errors=replace to avoid host locale
+  decode failures during MSVC/Cython output capture
+```
+
+Validation executed:
+
+```text
+D:\code_environment\anaconda_all_css\py312\python.exe -B -c <dependency probe>
+all required native/protect deps import successfully
+
+D:\code_environment\anaconda_all_css\py312\python.exe scripts\smoke_code_protection.py --python-exe D:\code_environment\anaconda_all_css\py312\python.exe --keep-work
+CODE_PROTECTION_SMOKE_OK
+report=.tmp_code_protection_smoke_20260610225045_d6e3a874/smoke_code_protection_report.json
+
+D:\code_environment\anaconda_all_css\py312\python.exe -B -c <ast syntax check>
+syntax_ok
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_code_protection_smoke.py tests\test_crossmedia_cli.py tests\test_encryption_helper.py::EncryptionHelperTests::test_compile_with_batch_builder_passes_hardening_profile -q
+12 passed
+```
+
+Scope statement:
+
+```text
+This pass modifies only Code Protection/native smoke behavior.
+No QR/OCR/SOX1 implementation files were modified.
+No release/promotion/evidence platform capability was added.
+```
+
+## 15. P1-A/P1-B current pass evidence
+
+Implemented and verified the OCR candidate interface and confirmed the existing
+manifest-less sidecar metadata path required by the V0.3 guide.
+
+P1-A implementation:
+
+```text
+enc2sop/transport/ocr_observations.py
+  TextObservation(text, confidence, bbox, provider_name, image_id)
+  observations_from_payload(...)
+  observations_to_text(...)
+
+enc2sop/transport/ocr_runtime.py
+  external OCR JSON may now return observations/candidates/lines as provider
+  candidate records
+  provider candidate text is flattened into OCR text for the existing verifier
+  legacy {"text": ...}, {"lines": [...]}, output_text_path, and raw stdout
+  compatibility is retained
+```
+
+P1-A boundary:
+
+```text
+OCR providers expose candidates only.
+Final acceptance still happens through the existing transport verifier:
+format checks, line/chunk/page CRC, total SHA256, and decrypt/tag validation.
+No provider is allowed to decide final payload validity or bypass verification.
+```
+
+P1-B verification:
+
+```text
+tests/test_qrcode_helper_sidecar.py::TransportCoreTests::test_manifestless_ocr_safe_sidecar_with_parity_roundtrip
+  verifies ocr-safe-human-correctable-v1 + redundancy/parity + no manifest
+  embedded @CFG metadata includes PF=O1, PM=modular-sum, and EL
+  recovery uses embedded_headers and restores the original bytes
+```
+
+Validation executed:
+
+```text
+D:\code_environment\anaconda_all_css\py312\python.exe -B -c <ast syntax check>
+syntax_ok
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_ocr_observations.py tests\test_qrcode_helper_sidecar.py::TransportCoreTests::test_external_backend_uses_provider_command_interface tests\test_qrcode_helper_sidecar.py::TransportCoreTests::test_manifestless_ocr_safe_sidecar_with_parity_roundtrip tests\test_qrcode_helper_sidecar.py::SidecarRecoveryTests::test_recover_images_auto_prefers_sidecar_before_external tests\test_qrcode_helper_sidecar.py::SidecarRecoveryTests::test_recover_images_auto_prefers_external_before_generic_ocr -q
+7 passed, 3 warnings
+```
+
+Scope statement:
+
+```text
+This pass touches OCR provider candidate handling only.
+SOX1 crypto, key material, QR payload format, and Code Protection crypto remain unchanged.
+No release/promotion/evidence platform capability was added.
+```
+
+## 16. P2-B current pass evidence
+
+Implemented the assistive-only visual model boundary as a report path rather
+than a verifier/reassembly path:
+
+```text
+enc2sop/crossmedia/visual_assist.py
+  schema = enc2sop-cross-media-visual-assist/v1
+  allowed roles:
+    locate_qr_regions
+    assess_photo_quality
+    ocr_candidate_generation
+    retake_suggestion
+  forbidden roles:
+    guess_ciphertext
+    complete_crc_failed_payload
+    bypass_verifier
+    natural_language_crypto_validation
+
+enc2sop/crossmedia/cli.py
+  soenc.py cm visual-assist
+  --image-input
+  --output-report
+  optional --provider-report for external visual-model hints
+```
+
+Provider boundary:
+
+```text
+External visual-model JSON is reduced to allowed fields only:
+qr_regions, quality, ocr_candidates, retake_suggestions.
+
+Forbidden fields such as payload, ciphertext/plaintext guesses, SOX1 strings,
+CRC bypass, verifier overrides, keys, passphrases, decrypt/decryption claims,
+and verified/accepted verdicts fail closed before report generation.
+```
+
+Runtime boundary:
+
+```text
+visual-assist output is report-only.
+OCR candidates are marked untrusted.
+The report is not fed into QR reassembly, CRC acceptance, SOX1 decrypt, or tag
+verification.
+Existing scan/receive verifier paths remain authoritative.
+```
+
+Validation executed:
+
+```text
+D:\code_environment\anaconda_all_css\py312\python.exe -B -c <ast syntax check>
+syntax_ok
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_crossmedia_visual_assist.py tests\test_crossmedia_cli.py -q
+12 passed, 1 skipped
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_crossmedia_visual_assist.py tests\test_crossmedia_cli.py tests\test_crossmedia_qr_transport.py::test_scan_bad_image_report_includes_capture_quality_and_retake_suggestion tests\test_crossmedia_qr_transport.py::test_cli_scan_bad_image_writes_quality_guidance -q
+12 passed, 3 skipped
+
+D:\code_environment\anaconda_all_css\py312\python.exe soenc.py cm --help
+D:\code_environment\anaconda_all_css\py312\python.exe soenc.py cm visual-assist --help
+both help commands completed successfully
+```
+
+Remaining enhancement count after the P2-B pass and before the P1-E pass:
+
+```text
+P1-E release artifact tamper report
+```
+
+## 17. P1-E current pass evidence
+
+Implemented a narrow SO/PYD release artifact tamper report without changing
+SOX1, QR/OCR, key material, or promotion/evidence platform policy:
+
+```text
+encryption_helper.py
+  RELEASE_TAMPER_REPORT_SCHEMA = enc2sop-release-tamper-report/v1
+  RELEASE_TAMPER_REPORT_FILENAME = release_tamper_report.json
+  release_tamper_report_path(dist_dir)
+  write_release_failure_report(...)
+  compile_with_batch_builder copies the post-validation build_manifest.json
+  into build/ so import-time native-loader checks read validated runtime
+  fingerprint metadata
+
+enc2sop/cli.py
+  soenc.py release writes release_tamper_report.json on successful release
+  soenc.py release attempts a failure report before re-raising release errors
+```
+
+Report contents:
+
+```text
+manifest signature:
+  required/present/algorithm/key_id/digest_hex
+
+binary digest:
+  per native .so/.pyd/.dll/.dylib artifact
+  role = native_extension or runtime_native_extension
+  sha256 + size
+
+runtime digest:
+  expected digest from release_bundle.runtime_integrity
+  actual artifact sha256
+  matches_expected boolean
+
+import-time check:
+  loader_mode
+  loader_enforced
+  require_runtime_fingerprint
+  runtime_fingerprint_binding
+  runtime_path_policy
+  fail-closed import RuntimeError mode when configured
+
+failure report:
+  success=false
+  failure.type
+  failure.message
+  current package binary digests when available
+```
+
+Boundary statement:
+
+```text
+release_tamper_report.json is anti-tamper / integrity hardening only.
+It is not a strong secrecy boundary and does not replace manifest signing,
+runtime fingerprint checks, license-file validation, remote-KMS, or SOX1
+authenticated encryption.
+```
+
+Validation executed:
+
+```text
+D:\code_environment\anaconda_all_css\py312\python.exe -B -c <ast syntax check>
+syntax_ok
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_receipt_validates_bundle_and_runtime_fingerprints tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_receipt_rejects_runtime_fingerprint_mismatch tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_failure_report_records_tamper_failure tests\test_soenc_cli.py::SoencCliTests::test_release_command_generates_release_receipt -q
+4 passed
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_encryption_helper.py::EncryptionHelperTests::test_copy_release_writes_release_bundle_contract tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_receipt_validates_bundle_and_runtime_fingerprints tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_receipt_rejects_runtime_fingerprint_mismatch tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_failure_report_records_tamper_failure tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_receipt_requires_signed_approval_when_enabled tests\test_encryption_helper.py::EncryptionHelperTests::test_write_release_receipt_rejects_approval_digest_mismatch tests\test_soenc_cli.py::SoencCliTests::test_release_command_generates_release_receipt tests\test_soenc_cli.py::SoencCliTests::test_release_command_requires_signed_approval_when_enabled tests\test_soenc_cli.py::SoencCliTests::test_release_command_fails_when_approval_required_but_key_missing tests\test_soenc_cli.py::SoencCliTests::test_release_command_rejects_missing_release_bundle -q
+10 passed
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_encryption_helper.py tests\test_soenc_cli.py tests\test_crossmedia_cli.py tests\test_crossmedia_visual_assist.py tests\test_ocr_observations.py tests\test_code_protection_smoke.py -q
+105 passed, 2 skipped
+
+D:\code_environment\anaconda_all_css\py312\python.exe -m pytest tests\test_qrcode_helper_sidecar.py::TransportCoreTests::test_external_backend_uses_provider_command_interface tests\test_qrcode_helper_sidecar.py::TransportCoreTests::test_manifestless_ocr_safe_sidecar_with_parity_roundtrip tests\test_qrcode_helper_sidecar.py::SidecarRecoveryTests::test_recover_images_auto_prefers_sidecar_before_external tests\test_qrcode_helper_sidecar.py::SidecarRecoveryTests::test_recover_images_auto_prefers_external_before_generic_ocr -q
+4 passed
+```
+
+Final remaining item count after this pass:
+
+```text
+0
 ```

@@ -461,8 +461,11 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         receipt_path = dist_dir / encryption_helper.RELEASE_RECEIPT_FILENAME
+        tamper_report_path = dist_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME
         self.assertTrue(receipt_path.exists())
+        self.assertTrue(tamper_report_path.exists())
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        tamper_report = json.loads(tamper_report_path.read_text(encoding="utf-8"))
         self.assertEqual(receipt["schema"], encryption_helper.RELEASE_RECEIPT_SCHEMA)
         self.assertTrue(receipt["manifest_signature_required"])
         self.assertTrue(receipt["manifest_signature_present"])
@@ -471,6 +474,9 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(receipt["native_artifacts_verified"], 2)
         self.assertEqual(receipt["key_mode"], "license-file")
         self.assertEqual(receipt["package_metadata"]["name"], "demo")
+        self.assertEqual(tamper_report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertTrue(tamper_report["success"])
+        self.assertEqual(tamper_report["checks"]["binary_digest"]["artifact_count"], 2)
 
     def test_release_command_requires_signed_approval_when_enabled(self):
         root = self.make_case_root("soenc_release_approval")
@@ -708,6 +714,12 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "release bundle metadata missing"):
             soenc_cli.main(["release", "--dist-dir", str(dist_dir)])
+        tamper_report_path = dist_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME
+        self.assertTrue(tamper_report_path.exists())
+        tamper_report = json.loads(tamper_report_path.read_text(encoding="utf-8"))
+        self.assertEqual(tamper_report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertFalse(tamper_report["success"])
+        self.assertIn("release bundle metadata missing", tamper_report["failure"]["message"])
 
     def test_transport_command_delegates_to_plugin_registry(self):
         with mock.patch.object(plugin_registry, "invoke_plugin_command", autospec=True, return_value=0) as mocked:

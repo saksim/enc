@@ -104,6 +104,8 @@ def _run(command: Iterable[str], *, cwd: Path, env: Optional[Dict[str, str]] = N
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return {
         "command": items,

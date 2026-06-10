@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List
 
 from setuptools import setup
+from setuptools import Extension
 from Cython.Build import cythonize
 from setuptools.command.build_ext import build_ext as _build_ext
 from toolchain_profile import DEFAULT_BUILD_PROFILE
@@ -82,7 +83,7 @@ class Py2SoUtil:
             if not self.is_valid_module_path(root, path):
                 self.invalid_module_paths.append(str(path.relative_to(root)).replace("\\", "/"))
                 continue
-            items.append(str(path))
+            items.append(str(path.relative_to(root)))
         return sorted(items)
 
     def copy_support_files(self, root, build_dir):
@@ -145,10 +146,10 @@ class Py2SoUtil:
         print("start:", parent_dir, target_dir.name, build_dir)
         print("build_profile={0}".format(resolve_build_profile(args.build_profile)))
         print("prepared_env={0}".format(os.environ.get(ENV_PREPARED, "0")))
-        os.chdir(parent_dir)
+        os.chdir(target_dir)
 
         module_list = self.iter_python_sources(target_dir)
-        print([str(Path(item).relative_to(parent_dir)) for item in module_list])
+        print(module_list)
         if self.invalid_module_paths:
             print("skip_invalid_module_names={0}".format(len(self.invalid_module_paths)))
             for item in self.invalid_module_paths:
@@ -157,8 +158,12 @@ class Py2SoUtil:
         try:
             hardening_profile = normalize_hardening_profile(args.hardening_profile)
             compiler_directives = dict(cython_compiler_directives(hardening_profile))
+            extensions = [
+                Extension(".".join(Path(item).with_suffix("").parts), [item])
+                for item in module_list
+            ]
             ext_modules = cythonize(
-                module_list,
+                extensions,
                 language_level="3",
                 compiler_directives=compiler_directives,
             )

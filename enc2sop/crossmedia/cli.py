@@ -18,6 +18,7 @@ from . import image_scan
 from . import key_material
 from . import qr_transport
 from . import volume_transport
+from . import visual_assist
 
 SEND_REPORT_SCHEMA = "enc2sop-cross-media-send-report/v1"
 DECRYPT_REPORT_SCHEMA = "enc2sop-cross-media-decrypt-report/v1"
@@ -304,6 +305,21 @@ def _run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_visual_assist(args: argparse.Namespace) -> int:
+    report_path = Path(args.output_report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    provider_report = Path(args.provider_report) if getattr(args, "provider_report", None) else None
+    report = visual_assist.build_visual_assist_report(
+        Path(args.image_input),
+        provider_report_path=provider_report,
+    )
+    qr_transport.write_json_atomic(report_path, report)
+    print("visual_assist_report={0}".format(report_path))
+    print("image_count={0}".format(report.get("image_count")))
+    print("provider_report_accepted={0}".format(report.get("provider_report", {}).get("accepted")))
+    return 0
+
+
 def _run_send(args: argparse.Namespace) -> int:
     if args.mode != "qr":
         raise qr_transport.QrTransportError("P0-S3 send only supports --mode qr")
@@ -575,6 +591,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--artifact-id", help="Require a specific artifact id when multiple batches are present.")
     scan_parser.set_defaults(handler=_run_scan)
 
+    visual_assist_parser = subparsers.add_parser("visual-assist", help="Write assistive-only visual hints for QR photos (P2-B).")
+    visual_assist_parser.add_argument("--image-input", required=True, help="Directory containing captured images.")
+    visual_assist_parser.add_argument("--output-report", required=True, help="Output visual-assist JSON report path.")
+    visual_assist_parser.add_argument("--provider-report", help="Optional external visual-model JSON hints; accepted fields are fail-closed.")
+    visual_assist_parser.set_defaults(handler=_run_visual_assist)
+
     send_parser = subparsers.add_parser("send", help="Encrypt and render pages in one command (P0-S3).")
     send_parser.add_argument("--input", required=True, help="Input plaintext file.")
     send_parser.add_argument("--key-file", help="32-byte key file.")
@@ -630,6 +652,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except image_scan.ImageScanError as exc:
         print("cross-media scan input error: {0}".format(exc), file=sys.stderr)
         return 30
+    except visual_assist.VisualAssistError as exc:
+        print("cross-media visual assist error: {0}".format(exc), file=sys.stderr)
+        return 2
     except qr_transport.QrTransportError as exc:
         print("cross-media QR transport error: {0}".format(exc), file=sys.stderr)
         return 21

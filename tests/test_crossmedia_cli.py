@@ -48,6 +48,7 @@ class CrossMediaCliTests(unittest.TestCase):
         self.assertIn("--qrs-per-page", send_help)
         self.assertIn("--repeat-copies", send_help)
         self.assertIn("scan", help_text)
+        self.assertIn("visual-assist", help_text)
         self.assertIn("send", help_text)
         self.assertIn("receive", help_text)
 

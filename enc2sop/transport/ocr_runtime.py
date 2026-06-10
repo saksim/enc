@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from . import ocr_observations
 from . import protocol
 
 
@@ -801,13 +802,18 @@ def parse_external_ocr_stdout(raw_output: str) -> str:
     except Exception:
         parsed = None
 
+    if isinstance(parsed, (dict, list)):
+        observations = ocr_observations.observations_from_payload(
+            parsed,
+            default_provider="external",
+        )
+        if observations:
+            return ocr_observations.observations_to_text(observations)
+
     if isinstance(parsed, dict):
         direct = parsed.get("text")
         if isinstance(direct, str) and direct.strip():
             return direct
-        lines = parsed.get("lines")
-        if isinstance(lines, list):
-            return "\n".join(str(item) for item in lines if str(item).strip())
         output_text_path = parsed.get("output_text_path")
         if isinstance(output_text_path, str):
             candidate = Path(output_text_path)
