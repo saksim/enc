@@ -8,6 +8,7 @@ import hmac
 import json
 import secrets
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Dict
 from typing import Optional
@@ -65,6 +66,32 @@ def _utc_now_iso():
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def _normalize_expires_at(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parse_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(parse_text)
+    except ValueError as exc:
+        raise ValueError("license_expires_at must be ISO-8601 datetime") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_allowed_module_hashes(value):
+    if value is None:
+        return []
+    values = [value] if isinstance(value, str) else list(value)
+    normalized = []
+    for item in values:
+        text = str(item or "").strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
 class LicenseFileKeyProvider(KeyProvider):
     """Provider that stores wrapped runtime keys in an external license file."""
 
@@ -76,6 +103,9 @@ class LicenseFileKeyProvider(KeyProvider):
         self._license_file = DEFAULT_LICENSE_FILE
         self._bundle_license = False
         self._machine_fingerprint = None  # type: Optional[str]
+        self._subject = None  # type: Optional[str]
+        self._expires_at = None  # type: Optional[str]
+        self._allowed_module_hashes = []  # type: list[str]
         self._license_sign_key = None  # type: Optional[bytes]
         self._license_sign_key_id = DEFAULT_LICENSE_SIGNATURE_KEY_ID
         self._active = False
@@ -88,6 +118,10 @@ class LicenseFileKeyProvider(KeyProvider):
         self._bundle_license = bool(context.get("bundle_license"))
         machine_fingerprint = str(context.get("license_machine_fingerprint") or "").strip()
         self._machine_fingerprint = machine_fingerprint or None
+        subject = str(context.get("license_subject") or "").strip()
+        self._subject = subject or None
+        self._expires_at = _normalize_expires_at(context.get("license_expires_at"))
+        self._allowed_module_hashes = _normalize_allowed_module_hashes(context.get("license_allowed_module_hashes"))
         sign_key = context.get("license_sign_key")
         if sign_key is not None:
             sign_key = bytes(sign_key).strip()
@@ -156,9 +190,12 @@ class LicenseFileKeyProvider(KeyProvider):
             "version": LICENSE_VERSION,
             "mode": self.mode,
             "license_id": self._license_id,
+            "subject": self._subject,
             "issued_at": _utc_now_iso(),
+            "expires_at": self._expires_at,
             "status": "active",
             "revoked": False,
+            "allowed_module_hashes": list(self._allowed_module_hashes),
             "machine_binding": {
                 "required": self._machine_fingerprint is not None,
                 "algorithm": "sha256-exact-env-v1",
@@ -168,6 +205,10 @@ class LicenseFileKeyProvider(KeyProvider):
             "revocation": {
                 "env": LICENSE_REVOCATION_FILE_ENV,
                 "format": "json-list-or-object-revoked_license_ids",
+            },
+            "key_envelope": {
+                "format": "key-id-to-aes-key-b64-map-v1",
+                "key_count": len(self._key_entries),
             },
             "keys": dict(self._key_entries),
         }
@@ -197,6 +238,8 @@ class LicenseFileKeyProvider(KeyProvider):
                 "provider": "enc2sop.keys.license",
                 "license_file": self._license_file,
                 "license_id": self._license_id,
+                "license_subject": self._subject,
+                "license_expires_at": self._expires_at,
                 "license_path_policy": (
                     LICENSE_PATH_POLICY_BUNDLED_RELATIVE if self._bundle_license else LICENSE_PATH_POLICY_ENV_ONLY
                 ),
@@ -208,6 +251,7 @@ class LicenseFileKeyProvider(KeyProvider):
                     "required": self._machine_fingerprint is not None,
                     "env": LICENSE_MACHINE_FINGERPRINT_ENV,
                 },
+                "allowed_module_hash_count": len(self._allowed_module_hashes),
                 "revocation_env": LICENSE_REVOCATION_FILE_ENV,
                 "license_signature_required": self._license_sign_key is not None,
                 "license_signature_key_id": self._license_sign_key_id if self._license_sign_key is not None else None,

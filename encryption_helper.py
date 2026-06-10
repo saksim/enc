@@ -46,6 +46,10 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
 from enc2sop.keys import get_key_provider
+from enc2sop.protect.hardening import HARDENING_PROFILE_OFF
+from enc2sop.protect.hardening import SUPPORTED_HARDENING_PROFILES
+from enc2sop.protect.hardening import hardening_manifest
+from enc2sop.protect.hardening import normalize_hardening_profile
 from decryption_helper import runtime_py_source
 from soenc_config import SoencProjectConfig
 from soenc_config import load_project_config
@@ -1040,7 +1044,9 @@ def protect_project(
     key_provider,
     require_native_runtime_loader,
     dev_insecure_ok=False,
+    hardening_profile=HARDENING_PROFILE_OFF,
 ):
+    hardening_profile = normalize_hardening_profile(hardening_profile)
     output_dir = reset_directory(output_dir)
 
     root = target.parent if target.is_file() else target
@@ -1148,6 +1154,7 @@ def protect_project(
             },
         },
         "key_management": manifest_key_management_payload(key_mode, dev_insecure_ok=dev_insecure_ok),
+        "build_hardening": hardening_manifest(hardening_profile),
         "skipped_files": [issue.relative_path for issue in generated_issues],
         "syntax_issues": [
             {
@@ -2044,6 +2051,7 @@ def compile_with_batch_builder(
     vcvars_path=None,
     manifest_sign_key=None,
     require_manifest_signature=False,
+    hardening_profile=HARDENING_PROFILE_OFF,
 ):
     builder = Path(__file__).resolve().parent / "py2_linux_rec_opera.py"
     env = prepare_windows_build_env(
@@ -2051,12 +2059,15 @@ def compile_with_batch_builder(
         profile=build_profile,
         vcvars_path=vcvars_path,
     ) if os.name == "nt" else None
+    hardening_profile = normalize_hardening_profile(hardening_profile)
     command = [
         str(python_exe),
         str(builder),
         str(output_dir),
         "--build-profile",
         build_profile,
+        "--hardening-profile",
+        hardening_profile,
     ]
     if vcvars_path:
         command.extend(["--vcvars-path", str(vcvars_path)])
@@ -2235,6 +2246,12 @@ def parse_args(argv=None):
         "--vcvars-path",
         help="Optional explicit vcvars64.bat path for windows-msvc profile.",
     )
+    parser.add_argument(
+        "--hardening-profile",
+        default=None,
+        choices=SUPPORTED_HARDENING_PROFILES,
+        help="P2-C hardening profile for native build flags, strip-symbols, and Cython directives.",
+    )
     add_tristate_flag(
         parser,
         "precheck-only",
@@ -2304,6 +2321,22 @@ def parse_args(argv=None):
         "--license-machine-fingerprint",
         default=None,
         help="Optional machine fingerprint bound into generated license JSON when keys.mode=license-file.",
+    )
+    parser.add_argument(
+        "--license-subject",
+        default=None,
+        help="Optional subject/customer identifier recorded in generated license JSON.",
+    )
+    parser.add_argument(
+        "--license-expires-at",
+        default=None,
+        help="Optional ISO-8601 expiration timestamp enforced by license-file runtime.",
+    )
+    parser.add_argument(
+        "--license-allowed-module-hash",
+        action="append",
+        default=None,
+        help="Optional allowed module hash metadata entry. Repeat to record multiple signed entries.",
     )
     parser.add_argument(
         "--license-sign-key-file",
@@ -2393,6 +2426,7 @@ def finalize_arg_defaults(args):
         args.require_manifest_signature = False
     if args.runtime_native_loader is None:
         args.runtime_native_loader = False
+    args.hardening_profile = normalize_hardening_profile(args.hardening_profile)
     if args.bundle_license is None:
         args.bundle_license = False
     if args.function is None:
@@ -2436,6 +2470,9 @@ def main(argv=None):
         args.license_id,
         args.bundle_license,
         args.license_machine_fingerprint,
+        args.license_subject,
+        args.license_expires_at,
+        args.license_allowed_module_hash,
         args.license_sign_key_file,
         args.license_sign_key_b64,
         args.license_sign_key_id,
@@ -2443,6 +2480,7 @@ def main(argv=None):
     if key_mode != LICENSE_FILE_MODE and any(bool(value) for value in license_args):
         raise ValueError(
             "--license-file/--license-id/--bundle-license/--license-machine-fingerprint/"
+            "--license-subject/--license-expires-at/--license-allowed-module-hash/"
             "--license-sign-key-* require keys.mode=license-file"
         )
     key_provider_mode = provider_key_mode(key_mode)
@@ -2486,6 +2524,11 @@ def main(argv=None):
             "bundle_license": args.bundle_license if key_mode == LICENSE_FILE_MODE else None,
             "license_machine_fingerprint": (
                 args.license_machine_fingerprint if key_mode == LICENSE_FILE_MODE else None
+            ),
+            "license_subject": args.license_subject if key_mode == LICENSE_FILE_MODE else None,
+            "license_expires_at": args.license_expires_at if key_mode == LICENSE_FILE_MODE else None,
+            "license_allowed_module_hashes": (
+                args.license_allowed_module_hash if key_mode == LICENSE_FILE_MODE else None
             ),
             "license_sign_key": license_sign_key if key_mode == LICENSE_FILE_MODE else None,
             "license_sign_key_id": args.license_sign_key_id if key_mode == LICENSE_FILE_MODE else None,
@@ -2565,6 +2608,7 @@ def main(argv=None):
         key_provider=key_provider,
         require_native_runtime_loader=args.runtime_native_loader,
         dev_insecure_ok=args.dev_insecure_ok,
+        hardening_profile=args.hardening_profile,
     )
     if project_config is not None:
         manifest_path = actual_output_dir / "build_manifest.json"
@@ -2602,6 +2646,7 @@ def main(argv=None):
             vcvars_path=vcvars_path,
             manifest_sign_key=manifest_sign_key,
             require_manifest_signature=args.require_manifest_signature,
+            hardening_profile=args.hardening_profile,
         )
         if dist_dir:
             actual_dist_dir, native_files = copy_release(
@@ -2648,6 +2693,7 @@ def main(argv=None):
             RUNTIME_LOADER_MODE_NATIVE_ONLY if args.runtime_native_loader else RUNTIME_LOADER_MODE_DEFAULT
         )
     )
+    print("hardening_profile={0}".format(args.hardening_profile))
     for item in result.processed_files:
         print(f"file={item.relative_path}")
         print(f"protected={','.join(item.protected_symbols) if item.protected_symbols else 'none'}")

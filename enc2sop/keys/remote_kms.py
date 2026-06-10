@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Remote-KMS key provider contract and stub implementation."""
+"""Remote-KMS key provider contract and HTTP JSON unwrap metadata."""
 
 import hashlib
 import secrets
@@ -15,7 +15,7 @@ REMOTE_KMS_REQUEST_SCHEMA = "enc2sop-kms-request/v1"
 REMOTE_KMS_RESPONSE_SCHEMA = "enc2sop-kms-response/v1"
 REMOTE_KMS_TOKEN_ENV = "SOENC_KMS_TOKEN"
 REMOTE_KMS_DEFAULT_PROFILE = "default"
-REMOTE_KMS_DEFAULT_ENDPOINT = "stub://enc2sop/remote-kms"
+REMOTE_KMS_DEFAULT_ENDPOINT = ""
 REMOTE_KMS_DEFAULT_KEY_ID = "kms-key-default"
 REMOTE_KMS_DEFAULT_TIMEOUT_SEC = 3.0
 REMOTE_KMS_DEFAULT_MAX_RETRIES = 2
@@ -55,10 +55,11 @@ def _normalize_non_negative_int(value, field_name, default_value):
 
 class RemoteKmsKeyProvider(KeyProvider):
     """
-    Stub provider for remote-KMS integration.
+    Provider for remote-KMS runtime key unwrap integration.
 
-    Key refs include a strict request/response/retry contract so runtime and
-    future KMS clients can share a stable interface before full integration.
+    Key refs include the HTTP JSON request/response/retry/error contract used
+    by the protected-module runtime. This provider never resolves remote keys
+    locally; runtime must call the configured KMS endpoint and fail closed.
     """
 
     mode = REMOTE_KMS_MODE
@@ -78,6 +79,10 @@ class RemoteKmsKeyProvider(KeyProvider):
         context = context if isinstance(context, dict) else {}
         self._kms_profile = _normalize_text(context.get("kms_profile"), "kms_profile") or REMOTE_KMS_DEFAULT_PROFILE
         self._kms_endpoint = _normalize_text(context.get("kms_endpoint"), "kms_endpoint") or REMOTE_KMS_DEFAULT_ENDPOINT
+        if not self._kms_endpoint:
+            raise ValueError("kms_endpoint is required when keys.mode=remote-kms")
+        if not (self._kms_endpoint.startswith("https://") or self._kms_endpoint.startswith("http://")):
+            raise ValueError("kms_endpoint must be http(s)")
         self._kms_key_id = _normalize_text(context.get("kms_key_id"), "kms_key_id") or REMOTE_KMS_DEFAULT_KEY_ID
         self._kms_token_env = _normalize_text(context.get("kms_token_env"), "kms_token_env") or REMOTE_KMS_TOKEN_ENV
         self._kms_timeout_sec = _normalize_timeout(context.get("kms_timeout_sec"))
@@ -162,10 +167,19 @@ class RemoteKmsKeyProvider(KeyProvider):
                     "mode": "fail-closed",
                     "fatal_errors": ["unauthorized", "not_found", "integrity_error", "contract_error"],
                 },
-                "kms_stub": {
-                    "enabled": True,
-                    "implemented": False,
-                    "detail": "runtime intentionally raises until real remote KMS client is integrated",
+                "kms_runtime_client": {
+                    "implemented": True,
+                    "protocol": "http-json-unwrap-v1",
+                    "auth": "bearer-token-env",
+                    "plaintext_key_field": "plaintext_key_b64",
+                    "fail_closed": True,
+                },
+                "kms_server_requirements": {
+                    "identity_auth": True,
+                    "audit_logging": True,
+                    "revocation": True,
+                    "rate_limiting": True,
+                    "no_long_term_master_key_to_client": True,
                 },
                 "wrapped_key_count": self._wrapped_key_count,
             }

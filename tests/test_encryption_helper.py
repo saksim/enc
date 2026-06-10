@@ -2159,6 +2159,60 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             ):
                 exec(protected, module_globals, module_globals)
 
+    def test_main_hardening_profile_records_manifest_without_native_compile(self):
+        root = self.make_case_root("hardening_manifest")
+        source = root / "main.py"
+        source.write_text("def ok():\n    return 1\n", encoding="utf-8")
+        output_dir = root / "out"
+
+        exit_code = encryption_helper.main(
+            [
+                "-t",
+                str(source),
+                "-o",
+                str(output_dir),
+                "--hardening-profile",
+                "balanced",
+                "--dev-insecure-ok",
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        hardening = manifest.get("build_hardening") or {}
+        self.assertEqual(hardening.get("profile"), "balanced")
+        self.assertTrue(hardening.get("native_compile_args"))
+        self.assertTrue(hardening.get("native_link_args"))
+        self.assertIn("reverse-engineering cost only", hardening.get("caveat") or "")
+
+    def test_compile_with_batch_builder_passes_hardening_profile(self):
+        root = self.make_case_root("hardening_compile_cmd")
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "build_manifest.json").write_text(
+            json.dumps({"runtime_files": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        commands = []
+
+        def fake_run(command, check, cwd, env):
+            commands.append(command)
+            (output_dir / "build").mkdir(parents=True, exist_ok=True)
+
+        with mock.patch("encryption_helper.prepare_windows_build_env", return_value=None):
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                build_dir = encryption_helper.compile_with_batch_builder(
+                    python_exe=Path(sys.executable),
+                    output_dir=output_dir,
+                    build_profile=encryption_helper.DEFAULT_BUILD_PROFILE,
+                    hardening_profile="balanced",
+                )
+
+        self.assertEqual(build_dir, output_dir / "build")
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--hardening-profile", commands[0])
+        self.assertEqual(commands[0][commands[0].index("--hardening-profile") + 1], "balanced")
+
     def test_main_runtime_native_loader_toggle_sets_manifest_loader_mode(self):
         root = self.make_case_root("runtime_loader_manifest")
         source = root / "main.py"
@@ -2363,7 +2417,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             else:
                 os.environ["SOENC_LICENSE_FILE"] = old_license
 
-    def test_remote_kms_mode_emits_stub_key_contract_and_runtime_fails_closed(self):
+    def test_remote_kms_mode_emits_key_contract_and_runtime_fails_closed_without_token(self):
         root = self.make_case_root("remote_kms_mode")
         project_root = root / "project"
         pkg = project_root / "pkg"
@@ -2416,7 +2470,9 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(key_mgmt.get("kms_endpoint"), "https://kms.example.local/v1")
         self.assertEqual(key_mgmt.get("kms_key_id"), "main-key")
         self.assertEqual(key_mgmt.get("kms_token_env"), "SOENC_KMS_TEST_TOKEN")
-        self.assertTrue((key_mgmt.get("kms_stub") or {}).get("enabled"))
+        self.assertTrue((key_mgmt.get("kms_runtime_client") or {}).get("implemented"))
+        self.assertEqual((key_mgmt.get("kms_runtime_client") or {}).get("protocol"), "http-json-unwrap-v1")
+        self.assertNotIn("kms_stub", key_mgmt)
 
         protected_source = (output_dir / "pkg" / "mod.py").read_text(encoding="utf-8")
         self.assertIn("'mode': 'remote-kms'", protected_source)
@@ -2425,11 +2481,9 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertIn("'token_env': 'SOENC_KMS_TEST_TOKEN'", protected_source)
         self.assertIn("'retry_policy': {'max_retries': 3, 'backoff_ms': 700", protected_source)
 
-        with self.assertRaisesRegex(RuntimeError, "token env var is missing"):
-            self._import_module_from_root(output_dir, "pkg", "mod")
-
-        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "runtime integration is stubbed"):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SOENC_KMS_TEST_TOKEN", None)
+            with self.assertRaisesRegex(RuntimeError, "token env var is missing"):
                 self._import_module_from_root(output_dir, "pkg", "mod")
 
     def test_remote_kms_cli_args_require_remote_kms_mode(self):

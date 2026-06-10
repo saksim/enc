@@ -1,9 +1,12 @@
 import base64
+import hashlib
 import os
 import unittest
 import json
+import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from enc2sop.keys import LicenseFileKeyProvider
 from enc2sop.keys import LocalEmbeddedKeyProvider
@@ -13,6 +16,10 @@ from enc2sop.keys import unpack_local_embedded_key
 from enc2sop.keys.provider import KeyProvider
 from enc2sop.keys.provider import register_key_provider
 from decryption_helper import _license_key_from_ref
+from decryption_helper import _remote_kms_unwrap_key
+from decryption_helper import _resolve_key
+from decryption_helper import runtime_py_source
+from decryption_helper import runtime_pyx_source
 
 
 class _UnitTestProvider(KeyProvider):
@@ -23,6 +30,60 @@ class _UnitTestProvider(KeyProvider):
 
     def resolve_key(self, key_ref):
         return b"\x00"
+
+
+class _MockHttpResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._payload
+
+
+def _remote_kms_key_ref(
+    key,
+    *,
+    endpoint="https://kms.example.local/v1/unwrap",
+    token_env="SOENC_KMS_TEST_TOKEN",
+    max_retries=0,
+    backoff_ms=0,
+):
+    return {
+        "mode": "remote-kms",
+        "key_handle": "rk_test_handle",
+        "key_id": "main-key",
+        "wrapped_key": {
+            "scheme": "kms-handle-v1",
+            "fingerprint_sha256": hashlib.sha256(key).hexdigest(),
+        },
+        "request": {
+            "schema": "enc2sop-kms-request/v1",
+            "operation": "unwrap_data_key",
+            "profile": "prod",
+            "endpoint": endpoint,
+            "token_env": token_env,
+            "timeout_sec": 4.5,
+        },
+        "response": {
+            "schema": "enc2sop-kms-response/v1",
+            "plaintext_key_field": "plaintext_key_b64",
+        },
+        "retry_policy": {
+            "max_retries": max_retries,
+            "backoff_ms": backoff_ms,
+            "retryable_errors": ["timeout", "unavailable", "throttled"],
+        },
+        "error_policy": {
+            "mode": "fail-closed",
+            "fatal_errors": ["unauthorized", "not_found", "integrity_error", "contract_error"],
+        },
+    }
 
 
 class KeyProviderTests(unittest.TestCase):
@@ -106,6 +167,9 @@ class KeyProviderTests(unittest.TestCase):
                 {
                     "license_file": "runtime.license.json",
                     "license_id": "lic-bound",
+                    "license_subject": "customer-a",
+                    "license_expires_at": "2099-01-01T00:00:00Z",
+                    "license_allowed_module_hashes": ["pkg/mod.py:sha256:abc123"],
                     "license_machine_fingerprint": "machine-a",
                     "license_sign_key": sign_key,
                     "license_sign_key_id": "lic-signer",
@@ -114,6 +178,11 @@ class KeyProviderTests(unittest.TestCase):
             key_ref = provider.pack_key(key)
             provider.finalize_run(out_dir, {"key_management": {"mode": "license-file"}})
             license_path = out_dir / "runtime.license.json"
+            payload = json.loads(license_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["subject"], "customer-a")
+            self.assertEqual(payload["expires_at"], "2099-01-01T00:00:00Z")
+            self.assertEqual(payload["allowed_module_hashes"], ["pkg/mod.py:sha256:abc123"])
+            self.assertEqual(payload["key_envelope"]["format"], "key-id-to-aes-key-b64-map-v1")
             revocation_path = out_dir / "revoked.json"
 
             old_env = {
@@ -148,6 +217,32 @@ class KeyProviderTests(unittest.TestCase):
                         os.environ.pop(name, None)
                     else:
                         os.environ[name] = value
+
+    def test_license_file_runtime_rejects_expired_license(self):
+        provider = LicenseFileKeyProvider()
+        key = b"0123456789abcdef0123456789abcdef"
+        with TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            provider.begin_run(
+                {
+                    "license_file": "runtime.license.json",
+                    "license_id": "lic-expired",
+                    "license_expires_at": "2000-01-01T00:00:00Z",
+                }
+            )
+            key_ref = provider.pack_key(key)
+            provider.finalize_run(out_dir, {"key_management": {"mode": "license-file"}})
+
+            old_license = os.environ.get("SOENC_LICENSE_FILE")
+            try:
+                os.environ["SOENC_LICENSE_FILE"] = str(out_dir / "runtime.license.json")
+                with self.assertRaisesRegex(ValueError, "license has expired"):
+                    _license_key_from_ref(key_ref)
+            finally:
+                if old_license is None:
+                    os.environ.pop("SOENC_LICENSE_FILE", None)
+                else:
+                    os.environ["SOENC_LICENSE_FILE"] = old_license
 
     def test_remote_kms_provider_contract_and_manifest_metadata(self):
         provider = RemoteKmsKeyProvider()
@@ -191,8 +286,167 @@ class KeyProviderTests(unittest.TestCase):
             self.assertEqual(key_mgmt["kms_token_env"], "CUSTOM_KMS_TOKEN")
             self.assertEqual(key_mgmt["kms_request_schema"], "enc2sop-kms-request/v1")
             self.assertEqual(key_mgmt["kms_response_schema"], "enc2sop-kms-response/v1")
-            self.assertTrue(key_mgmt["kms_stub"]["enabled"])
+            self.assertTrue(key_mgmt["kms_runtime_client"]["implemented"])
+            self.assertEqual(key_mgmt["kms_runtime_client"]["protocol"], "http-json-unwrap-v1")
+            self.assertTrue(key_mgmt["kms_runtime_client"]["fail_closed"])
+            self.assertNotIn("kms_stub", key_mgmt)
             self.assertEqual(key_mgmt["wrapped_key_count"], 1)
+
+    def test_remote_kms_provider_requires_real_endpoint(self):
+        provider = RemoteKmsKeyProvider()
+        with self.assertRaisesRegex(ValueError, "kms_endpoint is required"):
+            provider.begin_run({})
+        with self.assertRaisesRegex(ValueError, "kms_endpoint must be a non-empty string"):
+            provider.begin_run({"kms_endpoint": ""})
+        with self.assertRaisesRegex(ValueError, "kms_endpoint must be http"):
+            provider.begin_run({"kms_endpoint": "stub://enc2sop/remote-kms"})
+
+    def test_remote_kms_runtime_unwraps_http_json_response(self):
+        key = b"0123456789abcdef0123456789abcdef"
+        key_ref = _remote_kms_key_ref(key)
+        calls = []
+
+        def fake_urlopen(request, timeout):
+            calls.append((request, timeout))
+            self.assertEqual(timeout, 4.5)
+            self.assertEqual(request.full_url, "https://kms.example.local/v1/unwrap")
+            self.assertEqual(request.get_header("Authorization"), "Bearer token-value")
+            self.assertEqual(request.get_header("Content-type"), "application/json")
+            body = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(body["schema"], "enc2sop-kms-request/v1")
+            self.assertEqual(body["operation"], "unwrap_data_key")
+            self.assertEqual(body["profile"], "prod")
+            self.assertEqual(body["key_handle"], "rk_test_handle")
+            self.assertEqual(body["key_id"], "main-key")
+            return _MockHttpResponse(
+                json.dumps(
+                    {
+                        "schema": "enc2sop-kms-response/v1",
+                        "plaintext_key_b64": base64.b64encode(key).decode("ascii"),
+                    }
+                ).encode("utf-8")
+            )
+
+        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                self.assertEqual(_remote_kms_unwrap_key(key_ref), key)
+
+        self.assertEqual(len(calls), 1)
+
+    def test_remote_kms_runtime_rejects_missing_endpoint_and_token_without_local_fallback(self):
+        key = b"0123456789abcdef0123456789abcdef"
+        missing_endpoint_ref = _remote_kms_key_ref(key, endpoint="")
+        with self.assertRaisesRegex(ValueError, "request.endpoint"):
+            _remote_kms_unwrap_key(missing_endpoint_ref)
+
+        missing_token_ref = _remote_kms_key_ref(key)
+        missing_token_ref["parts"] = ["AA=="]
+        old_token = os.environ.pop("SOENC_KMS_TEST_TOKEN", None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "token env var is missing"):
+                _resolve_key(missing_token_ref)
+        finally:
+            if old_token is not None:
+                os.environ["SOENC_KMS_TEST_TOKEN"] = old_token
+
+    def test_remote_kms_runtime_rejects_invalid_json_and_schema(self):
+        key = b"0123456789abcdef0123456789abcdef"
+        key_ref = _remote_kms_key_ref(key)
+
+        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
+            with mock.patch(
+                "urllib.request.urlopen",
+                return_value=_MockHttpResponse(b"not-json"),
+            ):
+                with self.assertRaisesRegex(ValueError, "response must be valid JSON"):
+                    _remote_kms_unwrap_key(key_ref)
+
+            with mock.patch(
+                "urllib.request.urlopen",
+                return_value=_MockHttpResponse(b'{"schema":"wrong"}'),
+            ):
+                with self.assertRaisesRegex(ValueError, "response schema mismatch"):
+                    _remote_kms_unwrap_key(key_ref)
+
+            with mock.patch(
+                "urllib.request.urlopen",
+                return_value=_MockHttpResponse(b'{"schema":"enc2sop-kms-response/v1"}'),
+            ):
+                with self.assertRaisesRegex(ValueError, "plaintext_key_b64"):
+                    _remote_kms_unwrap_key(key_ref)
+
+    def test_remote_kms_runtime_rejects_plaintext_fingerprint_mismatch(self):
+        key = b"0123456789abcdef0123456789abcdef"
+        key_ref = _remote_kms_key_ref(key)
+        wrong_key = b"abcdef0123456789abcdef0123456789"
+
+        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
+            with mock.patch(
+                "urllib.request.urlopen",
+                return_value=_MockHttpResponse(
+                    json.dumps(
+                        {
+                            "schema": "enc2sop-kms-response/v1",
+                            "plaintext_key_b64": base64.b64encode(wrong_key).decode("ascii"),
+                        }
+                    ).encode("utf-8")
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                    _remote_kms_unwrap_key(key_ref)
+
+    def test_remote_kms_runtime_fails_closed_on_http_error_and_retries_retryable_status(self):
+        key = b"0123456789abcdef0123456789abcdef"
+        key_ref = _remote_kms_key_ref(key, max_retries=1, backoff_ms=10)
+        retryable_error = urllib.error.HTTPError(
+            key_ref["request"]["endpoint"],
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=None,
+        )
+
+        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
+            with mock.patch("time.sleep") as sleep_mock:
+                with mock.patch(
+                    "urllib.request.urlopen",
+                    side_effect=[
+                        retryable_error,
+                        _MockHttpResponse(
+                            json.dumps(
+                                {
+                                    "schema": "enc2sop-kms-response/v1",
+                                    "plaintext_key_b64": base64.b64encode(key).decode("ascii"),
+                                }
+                            ).encode("utf-8")
+                        ),
+                    ],
+                ) as urlopen_mock:
+                    self.assertEqual(_remote_kms_unwrap_key(key_ref), key)
+
+        self.assertEqual(urlopen_mock.call_count, 2)
+        sleep_mock.assert_called_once()
+
+        fatal_ref = _remote_kms_key_ref(key, max_retries=3, backoff_ms=10)
+        fatal_error = urllib.error.HTTPError(
+            fatal_ref["request"]["endpoint"],
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
+            with mock.patch("urllib.request.urlopen", side_effect=fatal_error) as urlopen_mock:
+                with self.assertRaisesRegex(RuntimeError, "http 401"):
+                    _remote_kms_unwrap_key(fatal_ref)
+        self.assertEqual(urlopen_mock.call_count, 1)
+
+    def test_remote_kms_generated_runtime_sources_are_not_stubbed(self):
+        for source in (runtime_py_source(), runtime_pyx_source()):
+            self.assertIn("remote-kms endpoint is still stubbed", source)
+            self.assertIn("remote-kms response must be valid JSON", source)
+            self.assertIn("_urlreq.urlopen", source)
+            self.assertNotIn("runtime integration is stubbed", source)
 
 
 if __name__ == "__main__":

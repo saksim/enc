@@ -19,6 +19,11 @@ import hashlib
 import hmac
 import json
 import os
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Iterable
 from typing import MutableMapping
@@ -38,6 +43,7 @@ LICENSE_PATH_POLICY_ENV_ONLY = "env-only"
 LICENSE_PATH_POLICY_BUNDLED_RELATIVE = "bundled-relative"
 LICENSE_SIGNATURE_ALGORITHM = "hmac-sha256"
 REMOTE_KMS_MODE = "remote-kms"
+REMOTE_KMS_RESPONSE_SCHEMA = "enc2sop-kms-response/v1"
 SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 SOENC_RUNTIME_API_VERSION = 1
 
@@ -161,6 +167,21 @@ def _validate_license_status(payload) -> None:
         raise ValueError("license has been revoked")
 
 
+def _validate_license_expiry(payload) -> None:
+    expires_at = str(payload.get("expires_at") or "").strip()
+    if not expires_at:
+        return
+    parse_text = expires_at[:-1] + "+00:00" if expires_at.endswith("Z") else expires_at
+    try:
+        expires = datetime.fromisoformat(parse_text)
+    except ValueError as exc:
+        raise ValueError("license expires_at is invalid") from exc
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires.astimezone(timezone.utc):
+        raise ValueError("license has expired")
+
+
 def _validate_machine_binding(payload) -> None:
     binding = payload.get("machine_binding")
     if not isinstance(binding, dict) or not binding.get("required"):
@@ -230,6 +251,7 @@ def _license_key_from_ref(key_ref) -> bytes:
         _verify_license_signature(payload)
 
     _validate_license_status(payload)
+    _validate_license_expiry(payload)
     _validate_machine_binding(payload)
 
     keys = payload.get("keys")
@@ -241,7 +263,23 @@ def _license_key_from_ref(key_ref) -> bytes:
     return _decode_license_key(key_b64)
 
 
-def _remote_kms_stub_error(key_ref):
+def _decode_remote_plaintext_key(value) -> bytes:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("remote-kms response plaintext_key_b64 must be a non-empty base64 string")
+    try:
+        key = base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise ValueError("remote-kms response plaintext_key_b64 is not valid base64") from exc
+    if len(key) not in (16, 24, 32):
+        raise ValueError("remote-kms response plaintext_key_b64 must decode to 16/24/32-byte AES key")
+    return key
+
+
+def _remote_kms_retryable_http_status(status_code) -> bool:
+    return int(status_code) in (408, 429, 500, 502, 503, 504)
+
+
+def _remote_kms_unwrap_key(key_ref):
     if not isinstance(key_ref, dict):
         raise ValueError("remote-kms key_ref must be a dict")
     required = ("key_handle", "key_id", "request", "response", "retry_policy", "error_policy")
@@ -253,15 +291,85 @@ def _remote_kms_stub_error(key_ref):
         raise ValueError("remote-kms key_ref request must be a dict")
     if request.get("operation") != "unwrap_data_key":
         raise ValueError("remote-kms request.operation must be unwrap_data_key")
+    endpoint = str(request.get("endpoint") or "").strip()
+    if not endpoint:
+        raise ValueError("remote-kms request.endpoint must be a non-empty string")
+    if endpoint.startswith("stub://"):
+        raise RuntimeError("remote-kms endpoint is still stubbed: {0}".format(endpoint))
+    if not (endpoint.startswith("https://") or endpoint.startswith("http://")):
+        raise ValueError("remote-kms request.endpoint must be http(s)")
     token_env = str(request.get("token_env") or "").strip()
     if not token_env:
         raise ValueError("remote-kms request.token_env must be a non-empty string")
-    if not os.environ.get(token_env, "").strip():
+    token = os.environ.get(token_env, "").strip()
+    if not token:
         raise RuntimeError("remote-kms token env var is missing: {0}".format(token_env))
-    raise RuntimeError(
-        "remote-kms provider is configured but runtime integration is stubbed; "
-        "implement remote unwrap client for key_handle={0}".format(key_ref.get("key_handle"))
-    )
+    response_contract = key_ref.get("response")
+    if not isinstance(response_contract, dict):
+        raise ValueError("remote-kms key_ref response must be a dict")
+    if response_contract.get("schema") != REMOTE_KMS_RESPONSE_SCHEMA:
+        raise ValueError("remote-kms response schema mismatch")
+    plaintext_field = str(response_contract.get("plaintext_key_field") or "plaintext_key_b64").strip()
+    if not plaintext_field:
+        raise ValueError("remote-kms response plaintext field must be non-empty")
+    retry_policy = key_ref.get("retry_policy") if isinstance(key_ref.get("retry_policy"), dict) else {}
+    max_retries = int(retry_policy.get("max_retries") or 0)
+    backoff_ms = int(retry_policy.get("backoff_ms") or 0)
+    timeout_sec = float(request.get("timeout_sec") or 3.0)
+    body = json.dumps(
+        {
+            "schema": request.get("schema") or "enc2sop-kms-request/v1",
+            "operation": "unwrap_data_key",
+            "profile": request.get("profile"),
+            "key_handle": key_ref.get("key_handle"),
+            "key_id": key_ref.get("key_id"),
+            "wrapped_key": key_ref.get("wrapped_key"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {
+        "Authorization": "Bearer {0}".format(token),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            http_request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(http_request, timeout=timeout_sec) as response:
+                raw = response.read()
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception as exc:
+                raise ValueError("remote-kms response must be valid JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("remote-kms response must be a JSON object")
+            if payload.get("schema") != REMOTE_KMS_RESPONSE_SCHEMA:
+                raise ValueError("remote-kms response schema mismatch")
+            key = _decode_remote_plaintext_key(payload.get(plaintext_field))
+            expected_fingerprint = str((key_ref.get("wrapped_key") or {}).get("fingerprint_sha256") or "").strip().lower()
+            if expected_fingerprint:
+                actual_fingerprint = hashlib.sha256(key).hexdigest().lower()
+                if actual_fingerprint != expected_fingerprint:
+                    raise ValueError("remote-kms plaintext key fingerprint mismatch")
+            return key
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if _remote_kms_retryable_http_status(exc.code) and attempt < max_retries:
+                if backoff_ms > 0:
+                    time.sleep(backoff_ms / 1000.0)
+                continue
+            raise RuntimeError("remote-kms request failed: http {0}".format(exc.code)) from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt < max_retries:
+                if backoff_ms > 0:
+                    time.sleep(backoff_ms / 1000.0)
+                continue
+            raise RuntimeError("remote-kms request failed: {0}".format(exc.reason)) from exc
+    raise RuntimeError("remote-kms request failed: {0}".format(last_error))
 
 
 def _resolve_key(key_ref) -> bytes:
@@ -276,7 +384,7 @@ def _resolve_key(key_ref) -> bytes:
         if mode == "license-file":
             return _license_key_from_ref(key_ref)
         if mode == REMOTE_KMS_MODE:
-            return _remote_kms_stub_error(key_ref)
+            return _remote_kms_unwrap_key(key_ref)
         raise ValueError("unsupported key provider mode: {0}".format(mode or "<empty>"))
     # Backward compatibility for historical protected files that passed raw parts.
     return _join_key(key_ref)
@@ -306,6 +414,10 @@ import hashlib as _h
 import hmac as _hm
 import json as _jso
 import os as _os
+import time as _time
+import urllib.error as _urlerr
+import urllib.request as _urlreq
+from datetime import datetime as _dt, timezone as _tz
 from pathlib import Path as _P
 from Crypto.Cipher import AES as _A
 
@@ -319,6 +431,7 @@ _POLICY_ENV = "env-only"
 _POLICY_BUNDLED = "bundled-relative"
 _SIG_ALGO = "hmac-sha256"
 _KMS_MODE = "remote-kms"
+_KMS_RESP_SCHEMA = "enc2sop-kms-response/v1"
 SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 SOENC_RUNTIME_API_VERSION = 1
 
@@ -412,6 +525,21 @@ def _vl(_payload):
         raise ValueError("license has been revoked")
 
 
+def _ve(_payload):
+    _expires = str(_payload.get("expires_at") or "").strip()
+    if not _expires:
+        return
+    _parse = _expires[:-1] + "+00:00" if _expires.endswith("Z") else _expires
+    try:
+        _dt_value = _dt.fromisoformat(_parse)
+    except ValueError as _exc:
+        raise ValueError("license expires_at is invalid") from _exc
+    if _dt_value.tzinfo is None:
+        _dt_value = _dt_value.replace(tzinfo=_tz.utc)
+    if _dt.now(_tz.utc) > _dt_value.astimezone(_tz.utc):
+        raise ValueError("license has expired")
+
+
 def _vm(_payload):
     _binding = _payload.get("machine_binding")
     if not isinstance(_binding, dict) or not _binding.get("required"):
@@ -498,6 +626,7 @@ def _lk(_key_ref):
     if _sig_required or (_payload.get("signature") is not None and _os.environ.get(_VENV, "").strip()):
         _vs(_payload)
     _vl(_payload)
+    _ve(_payload)
     _vm(_payload)
     _keys = _payload.get("keys")
     if not isinstance(_keys, dict):
@@ -506,6 +635,22 @@ def _lk(_key_ref):
     if _key_b64 is None:
         raise ValueError("license missing key_id: {0}".format(_key_id))
     return _dk(_key_b64)
+
+
+def _dkms(_value):
+    if not isinstance(_value, str) or not _value.strip():
+        raise ValueError("remote-kms response plaintext_key_b64 must be a non-empty base64 string")
+    try:
+        _key = _b.b64decode(_value, validate=True)
+    except Exception as _exc:
+        raise ValueError("remote-kms response plaintext_key_b64 is not valid base64") from _exc
+    if len(_key) not in (16, 24, 32):
+        raise ValueError("remote-kms response plaintext_key_b64 must decode to 16/24/32-byte AES key")
+    return _key
+
+
+def _kr(_code):
+    return int(_code) in (408, 429, 500, 502, 503, 504)
 
 
 def _rk(_key_ref):
@@ -520,15 +665,88 @@ def _rk(_key_ref):
         raise ValueError("remote-kms key_ref request must be a dict")
     if _request.get("operation") != "unwrap_data_key":
         raise ValueError("remote-kms request.operation must be unwrap_data_key")
+    _endpoint = str(_request.get("endpoint") or "").strip()
+    if not _endpoint:
+        raise ValueError("remote-kms request.endpoint must be a non-empty string")
+    if _endpoint.startswith("stub://"):
+        raise RuntimeError("remote-kms endpoint is still stubbed: {0}".format(_endpoint))
+    if not (_endpoint.startswith("https://") or _endpoint.startswith("http://")):
+        raise ValueError("remote-kms request.endpoint must be http(s)")
     _token_env = str(_request.get("token_env") or "").strip()
     if not _token_env:
         raise ValueError("remote-kms request.token_env must be a non-empty string")
-    if not _os.environ.get(_token_env, "").strip():
+    _token = _os.environ.get(_token_env, "").strip()
+    if not _token:
         raise RuntimeError("remote-kms token env var is missing: {0}".format(_token_env))
-    raise RuntimeError(
-        "remote-kms provider is configured but runtime integration is stubbed; "
-        "implement remote unwrap client for key_handle={0}".format(_key_ref.get("key_handle"))
-    )
+    _response_contract = _key_ref.get("response")
+    if not isinstance(_response_contract, dict):
+        raise ValueError("remote-kms key_ref response must be a dict")
+    if _response_contract.get("schema") != _KMS_RESP_SCHEMA:
+        raise ValueError("remote-kms response schema mismatch")
+    _plaintext_field = str(_response_contract.get("plaintext_key_field") or "plaintext_key_b64").strip()
+    if not _plaintext_field:
+        raise ValueError("remote-kms response plaintext field must be non-empty")
+    _retry_policy = _key_ref.get("retry_policy") if isinstance(_key_ref.get("retry_policy"), dict) else {}
+    _max_retries = int(_retry_policy.get("max_retries") or 0)
+    _backoff_ms = int(_retry_policy.get("backoff_ms") or 0)
+    _timeout_sec = float(_request.get("timeout_sec") or 3.0)
+    _body = _jso.dumps(
+        {
+            "schema": _request.get("schema") or "enc2sop-kms-request/v1",
+            "operation": "unwrap_data_key",
+            "profile": _request.get("profile"),
+            "key_handle": _key_ref.get("key_handle"),
+            "key_id": _key_ref.get("key_id"),
+            "wrapped_key": _key_ref.get("wrapped_key"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    _headers = {
+        "Authorization": "Bearer {0}".format(_token),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    _last_error = None
+    for _attempt in range(_max_retries + 1):
+        try:
+            _http_request = _urlreq.Request(_endpoint, data=_body, headers=_headers, method="POST")
+            with _urlreq.urlopen(_http_request, timeout=_timeout_sec) as _response:
+                _raw = _response.read()
+            try:
+                _payload = _jso.loads(_raw.decode("utf-8"))
+            except Exception as _exc:
+                raise ValueError("remote-kms response must be valid JSON") from _exc
+            if not isinstance(_payload, dict):
+                raise ValueError("remote-kms response must be a JSON object")
+            if _payload.get("schema") != _KMS_RESP_SCHEMA:
+                raise ValueError("remote-kms response schema mismatch")
+            _key = _dkms(_payload.get(_plaintext_field))
+            _wrapped = _key_ref.get("wrapped_key") or {}
+            if not isinstance(_wrapped, dict):
+                raise ValueError("remote-kms wrapped_key must be a dict")
+            _expected_fp = str(_wrapped.get("fingerprint_sha256") or "").strip().lower()
+            if _expected_fp:
+                _actual_fp = _h.sha256(_key).hexdigest().lower()
+                if _actual_fp != _expected_fp:
+                    raise ValueError("remote-kms plaintext key fingerprint mismatch")
+            return _key
+        except _urlerr.HTTPError as _exc:
+            _last_error = _exc
+            if _kr(_exc.code) and _attempt < _max_retries:
+                if _backoff_ms > 0:
+                    _time.sleep(_backoff_ms / 1000.0)
+                continue
+            raise RuntimeError("remote-kms request failed: http {0}".format(_exc.code)) from _exc
+        except _urlerr.URLError as _exc:
+            _last_error = _exc
+            if _attempt < _max_retries:
+                if _backoff_ms > 0:
+                    _time.sleep(_backoff_ms / 1000.0)
+                continue
+            raise RuntimeError("remote-kms request failed: {0}".format(_exc.reason)) from _exc
+    raise RuntimeError("remote-kms request failed: {0}".format(_last_error))
 
 
 def _r(_key_ref):
@@ -572,6 +790,10 @@ import hashlib as _h
 import hmac as _hm
 import json as _jso
 import os as _os
+import time as _time
+import urllib.error as _urlerr
+import urllib.request as _urlreq
+from datetime import datetime as _dt, timezone as _tz
 from pathlib import Path as _P
 from Crypto.Cipher import AES as _A
 
@@ -585,6 +807,7 @@ _POLICY_ENV = "env-only"
 _POLICY_BUNDLED = "bundled-relative"
 _SIG_ALGO = "hmac-sha256"
 _KMS_MODE = "remote-kms"
+_KMS_RESP_SCHEMA = "enc2sop-kms-response/v1"
 SOENC_RUNTIME_API_MARKER = "enc2sop-runtime-core-v1"
 SOENC_RUNTIME_API_VERSION = 1
 
@@ -678,6 +901,21 @@ def _vl(_payload):
         raise ValueError("license has been revoked")
 
 
+def _ve(_payload):
+    _expires = str(_payload.get("expires_at") or "").strip()
+    if not _expires:
+        return
+    _parse = _expires[:-1] + "+00:00" if _expires.endswith("Z") else _expires
+    try:
+        _dt_value = _dt.fromisoformat(_parse)
+    except ValueError as _exc:
+        raise ValueError("license expires_at is invalid") from _exc
+    if _dt_value.tzinfo is None:
+        _dt_value = _dt_value.replace(tzinfo=_tz.utc)
+    if _dt.now(_tz.utc) > _dt_value.astimezone(_tz.utc):
+        raise ValueError("license has expired")
+
+
 def _vm(_payload):
     _binding = _payload.get("machine_binding")
     if not isinstance(_binding, dict) or not _binding.get("required"):
@@ -764,6 +1002,7 @@ def _lk(_key_ref):
     if _sig_required or (_payload.get("signature") is not None and _os.environ.get(_VENV, "").strip()):
         _vs(_payload)
     _vl(_payload)
+    _ve(_payload)
     _vm(_payload)
     _keys = _payload.get("keys")
     if not isinstance(_keys, dict):
@@ -772,6 +1011,22 @@ def _lk(_key_ref):
     if _key_b64 is None:
         raise ValueError("license missing key_id: {0}".format(_key_id))
     return _dk(_key_b64)
+
+
+def _dkms(_value):
+    if not isinstance(_value, str) or not _value.strip():
+        raise ValueError("remote-kms response plaintext_key_b64 must be a non-empty base64 string")
+    try:
+        _key = _b.b64decode(_value, validate=True)
+    except Exception as _exc:
+        raise ValueError("remote-kms response plaintext_key_b64 is not valid base64") from _exc
+    if len(_key) not in (16, 24, 32):
+        raise ValueError("remote-kms response plaintext_key_b64 must decode to 16/24/32-byte AES key")
+    return _key
+
+
+def _kr(_code):
+    return int(_code) in (408, 429, 500, 502, 503, 504)
 
 
 def _rk(_key_ref):
@@ -786,15 +1041,88 @@ def _rk(_key_ref):
         raise ValueError("remote-kms key_ref request must be a dict")
     if _request.get("operation") != "unwrap_data_key":
         raise ValueError("remote-kms request.operation must be unwrap_data_key")
+    _endpoint = str(_request.get("endpoint") or "").strip()
+    if not _endpoint:
+        raise ValueError("remote-kms request.endpoint must be a non-empty string")
+    if _endpoint.startswith("stub://"):
+        raise RuntimeError("remote-kms endpoint is still stubbed: {0}".format(_endpoint))
+    if not (_endpoint.startswith("https://") or _endpoint.startswith("http://")):
+        raise ValueError("remote-kms request.endpoint must be http(s)")
     _token_env = str(_request.get("token_env") or "").strip()
     if not _token_env:
         raise ValueError("remote-kms request.token_env must be a non-empty string")
-    if not _os.environ.get(_token_env, "").strip():
+    _token = _os.environ.get(_token_env, "").strip()
+    if not _token:
         raise RuntimeError("remote-kms token env var is missing: {0}".format(_token_env))
-    raise RuntimeError(
-        "remote-kms provider is configured but runtime integration is stubbed; "
-        "implement remote unwrap client for key_handle={0}".format(_key_ref.get("key_handle"))
-    )
+    _response_contract = _key_ref.get("response")
+    if not isinstance(_response_contract, dict):
+        raise ValueError("remote-kms key_ref response must be a dict")
+    if _response_contract.get("schema") != _KMS_RESP_SCHEMA:
+        raise ValueError("remote-kms response schema mismatch")
+    _plaintext_field = str(_response_contract.get("plaintext_key_field") or "plaintext_key_b64").strip()
+    if not _plaintext_field:
+        raise ValueError("remote-kms response plaintext field must be non-empty")
+    _retry_policy = _key_ref.get("retry_policy") if isinstance(_key_ref.get("retry_policy"), dict) else {}
+    _max_retries = int(_retry_policy.get("max_retries") or 0)
+    _backoff_ms = int(_retry_policy.get("backoff_ms") or 0)
+    _timeout_sec = float(_request.get("timeout_sec") or 3.0)
+    _body = _jso.dumps(
+        {
+            "schema": _request.get("schema") or "enc2sop-kms-request/v1",
+            "operation": "unwrap_data_key",
+            "profile": _request.get("profile"),
+            "key_handle": _key_ref.get("key_handle"),
+            "key_id": _key_ref.get("key_id"),
+            "wrapped_key": _key_ref.get("wrapped_key"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    _headers = {
+        "Authorization": "Bearer {0}".format(_token),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    _last_error = None
+    for _attempt in range(_max_retries + 1):
+        try:
+            _http_request = _urlreq.Request(_endpoint, data=_body, headers=_headers, method="POST")
+            with _urlreq.urlopen(_http_request, timeout=_timeout_sec) as _response:
+                _raw = _response.read()
+            try:
+                _payload = _jso.loads(_raw.decode("utf-8"))
+            except Exception as _exc:
+                raise ValueError("remote-kms response must be valid JSON") from _exc
+            if not isinstance(_payload, dict):
+                raise ValueError("remote-kms response must be a JSON object")
+            if _payload.get("schema") != _KMS_RESP_SCHEMA:
+                raise ValueError("remote-kms response schema mismatch")
+            _key = _dkms(_payload.get(_plaintext_field))
+            _wrapped = _key_ref.get("wrapped_key") or {}
+            if not isinstance(_wrapped, dict):
+                raise ValueError("remote-kms wrapped_key must be a dict")
+            _expected_fp = str(_wrapped.get("fingerprint_sha256") or "").strip().lower()
+            if _expected_fp:
+                _actual_fp = _h.sha256(_key).hexdigest().lower()
+                if _actual_fp != _expected_fp:
+                    raise ValueError("remote-kms plaintext key fingerprint mismatch")
+            return _key
+        except _urlerr.HTTPError as _exc:
+            _last_error = _exc
+            if _kr(_exc.code) and _attempt < _max_retries:
+                if _backoff_ms > 0:
+                    _time.sleep(_backoff_ms / 1000.0)
+                continue
+            raise RuntimeError("remote-kms request failed: http {0}".format(_exc.code)) from _exc
+        except _urlerr.URLError as _exc:
+            _last_error = _exc
+            if _attempt < _max_retries:
+                if _backoff_ms > 0:
+                    _time.sleep(_backoff_ms / 1000.0)
+                continue
+            raise RuntimeError("remote-kms request failed: {0}".format(_exc.reason)) from _exc
+    raise RuntimeError("remote-kms request failed: {0}".format(_last_error))
 
 
 def _r(_key_ref):

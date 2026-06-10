@@ -32,6 +32,7 @@ class SoencConfigTests(unittest.TestCase):
                         "precheck_only = false",
                         "skip_bad_files = true",
                         "build_profile = \"auto\"",
+                        "hardening_profile = \"balanced\"",
                         "",
                         "[keys]",
                         "mode = \"local-provider\"",
@@ -42,6 +43,9 @@ class SoencConfigTests(unittest.TestCase):
                         "license_id = \"customer-a\"",
                         "bundle_license = true",
                         "license_machine_fingerprint = \"machine-a\"",
+                        "license_subject = \"customer-a\"",
+                        "license_expires_at = \"2099-01-01T00:00:00Z\"",
+                        "license_allowed_module_hashes = [\"pkg/mod.py:sha256:abc123\"]",
                         "license_sign_key_file = \"./keys/license.key\"",
                         "license_sign_key_id = \"lic-signer\"",
                         "kms_profile = \"prod\"",
@@ -118,6 +122,7 @@ class SoencConfigTests(unittest.TestCase):
                         "precheck_only = false",
                         "skip_bad_files = true",
                         "build_profile = \"auto\"",
+                        "hardening_profile = \"balanced\"",
                         "",
                         "[keys]",
                         "mode = \"local-provider\"",
@@ -128,6 +133,9 @@ class SoencConfigTests(unittest.TestCase):
                         "license_id = \"customer-a\"",
                         "bundle_license = true",
                         "license_machine_fingerprint = \"machine-a\"",
+                        "license_subject = \"customer-a\"",
+                        "license_expires_at = \"2099-01-01T00:00:00Z\"",
+                        "license_allowed_module_hashes = [\"pkg/mod.py:sha256:abc123\"]",
                         "license_sign_key_file = \"./keys/license.key\"",
                         "license_sign_key_id = \"lic-signer\"",
                         "kms_profile = \"prod\"",
@@ -171,6 +179,9 @@ class SoencConfigTests(unittest.TestCase):
             self.assertEqual(project.cli_defaults["license_id"], "customer-a")
             self.assertTrue(project.cli_defaults["bundle_license"])
             self.assertEqual(project.cli_defaults["license_machine_fingerprint"], "machine-a")
+            self.assertEqual(project.cli_defaults["license_subject"], "customer-a")
+            self.assertEqual(project.cli_defaults["license_expires_at"], "2099-01-01T00:00:00Z")
+            self.assertEqual(project.cli_defaults["license_allowed_module_hash"], ["pkg/mod.py:sha256:abc123"])
             self.assertEqual(
                 project.cli_defaults["license_sign_key_file"],
                 str((root / "keys" / "license.key").resolve()),
@@ -199,6 +210,7 @@ class SoencConfigTests(unittest.TestCase):
             self.assertEqual(project.cli_defaults["dist_dir"], str((root / "dist").resolve()))
             self.assertTrue(project.cli_defaults["compile"])
             self.assertTrue(project.cli_defaults["runtime_native_loader"])
+            self.assertEqual(project.cli_defaults["hardening_profile"], "balanced")
             self.assertTrue(project.cli_defaults["skip_bad_files"])
 
     def test_load_project_config_rejects_invalid_profile(self):
@@ -219,6 +231,26 @@ class SoencConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(soenc_config.SoencConfigError, "build.build_profile must be one of"):
+                soenc_config.load_project_config(str(cfg_path), base_dir=root)
+
+    def test_load_project_config_rejects_invalid_hardening_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            cfg_path = root / "soenc.toml"
+            cfg_path.write_text(
+                "\n".join(
+                    [
+                        "[project]",
+                        "target = \"./src\"",
+                        "",
+                        "[build]",
+                        "hardening_profile = \"unsafe\"",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(soenc_config.SoencConfigError, "build.hardening_profile must be one of"):
                 soenc_config.load_project_config(str(cfg_path), base_dir=root)
 
     def test_load_project_config_rejects_unknown_release_key(self):
