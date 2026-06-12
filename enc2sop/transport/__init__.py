@@ -1,6 +1,7 @@
 """Transport package modules for optional airgap workflows."""
 
 from . import cli
+from . import certify
 from . import layout
 from . import ocr_adapters
 from . import ocr_embedded
@@ -13,6 +14,7 @@ from .protocol import *  # noqa: F401,F403
 
 __all__ = [
     "ocr_adapters",
+    "certify",
     "ocr_embedded",
     "ocr_pipeline",
     "ocr_runtime",

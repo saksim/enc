@@ -58,6 +58,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                 str(source),
                 "-o",
                 str(output_dir),
+                "--dev-insecure-ok",
             ]
         )
 
@@ -95,6 +96,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                     "output_dir = \"./staging\"",
                     "python_exe = \"{0}\"".format(str(Path(sys.executable)).replace("\\", "/")),
                     "build_profile = \"native\"",
+                    "hardening_profile = \"balanced\"",
                     "",
                 ]
             ),
@@ -108,6 +110,41 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         mocked_compile.assert_called_once()
         self.assertEqual(mocked_compile.call_args.kwargs["output_dir"], staging_dir.resolve())
         self.assertEqual(mocked_compile.call_args.kwargs["build_profile"], "native")
+        self.assertEqual(mocked_compile.call_args.kwargs["hardening_profile"], "balanced")
+
+    def test_build_command_cli_hardening_profile_overrides_config(self):
+        root = self.make_case_root("soenc_build_hardening_override")
+        staging_dir = root / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        config_path = root / "soenc.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[build]",
+                    "output_dir = \"./staging\"",
+                    "python_exe = \"{0}\"".format(str(Path(sys.executable)).replace("\\", "/")),
+                    "build_profile = \"native\"",
+                    "hardening_profile = \"off\"",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(encryption_helper, "compile_with_batch_builder", return_value=staging_dir / "build") as mocked_compile:
+            exit_code = soenc_cli.main(
+                [
+                    "build",
+                    "--config",
+                    str(config_path),
+                    "--hardening-profile",
+                    "balanced",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_compile.assert_called_once()
+        self.assertEqual(mocked_compile.call_args.kwargs["hardening_profile"], "balanced")
 
     def test_build_command_cli_python_exe_overrides_config_python_exe(self):
         root = self.make_case_root("soenc_build_python_exe_override")
@@ -173,7 +210,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
             str(link_python.absolute()),
         )
 
-    def test_package_command_copies_release_files(self):
+    def test_package_command_externalizes_license_by_default(self):
         root = self.make_case_root("soenc_package")
         staging_dir = root / "staging"
         build_dir = staging_dir / "build"
@@ -194,7 +231,12 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                         "validated": True,
                         "compiled_runtime_files": ["pkg/enc_rt_demo.pyd"],
                     },
-                    "key_management": {"license_file": license_rel},
+                    "key_management": {
+                        "mode": "license-file",
+                        "license_file": license_rel,
+                        "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY,
+                        "runtime_env": encryption_helper.LICENSE_FILE_ENV,
+                    },
                 }
             ),
             encoding="utf-8",
@@ -216,14 +258,68 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue((dist_dir / "pkg" / "mod.pyd").exists())
         self.assertTrue((dist_dir / "pkg" / "__init__.py").exists())
         self.assertTrue((dist_dir / "build_manifest.json").exists())
-        self.assertTrue((dist_dir / license_rel).exists())
+        self.assertFalse((dist_dir / license_rel).exists())
         bundle = json.loads((dist_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(bundle["schema"], encryption_helper.RELEASE_BUNDLE_SCHEMA)
         self.assertEqual(bundle["layout_version"], encryption_helper.RELEASE_LAYOUT_VERSION)
         self.assertTrue(bundle["bundle_contents"]["native_extension_files"])
         self.assertTrue(bundle["bundle_contents"]["runtime_compiled_files"])
         self.assertTrue(bundle["bundle_contents"]["package_init_files"])
+        self.assertTrue(bundle["bundle_contents"]["license_file"]["externalized"])
+        self.assertFalse(bundle["bundle_contents"]["license_file"]["bundled"])
+        self.assertEqual(bundle["bundle_contents"]["license_file"]["source_relative_path"], license_rel)
+        self.assertEqual(bundle["bundle_contents"]["license_file"]["runtime_env"], encryption_helper.LICENSE_FILE_ENV)
+
+    def test_package_command_bundles_license_only_with_explicit_policy(self):
+        root = self.make_case_root("soenc_package_bundle_license")
+        staging_dir = root / "staging"
+        build_dir = staging_dir / "build"
+        dist_dir = root / "dist"
+        (build_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (build_dir / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (build_dir / "pkg" / "mod.pyd").write_bytes(b"native")
+        (build_dir / "pkg" / "enc_rt_demo.pyd").write_bytes(b"native-rt")
+
+        license_rel = "licenses/demo.license.json"
+        (staging_dir / "licenses").mkdir(parents=True, exist_ok=True)
+        (staging_dir / license_rel).write_text("{\"schema\":\"enc2sop-license/v1\"}", encoding="utf-8")
+        (staging_dir / "build_manifest.json").write_text(
+            json.dumps(
+                {
+                    "runtime_files": ["pkg/enc_rt_demo.py"],
+                    "runtime_delivery": {
+                        "validated": True,
+                        "compiled_runtime_files": ["pkg/enc_rt_demo.pyd"],
+                    },
+                    "key_management": {
+                        "mode": "license-file",
+                        "license_file": license_rel,
+                        "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_BUNDLED_RELATIVE,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = soenc_cli.main(
+            [
+                "package",
+                "--staging-dir",
+                str(staging_dir),
+                "--build-dir",
+                str(build_dir),
+                "--dist-dir",
+                str(dist_dir),
+                "--bundle-license",
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((dist_dir / license_rel).exists())
+        bundle = json.loads((dist_dir / encryption_helper.RELEASE_BUNDLE_FILENAME).read_text(encoding="utf-8"))
+        self.assertTrue(bundle["bundle_contents"]["license_file"]["bundled"])
         self.assertEqual(bundle["bundle_contents"]["license_file"]["relative_path"], license_rel)
+        self.assertIn("insecure_warning", bundle["bundle_contents"]["license_file"])
 
     def test_verify_command_validates_runtime_delivery(self):
         root = self.make_case_root("soenc_verify")
@@ -333,13 +429,10 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
             "key_management": {
                 "mode": "license-file",
                 "license_file": "licenses/customer.license.json",
+                "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY,
+                "runtime_env": encryption_helper.LICENSE_FILE_ENV,
             },
         }
-        (dist_dir / "licenses").mkdir(parents=True, exist_ok=True)
-        (dist_dir / "licenses" / "customer.license.json").write_text(
-            json.dumps({"schema": "enc2sop-license/v1"}),
-            encoding="utf-8",
-        )
         encryption_helper.write_manifest(dist_dir, manifest_payload, signing_key=manifest_key, key_id="ops-main")
         release_bundle_payload = {
             "schema": encryption_helper.RELEASE_BUNDLE_SCHEMA,
@@ -354,7 +447,11 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                 "runtime_compiled_files": ["pkg/enc_rt_demo.pyd"],
                 "package_init_files": ["pkg/__init__.py"],
                 "license_file": {
-                    "relative_path": "licenses/customer.license.json",
+                    "delivery": "external",
+                    "externalized": True,
+                    "bundled": False,
+                    "source_relative_path": "licenses/customer.license.json",
+                    "runtime_env": encryption_helper.LICENSE_FILE_ENV,
                     "required_for_runtime": True,
                 },
             },
@@ -400,8 +497,11 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         receipt_path = dist_dir / encryption_helper.RELEASE_RECEIPT_FILENAME
+        tamper_report_path = dist_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME
         self.assertTrue(receipt_path.exists())
+        self.assertTrue(tamper_report_path.exists())
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        tamper_report = json.loads(tamper_report_path.read_text(encoding="utf-8"))
         self.assertEqual(receipt["schema"], encryption_helper.RELEASE_RECEIPT_SCHEMA)
         self.assertTrue(receipt["manifest_signature_required"])
         self.assertTrue(receipt["manifest_signature_present"])
@@ -410,6 +510,9 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(receipt["native_artifacts_verified"], 2)
         self.assertEqual(receipt["key_mode"], "license-file")
         self.assertEqual(receipt["package_metadata"]["name"], "demo")
+        self.assertEqual(tamper_report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertTrue(tamper_report["success"])
+        self.assertEqual(tamper_report["checks"]["binary_digest"]["artifact_count"], 2)
 
     def test_release_command_requires_signed_approval_when_enabled(self):
         root = self.make_case_root("soenc_release_approval")
@@ -647,6 +750,12 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "release bundle metadata missing"):
             soenc_cli.main(["release", "--dist-dir", str(dist_dir)])
+        tamper_report_path = dist_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME
+        self.assertTrue(tamper_report_path.exists())
+        tamper_report = json.loads(tamper_report_path.read_text(encoding="utf-8"))
+        self.assertEqual(tamper_report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertFalse(tamper_report["success"])
+        self.assertIn("release bundle metadata missing", tamper_report["failure"]["message"])
 
     def test_transport_command_delegates_to_plugin_registry(self):
         with mock.patch.object(plugin_registry, "invoke_plugin_command", autospec=True, return_value=0) as mocked:
@@ -674,6 +783,21 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mocked_print.assert_any_call("available optional plugins:")
         mocked_print.assert_any_call("  transport: optional (available)")
+        mocked_print.assert_any_call(
+            "note: certify/archive/status transport evidence commands are experimental "
+            "legacy tooling; use `soenc cm send` and `soenc cm receive` for the "
+            "current cross-media encrypted user path."
+        )
+
+    def test_transport_help_marks_evidence_tools_experimental(self):
+        parser = soenc_cli.build_parser()
+        transport_parser = parser._subparsers._group_actions[0].choices["transport"]
+        help_text = transport_parser.format_help()
+
+        self.assertIn("experimental", help_text)
+        self.assertIn("certify/archive/status", help_text)
+        self.assertIn("soenc cm send", help_text)
+        self.assertIn("soenc cm receive", help_text)
 
     def test_audit_promotion_command_passes_with_valid_evidence(self):
         root = self.make_case_root("soenc_audit_promotion_pass")

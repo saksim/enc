@@ -83,6 +83,7 @@ jobs:
       ROTATION_REPORT_FILE: ${{ github.event.inputs.rotation_report_file || '.tmp_ci/ops/rotation_rehearsal_report.json' }}
       PROMOTION_RUN_RECEIPT_FILE: ${{ github.event.inputs.promotion_run_receipt_file || '.tmp_ci/ops/promotion_run_receipt.json' }}
       PROMOTION_ARTIFACT_BUNDLE_FILE: ${{ github.event.inputs.promotion_artifact_bundle_file || '.tmp_ci/ops/promotion_artifact_bundle.zip' }}
+      NON_OCR_RELEASE_GATE_REPORT_FILE: .tmp_ci/ops/non_ocr_release_gate_report.json
       SKIP_PROMOTION_COLLECT: ${{ github.event.inputs.skip_promotion_collect || 'false' }}
       ROTATION_REHEARSAL_INPUT: ${{ github.event.inputs.rotation_rehearsal || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -118,6 +119,15 @@ jobs:
           key_id="${SOENC_RELEASE_APPROVAL_KEY_ID:-ci-approval-hmac-v1}"
           echo "SOENC_PROMOTION_APPROVER=${approver}" >> "$GITHUB_ENV"
           echo "SOENC_PROMOTION_KEY_ID=${key_id}" >> "$GITHUB_ENV"
+
+      - name: Require Protected Ref Context
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_PROTECTED:-}" != "true" ]; then
+            echo "::error::Promotion workflow requires protected ref context (GITHUB_REF_PROTECTED=true)"
+            exit 1
+          fi
 
       - name: Initialize Rotation Rehearsal Report
         shell: bash
@@ -182,8 +192,21 @@ jobs:
           source_root="${workspace_root}/src_pkg"
           staging_dir="${workspace_root}/staging"
           scope_file="${workspace_root}/scope.json"
+          ci_config="${workspace_root}/soenc.ci.toml"
+          manifest_sign_key="${workspace_root}/manifest-signing.key"
+          license_sign_key="${workspace_root}/license-signing.key"
           rm -rf "$workspace_root" "$RELEASE_DIR"
           mkdir -p "$source_root/pkg"
+          python - "$manifest_sign_key" "$license_sign_key" <<'PY'
+          from pathlib import Path
+          import secrets
+          import sys
+
+          for output in sys.argv[1:]:
+              path = Path(output)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(secrets.token_bytes(32))
+          PY
           cat <<'PYCODE' > "$source_root/__init__.py"
           """fixture package root"""
           PYCODE
@@ -204,10 +227,57 @@ jobs:
             }
           }
           JSON
-          python ./soenc.py protect -t "$source_root" -o "$staging_dir" --scope-config "$scope_file"
-          python ./soenc.py build --staging-dir "$staging_dir" --build-profile native
-          python ./soenc.py verify --staging-dir "$staging_dir"
-          python ./soenc.py package --staging-dir "$staging_dir" --dist-dir "$RELEASE_DIR"
+          cat <<TOML > "$ci_config"
+          [build]
+          output_dir = "${staging_dir}"
+          dist_dir = "${RELEASE_DIR}"
+          compile = true
+          runtime_native_loader = true
+          build_profile = "native"
+          hardening_profile = "balanced"
+
+          [keys]
+          mode = "license-file"
+          license_file = "${workspace_root}/licenses/ci-license.json"
+          license_id = "ci-mainline-beta-license"
+          bundle_license = false
+          require_manifest_signature = true
+          manifest_sign_key_file = "${manifest_sign_key}"
+          manifest_key_id = "ci-manifest-hmac-v1"
+          license_machine_fingerprint = "ci-mainline-beta-machine"
+          license_subject = "ci-mainline-beta"
+          license_sign_key_file = "${license_sign_key}"
+          license_sign_key_id = "ci-license-hmac-v1"
+
+          [release]
+          require_approval = true
+          approval_file = "${RELEASE_DIR}/release_approval.json"
+          approval_key_id = "${SOENC_PROMOTION_KEY_ID}"
+
+          [package]
+          name = "enc2sop-ci-mainline-beta-fixture"
+          version = "0.0.0-ci"
+          channel = "mainline-beta"
+          TOML
+          python encryption_helper.py \
+            --config "$ci_config" \
+            -t "$source_root" \
+            -o "$staging_dir" \
+            --scope-config "$scope_file"
+          python ./soenc.py build \
+            --config "$ci_config" \
+            --staging-dir "$staging_dir" \
+            --require-manifest-signature
+          python ./soenc.py verify \
+            --config "$ci_config" \
+            --staging-dir "$staging_dir" \
+            --require-manifest-signature
+          python ./soenc.py package \
+            --config "$ci_config" \
+            --staging-dir "$staging_dir" \
+            --dist-dir "$RELEASE_DIR" \
+            --require-manifest-signature \
+            --no-bundle-license
 
       - name: Generate Signed Release Approval
         shell: bash
@@ -226,6 +296,7 @@ jobs:
           set -euo pipefail
           python ./soenc.py release \
             --dist-dir "$RELEASE_DIR" \
+            --require-manifest-signature \
             --require-release-approval \
             --release-approval-file "$RELEASE_DIR/release_approval.json" \
             --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64" \
@@ -313,6 +384,7 @@ jobs:
           set +e
           python ./soenc.py release \
             --dist-dir "$RELEASE_DIR" \
+            --require-manifest-signature \
             --require-release-approval \
             --release-approval-file "$RELEASE_DIR/release_approval.json" \
             --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64" \
@@ -365,11 +437,21 @@ jobs:
             --promotion-workflow-file "$PROMOTION_WORKFLOW_FILE" \
             --bundle-file "$PROMOTION_ARTIFACT_BUNDLE_FILE"
 
+      - name: Run Non-OCR Release Gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/non_ocr_release_gate.py \
+            --config soenc.production.toml \
+            --dist-dir "$RELEASE_DIR" \
+            --promotion-bundle "$PROMOTION_ARTIFACT_BUNDLE_FILE" \
+            --report "$NON_OCR_RELEASE_GATE_REPORT_FILE"
+
       - name: Upload Promotion Artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: soenc-promotion-${{ github.run_id }}
+          name: soenc-promotion-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
             ${{ env.RELEASE_DIR }}/release_bundle.json
             ${{ env.RELEASE_DIR }}/release_approval.json
@@ -380,4 +462,5 @@ jobs:
             ${{ env.ROTATION_REPORT_FILE }}
             ${{ env.PROMOTION_RUN_RECEIPT_FILE }}
             ${{ env.PROMOTION_ARTIFACT_BUNDLE_FILE }}
+            ${{ env.NON_OCR_RELEASE_GATE_REPORT_FILE }}
           if-no-files-found: error

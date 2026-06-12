@@ -758,6 +758,55 @@ class TransportCoreTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertTrue(recover["success"])
         self.assertEqual(restored.read_bytes(), src.read_bytes())
 
+    def test_manifestless_ocr_safe_sidecar_with_parity_roundtrip(self) -> None:
+        root = self.make_case_root("manifestless_ocr_safe_parity")
+        src = root / "payload_ocr_safe_parity.bin"
+        src.write_bytes((b"ocr-safe-manifestless-parity\n" * 96) + bytes(range(64)))
+
+        transport = qrcode_helper.AirgapTransportLayer(
+            chunk_chars=32,
+            lines_per_page=12,
+            max_compressed_kib=64,
+            payload_alphabet_profile="ocr-safe-human-correctable-v1",
+        )
+        pkg = root / "pkg_ocr_safe_parity"
+        result = transport.export_artifact(
+            input_file=str(src),
+            output_dir=str(pkg),
+            filename_prefix="case",
+            redundancy_copies=2,
+            parity_group_size=4,
+        )
+
+        manifest_path = Path(str(result["manifest_path"]))
+        manifest_path.unlink()
+        merged_ocr = root / "ocr_safe_no_manifest.txt"
+        cfg_lines = []
+        with merged_ocr.open("w", encoding="utf-8") as handle:
+            for path in sorted((pkg / "pages_txt").glob("*.txt")):
+                for line in path.read_text(encoding="ascii").splitlines():
+                    if line.startswith("@CFG|"):
+                        cfg_lines.append(line)
+                    handle.write(line + "\n")
+
+        self.assertTrue(cfg_lines)
+        self.assertIn("|PF=O1|", cfg_lines[0])
+        self.assertIn("|PM=modular-sum|", cfg_lines[0])
+        self.assertIn("|EL=", cfg_lines[0])
+
+        restored = root / "restored_ocr_safe_no_manifest.bin"
+        recover = transport.recover_artifact(
+            manifest_path=None,
+            ocr_input_path=str(merged_ocr),
+            output_file=str(restored),
+            strict_payload_chars=False,
+        )
+
+        self.assertTrue(recover["success"])
+        self.assertEqual(recover["verification_mode"], "embedded_metadata")
+        self.assertEqual(recover["metadata_source"], "embedded_headers")
+        self.assertEqual(restored.read_bytes(), src.read_bytes())
+
     def test_recover_images_without_manifest(self) -> None:
         root = self.make_case_root("recover_images_nomani")
         src = root / "payload_recover_images.bin"

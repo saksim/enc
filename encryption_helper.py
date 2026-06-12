@@ -4,6 +4,15 @@
 
 New workflow:
   original .py -> encrypted .py staging tree -> batch Cython -> .pyd/.so
+
+V0.3 Code Protection Layer boundary:
+  - This module owns source selection, snippet encryption, protected staging
+    generation, build manifests, and release/package integrity helpers.
+  - It is intentionally separate from cross-media SOX1/QR transport; `soenc cm`
+    and legacy `soenc transport` must not import this module for help/startup.
+  - Cython/native packaging raises reverse-engineering cost only. It does not
+    replace SOX1 data encryption and must not be documented as absolute
+    protection against strong reverse engineering.
 """
 
 import argparse
@@ -37,6 +46,10 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
 from enc2sop.keys import get_key_provider
+from enc2sop.protect.hardening import HARDENING_PROFILE_OFF
+from enc2sop.protect.hardening import SUPPORTED_HARDENING_PROFILES
+from enc2sop.protect.hardening import hardening_manifest
+from enc2sop.protect.hardening import normalize_hardening_profile
 from decryption_helper import runtime_py_source
 from soenc_config import SoencProjectConfig
 from soenc_config import load_project_config
@@ -50,12 +63,24 @@ from toolchain_profile import resolve_python_executable
 DEFAULT_EXCLUDED_DIRS = {"__pycache__", ".git", ".idea", ".pytest_cache", "build", "dist"}
 DEFAULT_OUTPUT_DIR = "protected_build"
 DEFAULT_KEY_MODE = "local-embedded"
+LOCAL_EMBEDDED_DEV_INSECURE_MODE = "local-embedded-dev-insecure"
+LOCAL_EMBEDDED_INSECURE_WARNING = (
+    "local-embedded is insecure for strong reverse-engineering scenarios; "
+    "use only for dev/demo/anti-casual protection."
+)
 RUNTIME_MODULE_PREFIX = "enc_rt"
 RUNTIME_DELIVERY_MODE = "compiled_native_extension"
 NATIVE_EXTENSION_SUFFIXES = (".pyd", ".so", ".dll", ".dylib")
 DEFAULT_MANIFEST_KEY_ID = "local-hmac-v1"
 SIGNATURE_ALGORITHM_HMAC_SHA256 = "hmac-sha256"
 LICENSE_FILE_MODE = "license-file"
+LICENSE_FILE_ENV = "SOENC_LICENSE_FILE"
+LICENSE_PATH_POLICY_ENV_ONLY = "env-only"
+LICENSE_PATH_POLICY_BUNDLED_RELATIVE = "bundled-relative"
+LICENSE_BUNDLE_INSECURE_WARNING = (
+    "bundle-license copies the license sidecar into dist_native; this weakens externalized "
+    "license-file delivery and should be used only for local demos or controlled lab bundles."
+)
 REMOTE_KMS_MODE = "remote-kms"
 RUNTIME_LOADER_MODE_DEFAULT = "python-import-default"
 RUNTIME_LOADER_MODE_NATIVE_ONLY = "native-extension-required"
@@ -72,6 +97,9 @@ RELEASE_BUNDLE_FILENAME = "release_bundle.json"
 RELEASE_LAYOUT_VERSION = "v1"
 RELEASE_RECEIPT_SCHEMA = "enc2sop-release-receipt/v1"
 RELEASE_RECEIPT_FILENAME = "release_receipt.json"
+RELEASE_TAMPER_REPORT_SCHEMA = "enc2sop-release-tamper-report/v1"
+RELEASE_TAMPER_REPORT_FILENAME = "release_tamper_report.json"
+RELEASE_TAMPER_CLASSIFICATION = "anti-tamper / integrity hardening"
 RELEASE_APPROVAL_SCHEMA = "enc2sop-release-approval/v1"
 DEFAULT_RELEASE_APPROVAL_KEY_ID = "release-approval-hmac-v1"
 GITHUB_CONTEXT_KEYS = (
@@ -264,9 +292,9 @@ def _canonical_json_bytes(payload):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def _load_manifest_sign_key(key_file=None, key_b64=None):
+def _load_hmac_key(key_file=None, key_b64=None, label="signing key"):
     if key_file and key_b64:
-        raise ValueError("manifest signing key must be provided by either file or base64 string, not both")
+        raise ValueError("{0} must be provided by either file or base64 string, not both".format(label))
     raw = None
     if key_file:
         raw = key_file.read_bytes()
@@ -274,19 +302,23 @@ def _load_manifest_sign_key(key_file=None, key_b64=None):
         try:
             raw = base64.b64decode(key_b64, validate=True)
         except Exception as exc:
-            raise ValueError("manifest signing key is not valid base64") from exc
+            raise ValueError("{0} is not valid base64".format(label)) from exc
     if raw is None:
         return None
     key = raw.strip()
     if not key:
-        raise ValueError("manifest signing key must not be empty")
+        raise ValueError("{0} must not be empty".format(label))
     if len(key) < 16:
-        raise ValueError("manifest signing key must be at least 16 bytes")
+        raise ValueError("{0} must be at least 16 bytes".format(label))
     return key
 
 
+def _load_manifest_sign_key(key_file=None, key_b64=None):
+    return _load_hmac_key(key_file=key_file, key_b64=key_b64, label="manifest signing key")
+
+
 def load_release_approval_key(key_file=None, key_b64=None):
-    return _load_manifest_sign_key(key_file=key_file, key_b64=key_b64)
+    return _load_hmac_key(key_file=key_file, key_b64=key_b64, label="release approval key")
 
 
 def _manifest_payload_without_signature(manifest):
@@ -530,7 +562,7 @@ def encrypt_snippet(source):
 
 
 def pack_key_reference(key_bytes, key_mode):
-    provider = get_key_provider(key_mode or "local-embedded")
+    provider = get_key_provider(provider_key_mode(key_mode or "local-embedded"))
     key_ref = provider.pack_key(key_bytes)
     if not isinstance(key_ref, dict):
         raise ValueError("key provider must return dict key_ref")
@@ -538,6 +570,34 @@ def pack_key_reference(key_bytes, key_mode):
     if not mode:
         raise ValueError("key provider key_ref missing mode")
     return key_ref
+
+
+def provider_key_mode(key_mode):
+    normalized = str(key_mode or DEFAULT_KEY_MODE).strip().lower()
+    if normalized == LOCAL_EMBEDDED_DEV_INSECURE_MODE:
+        return DEFAULT_KEY_MODE
+    return normalized
+
+
+def manifest_key_management_payload(key_mode, dev_insecure_ok=False):
+    provider_mode = provider_key_mode(key_mode)
+    if provider_mode == DEFAULT_KEY_MODE:
+        return {
+            "mode": LOCAL_EMBEDDED_DEV_INSECURE_MODE,
+            "provider_mode": DEFAULT_KEY_MODE,
+            "provider": "enc2sop.keys.local",
+            "dev_insecure_ok": bool(dev_insecure_ok),
+            "security_boundary": "dev/demo/anti-casual only; not strong secrecy",
+            "warning": LOCAL_EMBEDDED_INSECURE_WARNING,
+        }
+    return {
+        "mode": provider_mode,
+        "provider": "enc2sop.keys.{0}".format(provider_mode.replace("-", "_")),
+    }
+
+
+def manifest_key_mode(key_mode):
+    return manifest_key_management_payload(key_mode).get("mode")
 
 
 def _provider_begin_run(provider, context):
@@ -986,7 +1046,10 @@ def protect_project(
     key_mode,
     key_provider,
     require_native_runtime_loader,
+    dev_insecure_ok=False,
+    hardening_profile=HARDENING_PROFILE_OFF,
 ):
+    hardening_profile = normalize_hardening_profile(hardening_profile)
     output_dir = reset_directory(output_dir)
 
     root = target.parent if target.is_file() else target
@@ -1093,10 +1156,8 @@ def protect_project(
                 "require_runtime_fingerprint": bool(require_native_runtime_loader),
             },
         },
-        "key_management": {
-            "mode": key_mode,
-            "provider": "enc2sop.keys.{0}".format(key_mode.replace("-", "_")),
-        },
+        "key_management": manifest_key_management_payload(key_mode, dev_insecure_ok=dev_insecure_ok),
+        "build_hardening": hardening_manifest(hardening_profile),
         "skipped_files": [issue.relative_path for issue in generated_issues],
         "syntax_issues": [
             {
@@ -1304,6 +1365,10 @@ def build_release_bundle_metadata(
     manifest,
     package_metadata=None,
     license_relative_path=None,
+    license_externalized=False,
+    license_source_relative_path=None,
+    license_runtime_env=LICENSE_FILE_ENV,
+    license_bundle_warning=None,
 ):
     release_root = normalize_path(dist_dir)
     staging_root = normalize_path(staging_dir)
@@ -1343,7 +1408,21 @@ def build_release_bundle_metadata(
     license_payload = None
     if license_relative_path:
         license_payload = {
+            "delivery": "bundled",
+            "bundled": True,
+            "externalized": False,
             "relative_path": _normalized_relpath_text(license_relative_path),
+            "required_for_runtime": True,
+        }
+        if license_bundle_warning:
+            license_payload["insecure_warning"] = str(license_bundle_warning)
+    elif license_externalized:
+        license_payload = {
+            "delivery": "external",
+            "bundled": False,
+            "externalized": True,
+            "source_relative_path": _normalized_relpath_text(license_source_relative_path or ""),
+            "runtime_env": str(license_runtime_env or LICENSE_FILE_ENV),
             "required_for_runtime": True,
         }
 
@@ -1390,6 +1469,10 @@ def write_release_bundle_metadata(
     manifest,
     package_metadata=None,
     license_relative_path=None,
+    license_externalized=False,
+    license_source_relative_path=None,
+    license_runtime_env=LICENSE_FILE_ENV,
+    license_bundle_warning=None,
 ):
     release_root = normalize_path(dist_dir)
     payload = build_release_bundle_metadata(
@@ -1399,6 +1482,10 @@ def write_release_bundle_metadata(
         manifest=manifest,
         package_metadata=package_metadata,
         license_relative_path=license_relative_path,
+        license_externalized=license_externalized,
+        license_source_relative_path=license_source_relative_path,
+        license_runtime_env=license_runtime_env,
+        license_bundle_warning=license_bundle_warning,
     )
     metadata_path = release_root / RELEASE_BUNDLE_FILENAME
     metadata_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1413,6 +1500,185 @@ def release_bundle_path(dist_dir):
 def release_receipt_path(dist_dir):
     release_dir = normalize_path(dist_dir)
     return release_dir / RELEASE_RECEIPT_FILENAME
+
+
+def release_tamper_report_path(dist_dir):
+    release_dir = normalize_path(dist_dir)
+    return release_dir / RELEASE_TAMPER_REPORT_FILENAME
+
+
+def _release_digest_record(path, release_dir, role, expected_sha256=None):
+    actual_sha256 = _sha256_file(path)
+    record = {
+        "role": str(role),
+        "relative_path": _normalized_relpath_text(path.relative_to(release_dir)),
+        "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+        "sha256": actual_sha256,
+        "size": path.stat().st_size,
+    }
+    if expected_sha256 is not None:
+        expected = str(expected_sha256 or "").strip().lower()
+        record["expected_sha256"] = expected
+        record["matches_expected"] = bool(expected) and hmac.compare_digest(actual_sha256, expected)
+    return record
+
+
+def _release_manifest_signature_report(manifest, required):
+    signature = manifest.get("signature") if isinstance(manifest, dict) else None
+    present = isinstance(signature, dict)
+    return {
+        "required": bool(required),
+        "present": present,
+        "algorithm": signature.get("algorithm") if present else None,
+        "key_id": signature.get("key_id") if present else None,
+        "digest_hex": signature.get("digest_hex") if present else None,
+    }
+
+
+def _release_import_time_check_report(manifest, runtime_compiled_rel):
+    runtime_delivery = (manifest.get("runtime_delivery") or {}) if isinstance(manifest, dict) else {}
+    trust_policy = runtime_delivery.get("trust_policy") if isinstance(runtime_delivery, dict) else {}
+    if not isinstance(trust_policy, dict):
+        trust_policy = {}
+    require_runtime_fingerprint = bool(trust_policy.get("require_runtime_fingerprint"))
+    return {
+        "available": bool(runtime_compiled_rel),
+        "loader_mode": runtime_delivery.get("loader_mode") if isinstance(runtime_delivery, dict) else None,
+        "loader_enforced": bool(runtime_delivery.get("loader_enforced")) if isinstance(runtime_delivery, dict) else False,
+        "require_runtime_fingerprint": require_runtime_fingerprint,
+        "runtime_fingerprint_binding": trust_policy.get("runtime_fingerprint_binding"),
+        "runtime_path_policy": trust_policy.get("runtime_path_policy"),
+        "failure_mode": (
+            "import raises RuntimeError on runtime path or digest mismatch"
+            if require_runtime_fingerprint
+            else "not required by manifest trust_policy"
+        ),
+    }
+
+
+def _release_binary_digest_records(release_dir, native_rel, runtime_compiled_rel):
+    runtime_set = set(_normalized_relpath_text(item) for item in runtime_compiled_rel)
+    records = []
+    for rel in native_rel:
+        path = release_dir / rel
+        role = "runtime_native_extension" if rel in runtime_set else "native_extension"
+        records.append(_release_digest_record(path, release_dir, role))
+    return records
+
+
+def _release_runtime_digest_records(release_dir, runtime_compiled_rel, bundle_fingerprint_by_path):
+    records = []
+    for runtime_rel in runtime_compiled_rel:
+        entry = bundle_fingerprint_by_path.get(runtime_rel) or {}
+        expected_digest = str(entry.get("digest_hex") or "").strip().lower() or None
+        record = _release_digest_record(
+            release_dir / runtime_rel,
+            release_dir,
+            "runtime_digest",
+            expected_sha256=expected_digest,
+        )
+        record["module_name"] = entry.get("module_name")
+        record["source_relative_path"] = entry.get("source_relative_path")
+        record["package_relative_path"] = entry.get("package_relative_path")
+        records.append(record)
+    return records
+
+
+def _write_release_tamper_report(release_dir, payload):
+    report_path = release_tamper_report_path(release_dir)
+    report_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report_path, payload
+
+
+def _release_tamper_report_payload(
+    *,
+    release_dir,
+    manifest,
+    current_bundle_digest,
+    native_rel,
+    runtime_compiled_rel,
+    bundle_fingerprint_by_path,
+    required_manifest_signature=False,
+    require_approval=False,
+    success=True,
+    failure=None,
+):
+    binary_digests = _release_binary_digest_records(release_dir, native_rel, runtime_compiled_rel)
+    runtime_digests = _release_runtime_digest_records(release_dir, runtime_compiled_rel, bundle_fingerprint_by_path)
+    payload = {
+        "schema": RELEASE_TAMPER_REPORT_SCHEMA,
+        "generated_at_utc": _utc_now_iso8601_seconds(),
+        "success": bool(success),
+        "classification": RELEASE_TAMPER_CLASSIFICATION,
+        "strong_secrecy_boundary": False,
+        "release_root": str(release_dir),
+        "release_bundle_relative_path": RELEASE_BUNDLE_FILENAME,
+        "release_bundle_sha256": current_bundle_digest,
+        "release_approval_required": bool(require_approval),
+        "checks": {
+            "manifest_signature": _release_manifest_signature_report(
+                manifest,
+                required_manifest_signature,
+            ),
+            "binary_digest": {
+                "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                "artifact_count": len(binary_digests),
+                "artifacts": binary_digests,
+            },
+            "runtime_digest": {
+                "algorithm": RUNTIME_FINGERPRINT_ALGORITHM_SHA256,
+                "artifact_count": len(runtime_digests),
+                "artifacts": runtime_digests,
+            },
+            "import_time_check": _release_import_time_check_report(manifest, runtime_compiled_rel),
+        },
+        "failure": failure,
+    }
+    return payload
+
+
+def write_release_failure_report(
+    *,
+    dist_dir,
+    error,
+    required_manifest_signature=False,
+    require_approval=False,
+):
+    release_dir = normalize_path(dist_dir)
+    if not release_dir.exists():
+        raise FileNotFoundError("release directory not found: {0}".format(release_dir))
+    native_rel = sorted(
+        set(_normalized_relpath_text(path.relative_to(release_dir)) for path in native_extension_files(release_dir))
+    )
+    manifest = {}
+    manifest_path = release_dir / "build_manifest.json"
+    manifest_sha256 = None
+    if manifest_path.exists():
+        manifest_sha256 = _sha256_file(manifest_path)
+        try:
+            manifest = read_manifest(manifest_path)
+        except Exception:
+            manifest = {}
+    bundle_path = release_bundle_path(release_dir)
+    bundle_sha256 = _sha256_file(bundle_path) if bundle_path.exists() else None
+    failure = {
+        "type": type(error).__name__,
+        "message": str(error),
+    }
+    payload = _release_tamper_report_payload(
+        release_dir=release_dir,
+        manifest=manifest,
+        current_bundle_digest=bundle_sha256,
+        native_rel=native_rel,
+        runtime_compiled_rel=[],
+        bundle_fingerprint_by_path={},
+        required_manifest_signature=required_manifest_signature,
+        require_approval=require_approval,
+        success=False,
+        failure=failure,
+    )
+    payload["build_manifest_sha256"] = manifest_sha256
+    return _write_release_tamper_report(release_dir, payload)
 
 
 def write_release_approval(
@@ -1570,11 +1836,29 @@ def write_release_receipt(
     if license_declared:
         if not isinstance(license_payload, dict):
             raise RuntimeError("release bundle license_file metadata missing for license-file key mode")
-        license_rel = _normalized_relpath_text(license_payload.get("relative_path") or "").strip()
-        if not license_rel:
-            raise RuntimeError("release bundle license_file.relative_path is required")
-        if not (release_dir / license_rel).exists():
-            raise RuntimeError("release license sidecar missing from release directory: {0}".format(license_rel))
+        license_bundled = bool(license_payload.get("bundled"))
+        license_externalized = bool(license_payload.get("externalized"))
+        if license_bundled:
+            license_rel = _normalized_relpath_text(license_payload.get("relative_path") or "").strip()
+            if not license_rel:
+                raise RuntimeError("release bundle license_file.relative_path is required")
+            if not (release_dir / license_rel).exists():
+                raise RuntimeError("release license sidecar missing from release directory: {0}".format(license_rel))
+        elif license_externalized:
+            runtime_env = str(license_payload.get("runtime_env") or "").strip()
+            if not runtime_env:
+                raise RuntimeError("release bundle external license runtime_env is required")
+            source_rel = _normalized_relpath_text(license_payload.get("source_relative_path") or "").strip()
+            if not source_rel:
+                raise RuntimeError("release bundle external license source_relative_path is required")
+        else:
+            # Backward-compatible legacy bundle metadata: if no explicit delivery
+            # mode exists, treat relative_path as a bundled sidecar and validate it.
+            license_rel = _normalized_relpath_text(license_payload.get("relative_path") or "").strip()
+            if not license_rel:
+                raise RuntimeError("release bundle license_file.relative_path is required")
+            if not (release_dir / license_rel).exists():
+                raise RuntimeError("release license sidecar missing from release directory: {0}".format(license_rel))
     elif license_payload is not None:
         raise RuntimeError("release bundle license_file metadata present but build_manifest.json has no license_file")
 
@@ -1700,6 +1984,21 @@ def write_release_receipt(
         "release_approval_github_context": approval_github_context if isinstance(approval_github_context, dict) else None,
         "package_metadata": package_payload,
     }
+    tamper_report_payload = _release_tamper_report_payload(
+        release_dir=release_dir,
+        manifest=manifest,
+        current_bundle_digest=current_bundle_digest,
+        native_rel=native_rel,
+        runtime_compiled_rel=runtime_compiled_rel,
+        bundle_fingerprint_by_path=bundle_fingerprint_by_path,
+        required_manifest_signature=required_manifest_signature,
+        require_approval=require_approval,
+        success=True,
+        failure=None,
+    )
+    tamper_report_path, _tamper_report = _write_release_tamper_report(release_dir, tamper_report_payload)
+    receipt["release_tamper_report_relative_path"] = RELEASE_TAMPER_REPORT_FILENAME
+    receipt["release_tamper_report_sha256"] = _sha256_file(tamper_report_path)
     receipt_path = release_receipt_path(release_dir)
     receipt_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False), encoding="utf-8")
     return receipt_path, receipt
@@ -1949,6 +2248,7 @@ def compile_with_batch_builder(
     vcvars_path=None,
     manifest_sign_key=None,
     require_manifest_signature=False,
+    hardening_profile=HARDENING_PROFILE_OFF,
 ):
     builder = Path(__file__).resolve().parent / "py2_linux_rec_opera.py"
     env = prepare_windows_build_env(
@@ -1956,12 +2256,15 @@ def compile_with_batch_builder(
         profile=build_profile,
         vcvars_path=vcvars_path,
     ) if os.name == "nt" else None
+    hardening_profile = normalize_hardening_profile(hardening_profile)
     command = [
         str(python_exe),
         str(builder),
         str(output_dir),
         "--build-profile",
         build_profile,
+        "--hardening-profile",
+        hardening_profile,
     ]
     if vcvars_path:
         command.extend(["--vcvars-path", str(vcvars_path)])
@@ -1981,6 +2284,7 @@ def compile_with_batch_builder(
         signing_key=manifest_sign_key,
         require_manifest_signature=require_manifest_signature,
     )
+    shutil.copy2(output_dir / "build_manifest.json", build_dir / "build_manifest.json")
     return build_dir
 
 
@@ -2005,6 +2309,7 @@ def copy_release(
     staging_dir,
     package_metadata=None,
     require_manifest_signature=False,
+    bundle_license=False,
 ):
     build_dir = normalize_path(build_dir)
     staging_dir = normalize_path(staging_dir)
@@ -2044,8 +2349,10 @@ def copy_release(
     shutil.copy2(manifest, dist_dir / manifest.name)
     copied.append(dist_dir / manifest.name)
 
-    license_file = ((payload.get("key_management") or {}).get("license_file")) or None
+    key_management = payload.get("key_management") or {}
+    license_file = (key_management.get("license_file")) or None
     copied_license_relative = None
+    external_license_relative = None
     if license_file:
         source_license = (staging_dir / license_file).resolve()
         try:
@@ -2054,11 +2361,22 @@ def copy_release(
             raise RuntimeError("license_file escapes staging directory: {0}".format(license_file))
         if not source_license.exists():
             raise RuntimeError("license_file declared in manifest but missing: {0}".format(license_file))
-        target_license = dist_dir / license_file
-        ensure_parent(target_license)
-        shutil.copy2(source_license, target_license)
-        copied.append(target_license)
-        copied_license_relative = license_file
+        if bundle_license:
+            license_path_policy = str(key_management.get("license_path_policy") or "").strip().lower()
+            if license_path_policy != LICENSE_PATH_POLICY_BUNDLED_RELATIVE:
+                raise RuntimeError(
+                    "bundle-license requires a staging manifest created with license_path_policy={0}".format(
+                        LICENSE_PATH_POLICY_BUNDLED_RELATIVE
+                    )
+                )
+            print("WARNING: {0}".format(LICENSE_BUNDLE_INSECURE_WARNING), file=sys.stderr)
+            target_license = dist_dir / license_file
+            ensure_parent(target_license)
+            shutil.copy2(source_license, target_license)
+            copied.append(target_license)
+            copied_license_relative = license_file
+        else:
+            external_license_relative = license_file
 
     bundle_path = write_release_bundle_metadata(
         dist_dir=dist_dir,
@@ -2067,8 +2385,23 @@ def copy_release(
         manifest=payload,
         package_metadata=package_metadata,
         license_relative_path=copied_license_relative,
+        license_externalized=bool(external_license_relative),
+        license_source_relative_path=external_license_relative,
+        license_runtime_env=str(key_management.get("runtime_env") or LICENSE_FILE_ENV),
+        license_bundle_warning=LICENSE_BUNDLE_INSECURE_WARNING if copied_license_relative else None,
     )
     copied.append(bundle_path)
+    from enc2sop.protect.dist_check import run_dist_no_source_leak_check
+
+    leak_report = run_dist_no_source_leak_check(dist_dir)
+    if not leak_report.get("passed"):
+        issues = leak_report.get("issues") or []
+        summary = "; ".join(
+            "{code}:{relative_path}".format(**issue)
+            for issue in issues[:5]
+            if isinstance(issue, dict)
+        )
+        raise RuntimeError("dist no-source-leakage check failed: {0}".format(summary or len(issues)))
     return dist_dir, tuple(copied)
 
 
@@ -2111,6 +2444,12 @@ def parse_args(argv=None):
         "--vcvars-path",
         help="Optional explicit vcvars64.bat path for windows-msvc profile.",
     )
+    parser.add_argument(
+        "--hardening-profile",
+        default=None,
+        choices=SUPPORTED_HARDENING_PROFILES,
+        help="P2-C hardening profile for native build flags, strip-symbols, and Cython directives.",
+    )
     add_tristate_flag(
         parser,
         "precheck-only",
@@ -2136,6 +2475,14 @@ def parse_args(argv=None):
         "Allow Python runtime module fallback for protected symbols.",
     )
     parser.add_argument("--dist-dir", help="Copy compiled native artifacts and manifest into a clean release directory.")
+    parser.add_argument(
+        "--dev-insecure-ok",
+        action="store_true",
+        help=(
+            "Acknowledge that keys.mode=local-embedded is dev/demo/anti-casual only "
+            "and insecure for strong reverse-engineering scenarios."
+        ),
+    )
     parser.add_argument("--function", action="append", default=None, help="Single-file mode: protect only these top-level function names.")
     parser.add_argument("--class", dest="classes", action="append", default=None, help="Single-file mode: protect only these top-level class names.")
     parser.add_argument("--scope-config", help="JSON file that maps relative paths to {functions, classes, all}.")
@@ -2161,6 +2508,46 @@ def parse_args(argv=None):
         "--license-id",
         default=None,
         help="Optional stable license identifier recorded in key refs when keys.mode=license-file.",
+    )
+    add_tristate_flag(
+        parser,
+        "bundle-license",
+        "Bundle generated license JSON into dist output (insecure; emits warning and requires license-file mode).",
+        "Keep license JSON external to dist output and require runtime SOENC_LICENSE_FILE.",
+    )
+    parser.add_argument(
+        "--license-machine-fingerprint",
+        default=None,
+        help="Optional machine fingerprint bound into generated license JSON when keys.mode=license-file.",
+    )
+    parser.add_argument(
+        "--license-subject",
+        default=None,
+        help="Optional subject/customer identifier recorded in generated license JSON.",
+    )
+    parser.add_argument(
+        "--license-expires-at",
+        default=None,
+        help="Optional ISO-8601 expiration timestamp enforced by license-file runtime.",
+    )
+    parser.add_argument(
+        "--license-allowed-module-hash",
+        action="append",
+        default=None,
+        help="Optional allowed module hash metadata entry. Repeat to record multiple signed entries.",
+    )
+    parser.add_argument(
+        "--license-sign-key-file",
+        help="Path to HMAC key bytes used to sign generated license JSON when keys.mode=license-file.",
+    )
+    parser.add_argument(
+        "--license-sign-key-b64",
+        help="Base64-encoded HMAC key bytes used to sign generated license JSON.",
+    )
+    parser.add_argument(
+        "--license-sign-key-id",
+        default=None,
+        help="Key identifier recorded in generated license JSON signature metadata.",
     )
     parser.add_argument(
         "--kms-profile",
@@ -2237,6 +2624,9 @@ def finalize_arg_defaults(args):
         args.require_manifest_signature = False
     if args.runtime_native_loader is None:
         args.runtime_native_loader = False
+    args.hardening_profile = normalize_hardening_profile(args.hardening_profile)
+    if args.bundle_license is None:
+        args.bundle_license = False
     if args.function is None:
         args.function = []
     if args.classes is None:
@@ -2273,9 +2663,43 @@ def main(argv=None):
         key_b64=args.manifest_sign_key_b64,
     )
     key_mode = (project_config.key_mode if project_config is not None and project_config.key_mode else DEFAULT_KEY_MODE)
-    key_provider = get_key_provider(key_mode)
-    if key_mode != LICENSE_FILE_MODE and (args.license_file or args.license_id):
-        raise ValueError("--license-file/--license-id require keys.mode=license-file")
+    license_args = (
+        args.license_file,
+        args.license_id,
+        args.bundle_license,
+        args.license_machine_fingerprint,
+        args.license_subject,
+        args.license_expires_at,
+        args.license_allowed_module_hash,
+        args.license_sign_key_file,
+        args.license_sign_key_b64,
+        args.license_sign_key_id,
+    )
+    if key_mode != LICENSE_FILE_MODE and any(bool(value) for value in license_args):
+        raise ValueError(
+            "--license-file/--license-id/--bundle-license/--license-machine-fingerprint/"
+            "--license-subject/--license-expires-at/--license-allowed-module-hash/"
+            "--license-sign-key-* require keys.mode=license-file"
+        )
+    key_provider_mode = provider_key_mode(key_mode)
+    if key_provider_mode == DEFAULT_KEY_MODE and not args.dev_insecure_ok:
+        raise ValueError(
+            "keys.mode=local-embedded requires --dev-insecure-ok; "
+            + LOCAL_EMBEDDED_INSECURE_WARNING
+        )
+    if key_provider_mode == DEFAULT_KEY_MODE:
+        print("WARNING: {0}".format(LOCAL_EMBEDDED_INSECURE_WARNING), file=sys.stderr)
+    key_provider = get_key_provider(key_provider_mode)
+    license_sign_key_file = normalize_path(args.license_sign_key_file) if args.license_sign_key_file else None
+    license_sign_key = (
+        _load_hmac_key(
+            key_file=license_sign_key_file,
+            key_b64=args.license_sign_key_b64,
+            label="license signing key",
+        )
+        if key_mode == LICENSE_FILE_MODE
+        else None
+    )
     kms_args = (
         args.kms_profile,
         args.kms_endpoint,
@@ -2295,6 +2719,17 @@ def main(argv=None):
         {
             "license_file": args.license_file if key_mode == LICENSE_FILE_MODE else None,
             "license_id": args.license_id if key_mode == LICENSE_FILE_MODE else None,
+            "bundle_license": args.bundle_license if key_mode == LICENSE_FILE_MODE else None,
+            "license_machine_fingerprint": (
+                args.license_machine_fingerprint if key_mode == LICENSE_FILE_MODE else None
+            ),
+            "license_subject": args.license_subject if key_mode == LICENSE_FILE_MODE else None,
+            "license_expires_at": args.license_expires_at if key_mode == LICENSE_FILE_MODE else None,
+            "license_allowed_module_hashes": (
+                args.license_allowed_module_hash if key_mode == LICENSE_FILE_MODE else None
+            ),
+            "license_sign_key": license_sign_key if key_mode == LICENSE_FILE_MODE else None,
+            "license_sign_key_id": args.license_sign_key_id if key_mode == LICENSE_FILE_MODE else None,
             "kms_profile": args.kms_profile if key_mode == REMOTE_KMS_MODE else None,
             "kms_endpoint": args.kms_endpoint if key_mode == REMOTE_KMS_MODE else None,
             "kms_key_id": args.kms_key_id if key_mode == REMOTE_KMS_MODE else None,
@@ -2370,13 +2805,16 @@ def main(argv=None):
         key_mode=key_mode,
         key_provider=key_provider,
         require_native_runtime_loader=args.runtime_native_loader,
+        dev_insecure_ok=args.dev_insecure_ok,
+        hardening_profile=args.hardening_profile,
     )
     if project_config is not None:
         manifest_path = actual_output_dir / "build_manifest.json"
         manifest = read_manifest(manifest_path)
         manifest["config"] = {
             "source": str(project_config.path),
-            "key_mode": key_mode,
+            "key_mode": manifest_key_mode(key_mode),
+            "provider_key_mode": key_provider_mode,
             "package_metadata": project_config.package_metadata,
         }
         write_manifest(
@@ -2406,9 +2844,17 @@ def main(argv=None):
             vcvars_path=vcvars_path,
             manifest_sign_key=manifest_sign_key,
             require_manifest_signature=args.require_manifest_signature,
+            hardening_profile=args.hardening_profile,
         )
         if dist_dir:
-            actual_dist_dir, native_files = copy_release(build_dir, dist_dir, actual_output_dir)
+            actual_dist_dir, native_files = copy_release(
+                build_dir,
+                dist_dir,
+                actual_output_dir,
+                package_metadata=project_config.package_metadata if project_config is not None else None,
+                require_manifest_signature=args.require_manifest_signature,
+                bundle_license=args.bundle_license,
+            )
         else:
             native_files = native_extension_files(build_dir)
 
@@ -2424,11 +2870,14 @@ def main(argv=None):
     namespace_text = ".".join(namespace_package_parts)
     if project_config is not None:
         print(f"config={project_config.path}")
-        print(f"key_mode={key_mode}")
+        print(f"key_mode={manifest_key_mode(key_mode)}")
+        print(f"provider_key_mode={key_provider_mode}")
         if project_config.package_metadata:
             print("package_metadata={0}".format(json.dumps(project_config.package_metadata, ensure_ascii=False)))
     else:
-        print(f"key_mode={key_mode}")
+        print(f"key_mode={manifest_key_mode(key_mode)}")
+        if key_provider_mode != manifest_key_mode(key_mode):
+            print(f"provider_key_mode={key_provider_mode}")
     if manifest_sign_key is not None:
         print("manifest_signature=enabled")
     else:
@@ -2442,6 +2891,7 @@ def main(argv=None):
             RUNTIME_LOADER_MODE_NATIVE_ONLY if args.runtime_native_loader else RUNTIME_LOADER_MODE_DEFAULT
         )
     )
+    print("hardening_profile={0}".format(args.hardening_profile))
     for item in result.processed_files:
         print(f"file={item.relative_path}")
         print(f"protected={','.join(item.protected_symbols) if item.protected_symbols else 'none'}")
@@ -2458,4 +2908,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -81,7 +81,7 @@ python .\soenc.py promotion-dry-run --github-repo owner/repo --github-token $env
    - `soenc.toml` configuration contract
 2. [QRCODE_AIRGAP_MANUAL.md](./QRCODE_AIRGAP_MANUAL.md)
    - Optional transport plugin operations (`soenc transport ...`)
-   - Sidecar-first airgap recovery and OCR fallback behavior
+   - Sidecar-first airgap recovery, certification, and capture-corpus kit behavior
 3. [docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md](./docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md)
    - Architectural baseline and launch gate status
 4. [docs/IMPLEMENTATION_TASK_CARDS.md](./docs/IMPLEMENTATION_TASK_CARDS.md)

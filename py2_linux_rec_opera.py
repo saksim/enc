@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Batch compile a Python tree into .pyd/.so files with Cython."""
+"""Batch compile a Python tree into .pyd/.so files with Cython.
+
+V0.3 Code Protection Layer boundary:
+  - This utility owns native packaging of an already protected staging tree into
+    .so/.pyd artifacts.
+  - It is not part of SOX1, QR, OCR, scan_report, or retake_plan flows.
+  - Missing Cython/native build tooling must not prevent `soenc cm` or legacy
+    `soenc transport` help/startup from working.
+"""
 
 import os
 import shutil
@@ -11,6 +19,7 @@ from pathlib import Path
 from typing import List
 
 from setuptools import setup
+from setuptools import Extension
 from Cython.Build import cythonize
 from setuptools.command.build_ext import build_ext as _build_ext
 from toolchain_profile import DEFAULT_BUILD_PROFILE
@@ -18,6 +27,11 @@ from toolchain_profile import ENV_PREPARED
 from toolchain_profile import SUPPORTED_BUILD_PROFILES
 from toolchain_profile import prepare_windows_build_env
 from toolchain_profile import resolve_build_profile
+from enc2sop.protect.hardening import SUPPORTED_HARDENING_PROFILES
+from enc2sop.protect.hardening import apply_native_extension_hardening
+from enc2sop.protect.hardening import cython_compiler_directives
+from enc2sop.protect.hardening import normalize_hardening_profile
+from enc2sop.protect.hardening import strip_native_symbols
 
 
 class BuildExtWithoutPlatformSuffix(_build_ext):
@@ -69,7 +83,7 @@ class Py2SoUtil:
             if not self.is_valid_module_path(root, path):
                 self.invalid_module_paths.append(str(path.relative_to(root)).replace("\\", "/"))
                 continue
-            items.append(str(path))
+            items.append(str(path.relative_to(root)))
         return sorted(items)
 
     def copy_support_files(self, root, build_dir):
@@ -106,6 +120,12 @@ class Py2SoUtil:
             help="Build profile used for toolchain assumptions.",
         )
         parser.add_argument("--vcvars-path", help="Optional explicit vcvars64.bat for windows-msvc profile.")
+        parser.add_argument(
+            "--hardening-profile",
+            default="off",
+            choices=SUPPORTED_HARDENING_PROFILES,
+            help="P2-C native hardening profile for Cython directives, compiler/linker flags, and best-effort strip.",
+        )
         return parser.parse_args(argv)
 
     def run(self, argv=None, current_path="."):
@@ -126,26 +146,45 @@ class Py2SoUtil:
         print("start:", parent_dir, target_dir.name, build_dir)
         print("build_profile={0}".format(resolve_build_profile(args.build_profile)))
         print("prepared_env={0}".format(os.environ.get(ENV_PREPARED, "0")))
-        os.chdir(parent_dir)
+        os.chdir(target_dir)
 
         module_list = self.iter_python_sources(target_dir)
-        print([str(Path(item).relative_to(parent_dir)) for item in module_list])
+        print(module_list)
         if self.invalid_module_paths:
             print("skip_invalid_module_names={0}".format(len(self.invalid_module_paths)))
             for item in self.invalid_module_paths:
                 print("invalid_module_name={0}".format(item))
 
         try:
+            hardening_profile = normalize_hardening_profile(args.hardening_profile)
+            compiler_directives = dict(cython_compiler_directives(hardening_profile))
+            extensions = [
+                Extension(".".join(Path(item).with_suffix("").parts), [item])
+                for item in module_list
+            ]
+            ext_modules = cythonize(
+                extensions,
+                language_level="3",
+                compiler_directives=compiler_directives,
+            )
+            hardening_options = apply_native_extension_hardening(ext_modules, hardening_profile)
+            print("hardening_profile={0}".format(hardening_profile))
+            print("hardening_compile_args={0}".format(",".join(hardening_options.get("compile_args") or ())))
+            print("hardening_link_args={0}".format(",".join(hardening_options.get("link_args") or ())))
+            print("hardening_strip_symbols={0}".format(bool(hardening_options.get("strip_symbols"))))
             setup(
-                ext_modules=cythonize(
-                    module_list,
-                    language_level="3",
-                    compiler_directives={"always_allow_keywords": True},
-                ),
+                ext_modules=ext_modules,
                 cmdclass={"build_ext": BuildExtWithoutPlatformSuffix},
                 script_args=["build_ext", "-b", str(build_dir), "-t", str(build_temp_dir)],
             )
             self.copy_support_files(target_dir, build_dir)
+            strip_result = strip_native_symbols(build_dir, hardening_profile)
+            if strip_result.get("attempted"):
+                print("hardening_stripped_files={0}".format(len(strip_result.get("files") or ())))
+                if strip_result.get("failures"):
+                    print("hardening_strip_failures={0}".format(len(strip_result.get("failures") or ())))
+            elif strip_result.get("skipped_reason"):
+                print("hardening_strip_skipped={0}".format(strip_result.get("skipped_reason")))
         finally:
             print("cleaning......")
             self.cleanup_generated_c(target_dir)

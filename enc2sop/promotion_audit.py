@@ -193,6 +193,144 @@ def normalize_promotion_evidence_payload(evidence_payload: Mapping[str, object])
     return _normalize_evidence(evidence_payload)
 
 
+_AUDIT_INPUT_FILE_KEYS = ("policy_file", "evidence_file", "workflow_file")
+_AUDIT_INPUT_DIGEST_KEYS = ("policy_sha256", "evidence_sha256", "workflow_sha256")
+_AUDIT_SUMMARY_COUNT_KEYS = (
+    "branch_failures",
+    "environment_failures",
+    "secret_failures",
+    "workflow_failures",
+    "total_failures",
+)
+
+
+def _is_lower_hex_sha256(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if len(value) != 64:
+        return False
+    if value.lower() != value:
+        return False
+    return all(ch in "0123456789abcdef" for ch in value)
+
+
+def _required_report_text(value: object, field_name: str) -> str:
+    text = _required_text(value, field_name)
+    if text != value:
+        raise PromotionAuditError("{0} must not contain leading or trailing whitespace".format(field_name))
+    return text
+
+
+def _optional_report_text(value: object, field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    return _required_report_text(value, field_name)
+
+
+def _required_non_negative_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PromotionAuditError("{0} must be an integer >= 0".format(field_name))
+    return value
+
+
+def _normalize_audit_report_summary(summary_payload: object) -> Dict[str, object]:
+    if not isinstance(summary_payload, dict):
+        raise PromotionAuditError("promotion_audit_report.summary must be an object")
+    normalized = dict(summary_payload)
+    if "total_failures" not in summary_payload:
+        raise PromotionAuditError("promotion_audit_report.summary.total_failures is required")
+    for key in _AUDIT_SUMMARY_COUNT_KEYS:
+        if key in summary_payload:
+            normalized[key] = _required_non_negative_int(
+                summary_payload.get(key),
+                "promotion_audit_report.summary.{0}".format(key),
+            )
+    return normalized
+
+
+def _normalize_audit_report_failures(failures_payload: object) -> List[str]:
+    if not isinstance(failures_payload, list):
+        raise PromotionAuditError("promotion_audit_report.failures must be an array")
+    failures = []  # type: List[str]
+    for index, item in enumerate(failures_payload):
+        failures.append(
+            _required_report_text(
+                item,
+                "promotion_audit_report.failures[{0}]".format(index),
+            )
+        )
+    return failures
+
+
+def _normalize_audit_report_inputs(inputs_payload: object, *, passed: bool) -> Dict[str, object]:
+    if not isinstance(inputs_payload, dict):
+        raise PromotionAuditError("promotion_audit_report.inputs is required")
+    normalized = {}  # type: Dict[str, object]
+    for key in _AUDIT_INPUT_FILE_KEYS:
+        normalized[key] = _required_report_text(
+            inputs_payload.get(key),
+            "promotion_audit_report.inputs.{0}".format(key),
+        )
+    for key in _AUDIT_INPUT_DIGEST_KEYS:
+        value = inputs_payload.get(key)
+        if value is None and key == "workflow_sha256" and not passed:
+            normalized[key] = None
+            continue
+        if not _is_lower_hex_sha256(value):
+            raise PromotionAuditError(
+                "promotion_audit_report.inputs.{0} must be a 64-char lowercase hex digest".format(key)
+            )
+        normalized[key] = value
+    return normalized
+
+
+def normalize_promotion_audit_report_payload(report_payload: Mapping[str, object]) -> Dict[str, object]:
+    """Validate and normalize promotion audit report payloads for bundle handoff.
+
+    This intentionally validates the portable schema contract only. It does not
+    read bound input files or recalculate their digests; artifact-level replay
+    checks live in ``enc2sop.promotion_artifacts``.
+    """
+    if not isinstance(report_payload, dict):
+        raise PromotionAuditError("promotion_audit_report must be a JSON object")
+    schema = _required_report_text(report_payload.get("schema"), "promotion_audit_report.schema")
+    if schema != PROMOTION_AUDIT_REPORT_SCHEMA:
+        raise PromotionAuditError("unsupported promotion audit report schema: {0}".format(schema))
+    passed_value = report_payload.get("passed")
+    if not isinstance(passed_value, bool):
+        raise PromotionAuditError("promotion_audit_report.passed must be a boolean")
+
+    summary = _normalize_audit_report_summary(report_payload.get("summary"))
+    failures = _normalize_audit_report_failures(report_payload.get("failures"))
+    total_failures = int(summary.get("total_failures") or 0)
+    if total_failures != len(failures):
+        raise PromotionAuditError(
+            "promotion_audit_report.summary.total_failures must match length of promotion_audit_report.failures"
+        )
+    if passed_value and total_failures != 0:
+        raise PromotionAuditError("promotion_audit_report.summary.total_failures must be 0 when passed=true")
+    if passed_value and failures:
+        raise PromotionAuditError("promotion_audit_report.failures must be empty when passed=true")
+
+    normalized = {
+        "schema": schema,
+        "generated_at_utc": _optional_report_text(
+            report_payload.get("generated_at_utc"),
+            "promotion_audit_report.generated_at_utc",
+        ),
+        "passed": passed_value,
+        "summary": summary,
+        "failures": failures,
+        "inputs": _normalize_audit_report_inputs(report_payload.get("inputs"), passed=passed_value),
+    }  # type: Dict[str, object]
+    details = report_payload.get("details")
+    if details is not None:
+        if not isinstance(details, dict):
+            raise PromotionAuditError("promotion_audit_report.details must be an object")
+        normalized["details"] = dict(details)
+    return normalized
+
+
 def _resolve_path(value: Optional[str], *, repo_root: Path, fallback: Optional[Path] = None) -> Path:
     if value:
         candidate = Path(value).expanduser()

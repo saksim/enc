@@ -301,6 +301,53 @@ class PromotionBundleTests(unittest.TestCase):
             self.assertIn("policy/promotion_rollout_policy.json", entries)
             self.assertIn("workflow/release_promotion.yml", entries)
 
+    def test_create_promotion_artifact_bundle_fails_when_promotion_report_is_not_passed(self):
+        root = self.make_case_root("promotion_bundle_promotion_report_fail")
+        release_dir = root / "release"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        self._write_release_artifacts(release_dir)
+        (
+            evidence_path,
+            promotion_report_path,
+            rotation_path,
+            artifact_audit_path,
+            run_receipt_path,
+            _policy_path,
+            _workflow_path,
+        ) = self._write_promotion_artifacts(root)
+        promotion_report_path.write_text(
+            json.dumps(
+                {
+                    "schema": "enc2sop-promotion-audit-report/v1",
+                    "passed": False,
+                    "summary": {"total_failures": 1},
+                    "failures": ["missing branch evidence for 'main'"],
+                    "inputs": {
+                        "policy_file": str((root / "policy.json").resolve()),
+                        "policy_sha256": "a" * 64,
+                        "evidence_file": str(evidence_path.resolve()),
+                        "evidence_sha256": encryption_helper._sha256_file(evidence_path),
+                        "workflow_file": str((root / "workflow.yml").resolve()),
+                        "workflow_sha256": "b" * 64,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(promotion_bundle.PromotionArtifactBundleError, "promotion audit report must be passed=true"):
+            promotion_bundle.create_promotion_artifact_bundle(
+                dist_dir=str(release_dir),
+                promotion_evidence_file=str(evidence_path),
+                promotion_report_file=str(promotion_report_path),
+                rotation_report_file=str(rotation_path),
+                promotion_artifact_audit_report_file=str(artifact_audit_path),
+                promotion_run_receipt_file=str(run_receipt_path),
+                repo_root=root,
+            )
+
     def test_create_promotion_artifact_bundle_fails_when_audit_report_is_not_passed(self):
         root = self.make_case_root("promotion_bundle_audit_fail")
         release_dir = root / "release"

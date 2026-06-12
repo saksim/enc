@@ -1,0 +1,6719 @@
+# enc2sop Implementation Task Cards
+
+This file is the executable backlog for future Codex or GPT-5.5 coding iterations.
+
+## Delivery Rules
+
+Every card should produce:
+
+1. concrete code changes
+2. focused tests or explicit verification hooks
+3. matching doc updates when assumptions change
+
+If one card is too large for one iteration, the agent should deliver a vertical slice and update the card status plus remaining sub-scope.
+
+## Status Values
+
+- `todo`
+- `in_progress`
+- `blocked`
+- `done`
+
+## P0 Cards
+
+### CARD `ENC-P0-001`
+
+- Status: `done`
+- Goal: lazily load OCR dependencies and stop import-time coupling between core transport logic and heavy OCR backends
+- Type: refactor + stability
+- Depends on: none
+- Main files:
+  - `qrcode_helper.py`
+  - new modules under a future `enc2sop/transport/ocr/`
+- Deliverables:
+  - OCR backends loaded only when selected
+  - no `easyocr` or `torch` import at core module import time
+  - stable provider boundary for `tesseract`, `easyocr`, `external`, `sidecar`
+- Acceptance:
+  - importing the transport core does not import `easyocr`
+  - focused tests cover backend selection and lazy loading
+ - Notes (2026-05-06):
+   - `qrcode_helper.py` now uses lazy module loaders for `pytesseract`, `easyocr`, and `numpy`.
+   - Core import no longer imports `easyocr` at module load time.
+   - Added focused tests for import-time isolation and easyocr lazy-reader initialization.
+
+### CARD `ENC-P0-002`
+
+- Status: `done`
+- Goal: split `qrcode_helper.py` into bounded modules so protocol, render, OCR, recovery, and CLI are independently maintainable
+- Type: architectural refactor
+- Depends on: `ENC-P0-001`
+- Main files:
+  - `qrcode_helper.py`
+  - new package layout under future `enc2sop/transport/`
+- Deliverables:
+  - transport core protocol module
+  - render module
+  - OCR adapter module
+  - recover/analyze module
+  - thin CLI entrypoint
+- Acceptance:
+  - legacy CLI behavior still works or compatibility shim exists
+  - each module has focused tests
+- Notes (2026-05-07):
+  - Delivered a compatibility-safe vertical slice that extracts shared transport boundaries into `enc2sop.transport` while preserving legacy `qrcode_helper.py` CLI/runtime behavior.
+  - Added `enc2sop/transport/protocol.py` for protocol constants, regex patterns, OCR normalization, and base32/CRC/hash helpers.
+  - Added `enc2sop/transport/ocr_adapters.py` for lazy OCR backend discovery/loading (`pytesseract`, `easyocr`, `numpy`) and language mapping.
+  - Rewired `qrcode_helper.py` to consume extracted modules via explicit aliases while keeping existing symbol names stable for backward compatibility.
+  - Added focused regression coverage in `tests/test_transport_modules.py` to verify module extraction contracts and compatibility alias wiring.
+  - Delivered second extraction slice for rendering and CLI boundaries:
+    - Added `enc2sop/transport/render.py` for page rendering/font fallback and sidecar layout generation.
+    - Added `enc2sop/transport/cli.py` for parser construction, output helpers (`print_json`, `save_json`, `save_missing_chunks`), and command dispatch.
+    - Rewired `qrcode_helper.py` compatibility layer:
+      - `AirgapTransportLayer._load_font` delegates to `enc2sop.transport.render.load_font`.
+      - `AirgapTransportLayer._render_page` delegates to `enc2sop.transport.render.render_page`.
+      - `_build_parser` and `main` delegate to `enc2sop.transport.cli`.
+      - analyze report/missing-chunk writers now call extracted CLI helpers.
+    - Extended `tests/test_transport_modules.py` with extraction-contract assertions for CLI and render delegation paths.
+  - Remaining sub-scope to complete card:
+    - complete conversion of `qrcode_helper.py` into a thinner compatibility shim (legacy class methods still host recover/ocr pipeline logic)
+  - Notes (2026-05-07, iteration 3):
+    - Extracted recover/verify/analyze orchestration into `enc2sop/transport/recover.py`.
+    - `qrcode_helper.AirgapTransportLayer` now delegates the following compatibility entrypoints to `enc2sop.transport.recover`:
+      - `recover_artifact`
+      - `_recover_artifact_against_manifest`
+      - `_recover_artifact_without_manifest`
+      - `verify_ocr_text`
+      - `_verify_ocr_text_against_manifest`
+      - `_verify_ocr_text_without_manifest`
+      - `analyze_ocr_text`
+      - `_analyze_ocr_text_against_manifest`
+      - `_recover_encoded_payload`
+    - Added focused delegation regression tests in `tests/test_transport_modules.py`.
+    - Full test suite remains green after extraction (`75 passed, 3 skipped`).
+    - Remaining sub-scope to complete card:
+      - extract deeper parse/recovery internals (chunk parsing, conflict resolution, parity internals) from `qrcode_helper.py` into transport modules
+      - finish reducing `qrcode_helper.py` toward a thin compatibility facade over transport package boundaries
+  - Notes (2026-05-07, iteration 4):
+    - Added `enc2sop/transport/parser.py` and extracted core recovery internals:
+      - missing-chunk records/retake planning
+      - data/parity chunk presence counting
+      - parity recovery
+      - parity-conflict downgrade handling
+      - package-hash and structural conflict resolution
+      - parse-error escalation
+    - Rewired `enc2sop/transport/recover.py` to consume parser helpers directly (instead of invoking those paths through legacy class-bound methods).
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods to delegate to `enc2sop.transport.parser` for these internals.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` to assert delegation for parser-backed compatibility methods.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 14 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 79 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract `_parse_ocr_chunks` / `_parse_ocr_chunks_with_total` (and payload-only parser path) into transport parser modules
+      - extract embedded metadata scanning/inference helpers into transport parser modules
+      - leave `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-07, iteration 5):
+    - Extracted remaining OCR parse and metadata inference internals into `enc2sop/transport/parser.py`:
+      - `_parse_ocr_chunks`
+      - `_parse_ocr_chunks_payload_only_manifest`
+      - `_parse_ocr_chunks_with_total`
+      - `_choose_majority_metadata_value`
+      - `_scan_transport_metadata`
+      - `_build_inferred_manifest_from_ocr`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above to thin delegation wrappers against `enc2sop.transport.parser`.
+    - Added focused delegation assertions in `tests/test_transport_modules.py` for parser parse/metadata entrypoints.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 16 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 81 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - reduce residual OCR/image pipeline internals in `qrcode_helper.py` into bounded transport modules so the file becomes a near-thin compatibility facade
+  - Notes (2026-05-08, iteration 6):
+    - Added `enc2sop/transport/layout.py` and extracted manifest/page-layout mapping helpers out of `qrcode_helper.py`:
+      - `_get_render_layout_pages`
+      - `_line_meta_has_sidecar`
+      - `_page_layout_has_sidecar`
+      - `_page_layouts_support_sidecar`
+      - `_manifest_has_page_entries`
+      - `_resolve_image_page_number`
+      - `_manifest_page_entries`
+      - `_manifest_entries_in_transport_order`
+      - `_manifest_chunk_payload_length`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.layout`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `layout`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for all extracted layout helper boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 17 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 82 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract residual OCR/image processing internals (band detection, manifest-guided crop routing, sidecar decode/image OCR pipeline helpers) into bounded transport modules
+      - keep `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-08, iteration 7):
+    - Added `enc2sop/transport/ocr_pipeline.py` and extracted manifest-guided OCR/image pipeline helpers out of `qrcode_helper.py`:
+      - `_detect_text_bands`
+      - `_select_manifest_data_bands`
+      - `_crop_primary_text_band`
+      - `_ocr_payload_crop_tesseract`
+      - `_ocr_crc_crop_tesseract`
+      - `_ocr_tesseract_variants`
+      - `_ocr_payload_crop_tesseract_variants`
+      - `_ocr_crc_crop_tesseract_variants`
+      - `_ocr_generic_line_tesseract_variants`
+      - `_ocr_band_tesseract_variants`
+      - `_parse_meta_line_candidate`
+      - `_parse_cfg_line_candidate`
+      - `_parse_hash_fragment_candidate`
+      - `_parse_hash_compact_candidate`
+      - `_crc_windows_from_hints`
+      - `_score_candidate_crc_against_hints`
+      - `_repair_payload_candidate_by_crc_hint`
+      - `_choose_payload_candidate_with_crc_hint`
+      - `_ocr_manifest_guided_page_tesseract`
+      - `_ocr_image_crop_tesseract`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.ocr_pipeline`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `ocr_pipeline`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for extracted OCR pipeline boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 18 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 83 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract residual sidecar decode/structured OCR page internals and external-provider image OCR orchestration internals from `qrcode_helper.py` into bounded transport modules
+      - keep `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-08, iteration 8):
+    - Added `enc2sop/transport/ocr_runtime.py` and extracted residual sidecar/structured OCR runtime boundaries:
+      - `_ocr_image_crop_easyocr`
+      - `_decode_sidecar_payload`
+      - `_ocr_structured_page_sidecar`
+      - `_decode_manifest_guided_sidecar_payload`
+      - `_ocr_manifest_guided_page_sidecar`
+      - `_choose_payload_candidate`
+      - `_repair_payload_candidate_by_crc`
+      - `_ocr_structured_page_tesseract`
+      - `_ocr_structured_page_easyocr`
+      - `_parse_external_ocr_stdout`
+      - `_run_external_ocr_provider`
+      - `_ocr_single_image`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.ocr_runtime`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `ocr_runtime`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for all extracted OCR runtime boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 19 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 84 passed, 3 skipped
+    - Remaining sub-scope to complete card:
+      - extract remaining embedded-metadata page orchestration internals (`_ocr_embedded_metadata_page_tesseract`, `_build_inferred_manifest_from_metadata`, `_build_expected_page_entries`) from `qrcode_helper.py` into bounded transport modules
+      - keep `qrcode_helper.py` as a near-thin compatibility facade over `enc2sop.transport` boundaries
+  - Notes (2026-05-08, iteration 9):
+    - Added `enc2sop/transport/ocr_embedded.py` and extracted remaining embedded-metadata page orchestration internals from `qrcode_helper.py`:
+      - `_build_inferred_manifest_from_metadata`
+      - `_build_expected_page_entries`
+      - `_ocr_embedded_metadata_page_tesseract`
+    - Rewired `qrcode_helper.AirgapTransportLayer` compatibility methods above into thin delegation wrappers against `enc2sop.transport.ocr_embedded`.
+    - Updated `enc2sop/transport/__init__.py` export surface to include `ocr_embedded`.
+    - Expanded extraction regression coverage in `tests/test_transport_modules.py` with delegation assertions for extracted embedded-metadata helper boundaries.
+    - Verification:
+      - `python -m pytest -q tests/test_transport_modules.py` => 21 passed
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => 34 passed
+      - `python -m pytest -q` => 86 passed, 3 skipped
+    - Remaining sub-scope:
+      - none; `ENC-P0-002` is complete and `qrcode_helper.py` now serves as a compatibility facade over `enc2sop.transport` module boundaries.
+
+### CARD `ENC-P0-003`
+
+- Status: `done`
+- Goal: fix the decrypt runtime compilation chain so the runtime used by protected modules is actually compiled or intentionally packaged
+- Type: correctness + security
+- Depends on: none
+- Main files:
+  - `encryption_helper.py`
+  - `py2_linux_rec_opera.py`
+  - tests for compile output inspection
+- Deliverables:
+  - resolve `__enc_rt_*` compile-skip conflict
+  - explicit strategy for runtime module naming and packaging
+  - manifest reflects the chosen runtime delivery mode
+- Acceptance:
+  - compiled output contains or correctly packages the required runtime path
+  - regression test proves the intended behavior
+- Notes (2026-05-07):
+  - Runtime module names now use `enc_rt_*` (non-dunder), avoiding batch-compiler skip rules for `__*`.
+  - `build_manifest.json` now records `runtime_delivery` metadata with explicit delivery mode and validation contract.
+  - Build flow now validates that each staged runtime `.py` has a compiled native artifact in `build/`, and fails fast if missing.
+  - Added focused tests for compile-eligible runtime naming and runtime-delivery validation failure/success paths.
+
+### CARD `ENC-P0-004`
+
+- Status: `done`
+- Goal: add true end-to-end tests for `protect -> compile -> import compiled artifact -> execute protected code`
+- Type: testing
+- Depends on: `ENC-P0-003`
+- Main files:
+  - `tests/test_encryption_helper.py`
+  - new end-to-end fixtures
+- Deliverables:
+  - a minimal sample package compiled in test automation or a dedicated integration harness
+  - import verification for protected functions/classes
+- Acceptance:
+  - test fails on broken runtime chain
+  - test passes on corrected implementation
+- Notes (2026-05-07):
+  - Added end-to-end compile/import execution harness in `tests/test_encryption_helper.py`:
+    - `test_e2e_compiled_flow_imports_and_executes_protected_symbols`
+    - `test_e2e_compiled_flow_detects_broken_runtime_chain`
+  - Tests are dependency-gated when `Cython` is unavailable in the active interpreter.
+  - Verified pass in a toolchain-provisioned interpreter:
+    - `D:\code_environment\anaconda_all_css\py311\python.exe -m pytest -q -vv tests/test_encryption_helper.py -k e2e_compiled_flow` => 2 passed.
+  - Default environment remains stable and transparently skips compile-path tests when `Cython` is absent.
+
+### CARD `ENC-P0-005`
+
+- Status: `done`
+- Goal: replace machine-specific build paths with profile-driven toolchain discovery
+- Type: productization
+- Depends on: none
+- Main files:
+  - `encryption_helper.py`
+  - `py2_linux_rec_opera.py`
+  - new config helpers
+- Deliverables:
+  - build profile abstraction
+  - path discovery with overrides
+  - no mandatory hard-coded local paths in defaults
+- Acceptance:
+  - Windows path assumptions are configurable
+  - missing toolchain errors are explicit and actionable
+- Notes (2026-05-07):
+  - Added `toolchain_profile.py` with profile abstraction (`auto`, `windows-msvc`, `native`) and discovery helpers.
+  - `encryption_helper.py` now defaults compile interpreter to current `sys.executable` (or `SOENC_PYTHON_EXE`) instead of machine-locked paths.
+  - Added explicit CLI controls:
+    - `--build-profile`
+    - `--vcvars-path`
+  - Windows MSVC environment preparation now discovers `vcvars64.bat` via:
+    - `SOENC_VCVARS64`
+    - `VSINSTALLDIR`
+    - `vswhere.exe`
+    - standard Visual Studio installation paths
+  - `py2_linux_rec_opera.py` now consumes the same build profile inputs and no longer embeds hard-coded INCLUDE/LIB/CL path constants.
+  - Added focused tests in `tests/test_toolchain_profile.py` and extended `tests/test_encryption_helper.py` guard coverage for profile/CLI validation.
+
+### CARD `ENC-P0-006`
+
+- Status: `done`
+- Goal: introduce a unified project configuration file for the platform
+- Type: platform skeleton
+- Depends on: `ENC-P0-005`
+- Main files:
+  - new `soenc.toml` loader
+  - `encryption_helper.py`
+  - future CLI entry layer
+- Deliverables:
+  - config schema for target, scope, build profile, output dirs, key mode, package metadata
+  - CLI can load config file and merge command-line overrides
+- Acceptance:
+  - one project config can drive the protect/build mainline
+- Notes (2026-05-07):
+  - Added `soenc_config.py` with schema-validated TOML loading for `[project]`, `[build]`, `[keys]`, `[package]`.
+  - `encryption_helper.py` now supports `--config/ -c`, auto-discovers `./soenc.toml`, and merges config defaults with CLI overrides.
+  - Added tri-state CLI toggles (`--compile/--no-compile`, `--skip-bad-files/--no-skip-bad-files`, `--precheck-only/--no-precheck-only`, `--infer-namespace/--no-infer-namespace`) to make override precedence explicit.
+  - Build manifest now records config provenance (`config.source`) plus `key_mode` and package metadata when config is used.
+  - Added focused tests:
+    - `tests/test_soenc_config.py`
+    - new config merge/override coverage in `tests/test_encryption_helper.py`
+
+### CARD `ENC-P0-007`
+
+- Status: `done`
+- Goal: add signed artifact manifests to detect tampering
+- Type: security
+- Depends on: `ENC-P0-006`
+- Main files:
+  - `encryption_helper.py`
+  - packaging helpers
+  - verification tests
+- Deliverables:
+  - manifest signature generation
+  - manifest signature verification
+  - failure path on signature mismatch
+- Acceptance:
+  - modified manifest is rejected
+- Notes (2026-05-07):
+  - Added signed `build_manifest.json` support in `encryption_helper.py` using HMAC-SHA256.
+  - Added explicit signing/verification controls:
+    - `--manifest-sign-key-file`
+    - `--manifest-sign-key-b64`
+    - `--manifest-key-id`
+    - `--require-manifest-signature` / `--no-require-manifest-signature`
+  - Added manifest canonicalization + signature verification path that rejects tampered manifests.
+  - Runtime delivery validation now verifies manifest signatures (when key is provided or required) and re-signs manifest after validation updates.
+  - Extended `soenc.toml` `[keys]` schema for:
+    - `manifest_sign_key_file`
+    - `manifest_key_id`
+    - `require_manifest_signature`
+  - Added focused tests in:
+    - `tests/test_encryption_helper.py`
+    - `tests/test_soenc_config.py`
+
+### CARD `ENC-P0-008`
+
+- Status: `done`
+- Goal: introduce the `KeyProvider` abstraction and a first local provider implementation
+- Type: security architecture
+- Depends on: `ENC-P0-006`
+- Main files:
+  - `decryption_helper.py`
+  - `encryption_helper.py`
+  - new `enc2sop/keys/` package
+- Deliverables:
+  - provider interface
+  - local provider implementation
+  - wiring that decouples key acquisition from protection logic
+- Acceptance:
+  - protection flow runs through provider abstraction instead of ad hoc embedded key reconstruction only
+- Notes (2026-05-07):
+  - Added new key architecture package:
+    - `enc2sop/keys/provider.py`: `KeyProvider` contract + provider registry
+    - `enc2sop/keys/local.py`: `LocalEmbeddedKeyProvider` for local wrapped key references
+    - `enc2sop/keys/__init__.py`: stable import surface
+  - Updated `encryption_helper.py` to route key wrapping through the provider abstraction:
+    - `encrypt_snippet` now returns payload + raw data key bytes
+    - `pack_key_reference` resolves configured provider and emits a structured key reference
+    - protected stubs now call runtime `_x(payload, key_ref, globals())`
+  - Updated `decryption_helper.py` runtime templates (`runtime_py_source`, `runtime_pyx_source`) to resolve key bytes from provider key references:
+    - supports `local-embedded` key references
+    - preserves backward compatibility with historical raw key-parts payloads
+  - Build manifest now records key-control metadata under `key_management`.
+  - Added key-mode normalization alias so legacy config value `local-provider` maps to `local-embedded`.
+  - Added focused tests:
+    - `tests/test_key_provider.py`
+    - extended `tests/test_encryption_helper.py`
+    - updated `tests/test_soenc_config.py`
+
+## P1 Cards
+
+### CARD `ENC-P1-020`
+
+- Status: `todo`
+- Goal: add stronger forward-error-correction only if reliability reports show current parity is insufficient
+- Type: reliability hardening
+- Depends on: `ENC-P0-017`
+- Trigger:
+  - promote to P0 only if `transport_reliability_report.json` shows common multi-chunk loss within parity groups
+- Main files:
+  - `enc2sop/transport/`
+  - `qrcode_helper.py`
+  - transport tests
+- Deliverables:
+  - Reed-Solomon or equivalent bounded-dependency FEC design
+  - compatibility strategy for existing manifests
+  - report fields comparing parity vs stronger FEC recovery
+- Acceptance:
+  - stronger FEC recovers failure modes shown in reliability data
+  - existing parity manifests remain readable or fail with explicit compatibility messages
+
+### CARD `ENC-P1-021`
+
+- Status: `todo`
+- Goal: add operator-facing transport planning, self-test, and certification UX
+- Type: product UX + operator readiness
+- Depends on: `ENC-P0-017`
+- Main files:
+  - `enc2sop/transport/cli.py`
+  - `QRCODE_AIRGAP_MANUAL.md`
+  - `USAGE_MANUAL.md`
+- Deliverables:
+  - `soenc transport plan`
+  - `soenc transport self-test`
+  - `soenc transport certify`
+  - clearer retake instructions and not-GA-certified warnings for OCR fallback
+- Acceptance:
+  - operators can estimate page count and reliability risk before export
+  - certification command produces or validates `transport_reliability_report.json`
+  - manual docs show safe defaults and explicit experimental paths
+
+### CARD `ENC-P1-009`
+
+- Status: `done`
+- Goal: add a license-file based key provider
+- Type: security + productization
+- Depends on: `ENC-P0-008`
+- Main files:
+  - `enc2sop/keys/`
+  - packaging and runtime wiring
+- Deliverables:
+  - license file format
+- license validation flow
+- protected runtime path that reads license-derived key material
+- Acceptance:
+- protected artifact can run with valid license and fails with invalid license
+- Notes (2026-05-08):
+  - Added `enc2sop/keys/license.py` with `license-file` provider implementation and run lifecycle hooks:
+    - `begin_run`: initializes license context (`license_file`, `license_id`)
+    - `pack_key`: emits key refs (`mode`, `license_id`, `license_file`, `key_id`) and stores per-run key map
+    - `finalize_run`: writes `soenc` license artifact (`enc2sop-license/v1`) with SHA256 integrity digest and updates `build_manifest.json` `key_management` metadata
+  - Updated key package export surface:
+    - `enc2sop/keys/__init__.py` now exports `LicenseFileKeyProvider`
+  - Updated protection flow wiring in `encryption_helper.py`:
+    - provider lifecycle hooks integrated (`_provider_begin_run`, `_provider_finalize_run`)
+    - `protect_project` now accepts provider instance and allows provider finalization to mutate manifest
+    - added CLI controls `--license-file`, `--license-id` and guardrails requiring `keys.mode=license-file` when used
+    - release copy flow now includes license artifact when declared by manifest
+  - Extended runtime key resolution in `decryption_helper.py`:
+    - runtime now supports `license-file` key refs
+    - resolves license path from `SOENC_LICENSE_FILE` override or manifest-relative fallback search
+    - validates license schema/version/mode, `license_id`, and integrity digest before key resolution
+  - Extended config contract in `soenc_config.py`:
+    - `[keys]` now supports `license_file` and `license_id`
+  - Added focused tests:
+    - `tests/test_key_provider.py`: provider writes license + manifest metadata
+    - `tests/test_encryption_helper.py`:
+      - valid license-mode flow executes protected symbol successfully
+      - tampered license fails at runtime with integrity mismatch
+    - `tests/test_soenc_config.py`: parse/merge coverage for `license_file` and `license_id`
+  - Verification:
+    - `python -m pytest -q tests/test_key_provider.py tests/test_encryption_helper.py tests/test_soenc_config.py` => `28 passed, 3 skipped`
+
+### CARD `ENC-P1-010`
+
+- Status: `done`
+- Goal: define a remote-KMS provider contract and stub implementation
+- Type: security platform
+- Depends on: `ENC-P0-008`
+- Main files:
+  - `enc2sop/keys/`
+  - config schema
+  - docs
+- Deliverables:
+  - provider interface contract
+  - request/response model
+- retry/error policy
+- Acceptance:
+- platform can select the provider even if the real KMS integration is stubbed initially
+- Notes (2026-05-08):
+  - Added `enc2sop/keys/remote_kms.py` with `RemoteKmsKeyProvider` and explicit contract payloads in key refs:
+    - request model (`enc2sop-kms-request/v1`) with profile/endpoint/token-env/timeout fields
+    - response model (`enc2sop-kms-response/v1`) with plaintext key field contract
+    - retry policy (`max_retries`, `backoff_ms`, retryable error classes)
+    - fail-closed error policy metadata
+  - Wired provider registration/export:
+    - `enc2sop/keys/__init__.py` now exports `RemoteKmsKeyProvider`.
+  - Extended protection/config wiring for remote-KMS context:
+    - `encryption_helper.py` now accepts remote-KMS CLI overrides:
+      - `--kms-profile`
+      - `--kms-endpoint`
+      - `--kms-key-id`
+      - `--kms-token-env`
+      - `--kms-timeout-sec`
+      - `--kms-max-retries`
+      - `--kms-retry-backoff-ms`
+    - Added guardrail: remote-KMS CLI overrides require `keys.mode=remote-kms`.
+    - `soenc_config.py` `[keys]` schema now supports the same remote-KMS fields with type/range validation.
+  - Extended runtime key resolution contract in `decryption_helper.py` (runtime module templates + in-repo runtime):
+    - `remote-kms` key refs are recognized and validated structurally.
+    - runtime enforces token env presence and then fails closed with explicit `stubbed` error until real remote unwrap client is integrated.
+  - Added focused tests:
+    - `tests/test_key_provider.py`:
+      - `test_remote_kms_provider_contract_and_manifest_metadata`
+    - `tests/test_encryption_helper.py`:
+      - `test_remote_kms_mode_emits_stub_key_contract_and_runtime_fails_closed`
+      - `test_remote_kms_cli_args_require_remote_kms_mode`
+    - `tests/test_soenc_config.py`:
+      - remote-KMS field parse assertions
+      - `test_load_project_config_rejects_invalid_remote_kms_retry_values`
+  - Verification:
+    - `python -m pytest -q tests/test_key_provider.py tests/test_soenc_config.py tests/test_encryption_helper.py` => `32 passed, 3 skipped`
+    - `python -m pytest -q` => `93 passed, 3 skipped`
+
+### CARD `ENC-P1-011`
+
+- Status: `done`
+- Goal: move the most sensitive runtime decrypt path toward a native loader
+- Type: hardening
+- Depends on: `ENC-P0-003`, `ENC-P0-008`
+- Main files:
+  - `decryption_helper.py`
+  - native runtime generation path
+  - build logic
+- Deliverables:
+  - native runtime path for sensitive modules
+  - documented fallback strategy
+- Acceptance:
+  - at least one protected flow reduces pure-Python exposure of decrypt logic
+- Notes (2026-05-08, iteration 1):
+  - Delivered first hardening slice with explicit runtime loader policy controls:
+    - `encryption_helper.py` now supports `--runtime-native-loader/--no-runtime-native-loader`.
+    - `soenc.toml` `[build]` now supports `runtime_native_loader = true|false`.
+  - Protection preamble now supports fail-closed native-loader enforcement:
+    - when enabled, protected stubs import runtime module then assert `__file__` suffix is one of native extension suffixes (`.pyd/.so/.dll/.dylib`).
+    - if runtime resolves to pure Python, execution fails with explicit `RuntimeError` before decrypt execution.
+  - Manifest/runtime delivery metadata now records loader policy:
+    - `runtime_delivery.loader_mode` (`python-import-default` or `native-extension-required`)
+    - `runtime_delivery.loader_enforced` (bool)
+    - backward-compatible defaulting added in `validate_runtime_delivery` for older manifests missing loader metadata.
+  - Added focused tests:
+    - `tests/test_encryption_helper.py`:
+      - `test_protect_source_native_loader_guard_fails_without_native_runtime`
+      - `test_main_runtime_native_loader_toggle_sets_manifest_loader_mode`
+      - extended `test_validate_runtime_delivery_marks_manifest_validated` to assert loader metadata defaults.
+    - `tests/test_soenc_config.py`:
+      - expanded config parse assertions for `[build].runtime_native_loader`.
+- Verification:
+  - `python -m pytest -q tests/test_encryption_helper.py -k "native_loader or runtime_native_loader or runtime_validate"` => `2 passed, 26 deselected`
+  - `python -m pytest -q tests/test_soenc_config.py` => `3 passed, 1 skipped`
+  - `python -m pytest -q` => `95 passed, 3 skipped`
+- Notes (2026-05-08, iteration 2):
+  - Delivered compiled-flow integration coverage for native-loader enforcement:
+    - added native-loader compile fixture toggle in `tests/test_encryption_helper.py::_build_compiled_fixture`.
+    - added `test_e2e_compiled_flow_native_loader_executes_with_compiled_runtime` (compiled runtime success path under `--runtime-native-loader`).
+    - added `test_e2e_compiled_flow_native_loader_rejects_python_runtime_substitution` (fail-closed path when compiled runtime artifact is removed and `.py` runtime is substituted).
+  - Added decrypt-path runtime hardening in `decryption_helper.py` and generated runtime templates:
+    - `_x` now copies key bytes to a mutable buffer and zeroizes it in `finally` after decrypt/exec.
+    - hardening applied consistently to in-repo runtime, `runtime_pyx_source()`, and `runtime_py_source()`.
+  - Added focused runtime regression tests in new `tests/test_decryption_helper.py`:
+    - `test_runtime_exec_decrypts_payload_after_key_buffer_hardening`
+    - `test_runtime_decrypt_supports_local_embedded_provider_key_ref_dict`
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "native_loader or e2e_compiled_flow"` => `2 passed, 4 skipped, 24 deselected`
+    - `python -m pytest -q tests/test_decryption_helper.py` => `2 passed`
+    - `python -m pytest -q` => `97 passed, 5 skipped`
+- Remaining sub-scope to complete card:
+  - reduce runtime Python attack surface further by tightening runtime import trust boundaries (e.g., runtime module self-integrity checks/signature binding) so loader policy is complemented by runtime authenticity checks.
+  - add optional compile-time/runtime guardrails that detect suspicious runtime location redirection outside expected package/build roots while preserving low-cost compatibility.
+- Notes (2026-05-08, iteration 3):
+  - Delivered runtime trust-boundary hardening slice for native-loader mode:
+    - `encryption_helper.py` protected preamble now enforces runtime identity and origin checks before decrypt execution when `--runtime-native-loader` is enabled:
+      - runtime module name must match expected `<package>.enc_rt_*`
+      - runtime file must be a native extension artifact (`.pyd/.so/.dll/.dylib`)
+      - runtime `__spec__.origin` must match runtime `__file__`
+      - runtime path must remain in the same package directory as the protected module (fail closed on redirection)
+    - Added runtime API marker/version gate to bind protected stubs to expected runtime contract:
+      - `SOENC_RUNTIME_API_MARKER = enc2sop-runtime-core-v1`
+      - `SOENC_RUNTIME_API_VERSION = 1`
+    - Added runtime trust policy metadata into manifest runtime-delivery contract:
+      - `runtime_delivery.trust_policy.runtime_api_marker`
+      - `runtime_delivery.trust_policy.runtime_api_version`
+      - `runtime_delivery.trust_policy.runtime_path_policy`
+      - `runtime_delivery.trust_policy.spec_origin_match`
+    - Backward-compatible trust-policy defaulting is now applied in runtime-delivery validation for older manifests.
+  - Updated runtime core/template generation in `decryption_helper.py`:
+    - in-repo runtime and generated `.py`/`.pyx` runtime templates now export the same API marker/version constants for loader trust checks.
+  - Added focused regression coverage:
+    - `tests/test_encryption_helper.py`:
+      - native-loader guard success path with valid runtime marker/version + matching package path
+      - fail-closed path on runtime API marker mismatch
+      - fail-closed path on runtime path redirection outside expected package directory
+      - manifest trust-policy assertions in runtime-delivery metadata tests
+    - `tests/test_decryption_helper.py`:
+      - runtime API marker/version export assertion
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "native_loader or runtime_native_loader or runtime_validate"` => `5 passed, 2 skipped, 26 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_decryption_helper.py` => `32 passed, 4 skipped`
+    - `python -m pytest -q` => `101 passed, 5 skipped`
+- Remaining sub-scope to complete card:
+  - strengthen runtime authenticity beyond marker/version by binding loader checks to signed per-build runtime identity data (e.g., manifest-linked runtime fingerprint) and enforce it in protected stubs.
+  - add compile/runtime packaging guardrails for mixed-platform native suffix resolution and explicit policy controls for trusted relocation scenarios.
+- Notes (2026-05-09, iteration 4):
+  - Delivered manifest-linked runtime fingerprint binding for native-loader enforcement:
+    - `validate_runtime_delivery` now records per-runtime compiled fingerprint metadata in `build_manifest.json`:
+      - `runtime_delivery.compiled_runtime_fingerprints[]` with `module_name`, source/compiled relative paths, `sha256` algorithm, and digest.
+    - trust policy metadata now includes:
+      - `runtime_delivery.trust_policy.runtime_fingerprint_algorithm`
+      - `runtime_delivery.trust_policy.runtime_fingerprint_binding`
+      - `runtime_delivery.trust_policy.require_runtime_fingerprint`
+    - native-loader protected stubs now fail closed unless runtime integrity matches manifest fingerprint metadata:
+      - locate `build_manifest.json` from package context
+      - require matching runtime fingerprint entry for the expected runtime module
+      - hash loaded native runtime artifact and compare against expected digest
+      - enforce compiled-runtime relative path match against manifest metadata
+  - Added focused regression coverage:
+    - `tests/test_encryption_helper.py`:
+      - extended runtime-delivery manifest validation assertions for fingerprint metadata/defaults
+      - native-loader success path now supplies matching manifest fingerprint metadata
+      - fail-closed runtime fingerprint mismatch coverage
+      - trust policy assertions for fingerprint policy fields under `--runtime-native-loader`
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_validate or native_loader or runtime_native_loader"` => `6 passed, 2 skipped, 26 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_decryption_helper.py` => `33 passed, 4 skipped`
+    - `python -m pytest -q` => `102 passed, 5 skipped`
+- Remaining sub-scope to complete card:
+  - add compile/runtime packaging guardrails for mixed-platform native suffix resolution and explicit policy controls for trusted relocation scenarios.
+- Notes (2026-05-09, iteration 5):
+  - Completed packaging-policy guardrails for native-loader runtime authenticity enforcement:
+    - `runtime_delivery.trust_policy` now includes explicit mixed-platform suffix controls:
+      - `runtime_suffix_policy` (`strict-single-platform` default, `prefer-host-platform` supported)
+      - `runtime_native_suffixes` (normalized allow-list used for compile/runtime verification and loader checks)
+    - `runtime_delivery.trust_policy` now includes explicit relocation controls:
+      - `runtime_relocation_allowed`
+      - `trusted_runtime_roots` (manifest-root-relative allowed runtime directories)
+      - `runtime_path_policy` now supports `same-package-dir` (default) and `trusted-relocation`.
+  - Validation/runtime enforcement behavior:
+    - `validate_runtime_delivery` now fail-closes on invalid trust-policy combinations and unsupported policy values.
+    - strict suffix policy rejects mixed-platform runtime artifacts for one runtime source.
+    - trusted-relocation policy requires explicit allow + non-empty trusted roots and enforces root safety constraints.
+    - native-loader protected stubs now enforce:
+      - allowed runtime suffix set
+      - suffix policy compatibility against manifest fingerprint path metadata
+      - trusted-relocation root checks when relocation mode is selected.
+  - Added focused regression coverage:
+    - `tests/test_encryption_helper.py`:
+      - trust-policy default assertions for relocation/suffix controls
+      - mixed-platform suffix rejection under strict policy
+      - trusted-relocation policy requires roots
+      - native-loader trusted-relocation success and untrusted-root fail-closed paths
+      - native-loader manifest toggle assertions include new trust-policy fields.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_validate or native_loader or runtime_native_loader"` => `8 passed, 2 skipped, 28 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_decryption_helper.py tests/test_soenc_config.py` => `40 passed, 5 skipped`
+    - `python -m pytest -q` => `106 passed, 5 skipped`
+
+### CARD `ENC-P1-012`
+
+- Status: `done`
+- Goal: unify the platform command surface into a single CLI entrypoint
+- Type: productization
+- Depends on: `ENC-P0-006`
+- Main files:
+  - new CLI package
+  - wrappers for current script entrypoints
+- Deliverables:
+  - `soenc protect/build/package/verify`
+  - compatibility wrappers or migration notes for old commands
+- Acceptance:
+  - one documented CLI becomes the preferred entrypoint
+- Notes (2026-05-09, iteration 6):
+  - Added unified CLI module and entrypoints:
+    - `enc2sop/cli.py` now exposes a single command surface with:
+      - `soenc protect` (staging protection flow; compile/package split out into dedicated commands)
+      - `soenc build` (batch compile + runtime-delivery validation)
+      - `soenc package` (release copy for compiled artifacts + manifest/license sidecars)
+      - `soenc verify` (runtime-delivery integrity validation against staging/build pair)
+    - `enc2sop/__main__.py` enables module invocation via `python -m enc2sop ...`.
+    - `soenc.py` provides a repository wrapper entrypoint for direct script invocation.
+  - Command wiring is compatibility-first and reuses existing hardened implementation paths:
+    - protect delegates to `encryption_helper.main(...)` with explicit compile disablement.
+    - build delegates to `compile_with_batch_builder(...)`.
+    - package delegates to `copy_release(...)`.
+    - verify delegates to `validate_runtime_delivery(...)`.
+    - config and key-signature settings are resolved through existing `soenc.toml` contract.
+  - Added focused CLI regression coverage in `tests/test_soenc_cli.py`:
+    - protect creates staging manifest and rejects compile flags in command scope.
+    - build resolves defaults from `soenc.toml` and dispatches into batch builder.
+    - package copies native artifacts, `__init__.py`, manifest, and license sidecar.
+    - verify validates runtime-delivery metadata and persists validated fingerprints.
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py` => `5 passed`
+    - `python -m pytest -q` => `111 passed, 5 skipped`
+
+### CARD `ENC-P1-013`
+
+- Status: `done`
+- Goal: define a standard release bundle format for downstream product teams
+- Type: packaging
+- Depends on: `ENC-P0-007`, `ENC-P1-012`
+- Main files:
+  - packaging layer
+  - docs
+- Deliverables:
+  - signed manifest
+  - native artifacts
+  - runtime dependencies
+- release metadata
+- Acceptance:
+  - bundle layout is stable and documented
+- Notes (2026-05-09, iteration 7):
+  - Added normalized release-bundle contract generation in `encryption_helper.py`:
+    - new versioned metadata file `release_bundle.json` with schema `enc2sop-release-bundle/v1`.
+    - bundle metadata records:
+      - source roots (`staging_dir`, `build_dir`, `release_root`)
+      - manifest signature presence/details
+      - copied native/runtime/package-init artifacts
+      - runtime fingerprint records linked to `build_manifest.json`
+      - key-management/config/package metadata context.
+  - Hardened `copy_release(...)` release guardrails:
+    - fails closed when `build_manifest.json` is missing.
+    - fails closed when runtime files exist but runtime-delivery validation metadata is missing/incomplete.
+    - supports explicit signature requirement (`require_manifest_signature`) for packaging flows.
+    - license sidecar declared in manifest is now required and copied as a first-class release artifact.
+  - Updated unified CLI package command (`enc2sop/cli.py`):
+    - `soenc package` now supports `--require-manifest-signature/--no-require-manifest-signature`.
+    - package command now forwards config package metadata into release-bundle metadata.
+  - Added focused regression coverage:
+    - `tests/test_soenc_cli.py`:
+      - package flow asserts `release_bundle.json` schema/layout contents and runtime/license artifact presence.
+      - package flow rejects unsigned manifest when signature requirement is enabled via `soenc.toml`.
+    - `tests/test_encryption_helper.py`:
+      - release packaging requires validated runtime-delivery metadata when runtime files exist.
+      - release packaging emits stable `release_bundle.json` with signed-manifest + runtime fingerprint fields.
+      - release packaging rejects unsigned manifests when signature enforcement is requested.
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_encryption_helper.py -k "package or release or copy_release"` => passed
+    - `python -m pytest -q` => passed
+
+### CARD `ENC-P1-014`
+
+- Status: `done`
+- Goal: convert airgap transport into an optional plugin package
+- Type: modularization
+- Depends on: `ENC-P0-002`, `ENC-P1-012`
+- Main files:
+  - `enc2sop/transport/`
+  - CLI plugin wiring
+- Deliverables:
+  - transport plugin registration
+  - optional install or optional import path
+- Acceptance:
+  - mainline protect/build/package flow works without OCR dependencies installed
+- Notes (2026-05-09, iteration 8):
+  - Added explicit optional plugin registry in `enc2sop/plugin_registry.py`:
+    - versioned plugin spec metadata (`module_check`, `entrypoint`, install hint).
+    - fail-closed plugin invoke path with clear unavailability error.
+    - plugin availability/status rows for operator-facing CLI help.
+  - Added transport plugin entrypoint `enc2sop/transport_plugin.py`:
+    - binds optional `soenc transport ...` commands to `enc2sop.transport.cli`.
+    - imports legacy compatibility facade (`qrcode_helper.AirgapTransportLayer`) only inside optional plugin path.
+  - Updated unified CLI (`enc2sop/cli.py`):
+    - added `soenc transport` optional command group.
+    - forwards plugin arguments through registry to transport plugin entrypoint.
+    - when invoked without subcommand, prints optional-plugin availability/status and usage hint.
+  - Added focused tests:
+    - `tests/test_plugin_registry.py`:
+      - transport plugin registration contract
+      - entrypoint dispatch
+      - fail-closed unavailable plugin behavior
+    - `tests/test_soenc_cli.py`:
+      - `soenc transport` argument forwarding
+      - optional-plugin unavailable propagation
+      - no-arg plugin status/help output
+  - Verification:
+    - `python -m pytest -q tests/test_plugin_registry.py tests/test_soenc_cli.py -k "transport or plugin"` => passed
+    - `python -m pytest -q` => passed
+
+### CARD `ENC-P1-015`
+
+- Status: `done`
+- Goal: rebuild airgap recovery around sidecar-first structured recovery
+- Type: transport reliability
+- Depends on: `ENC-P1-014`
+- Main files:
+  - transport render/recover modules
+  - tests
+- Deliverables:
+  - sidecar-first recovery path
+  - manifest-guided fallback
+- generic OCR as last resort only
+- Acceptance:
+  - docs and code reflect the new priority order
+- Notes (2026-05-09, iteration 9):
+  - Enforced deterministic sidecar-first recovery ordering in `qrcode_helper.py` auto-mode paths:
+    - `extract_text_from_images --backend auto` now prioritizes:
+      1. sidecar decode (manifest sidecar layout or no-manifest embedded-sidecar extraction path)
+      2. manifest-guided structured tesseract extraction
+      3. external OCR provider (`--ocr-provider-cmd`)
+      4. generic OCR fallback (`tesseract`, then `easyocr` when available)
+    - `recover_from_images --backend auto` now uses the same ordering policy and no longer front-loads external OCR ahead of sidecar/structured candidates.
+  - Added focused regression coverage in `tests/test_qrcode_helper_sidecar.py`:
+    - auto recovery prioritizes sidecar before external when sidecar is available.
+    - when sidecar is unavailable, auto recovery prefers external provider before generic OCR fallback.
+    - existing auto sidecar recovery tests remain green.
+  - Verification:
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py -k "auto and (sidecar or external or recover_images)"` => `4 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`
+    - `python -m pytest -q` => `123 passed, 5 skipped`
+
+### CARD `ENC-P1-016`
+
+- Status: `done`
+- Goal: create operator-facing manuals for protect/build/package/release and transport plugin usage
+- Type: documentation
+- Depends on: `ENC-P1-012`, `ENC-P1-013`, `ENC-P1-015`
+- Main files:
+  - `README.md`
+  - `USAGE_MANUAL.md`
+  - transport manual files
+  - `docs/`
+- Deliverables:
+  - product-facing onboarding path
+  - release operator path
+  - transport plugin path
+- Acceptance:
+  - a new operator can follow the docs without repository archaeology
+- Notes (2026-05-09, iteration 10):
+  - Rewrote operator documentation around the unified `soenc` command surface and product mainline:
+    - `README.md` now presents `protect -> build -> package -> verify -> release` as the primary flow and positions `transport` as optional plugin scope.
+    - `USAGE_MANUAL.md` now provides an operator runbook for mainline commands (`soenc protect/build/verify/package`) with release handoff expectations and guardrails.
+    - `QRCODE_AIRGAP_MANUAL.md` now documents transport plugin usage via `soenc transport ...` and formal sidecar-first fallback ordering for `--backend auto`.
+  - Updated architecture baseline note in `docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md` to record completion of operator manual/runbook readiness.
+  - Verification:
+    - `python .\soenc.py --help`
+    - `python .\soenc.py build --help`
+    - `python .\soenc.py package --help`
+    - `python .\soenc.py verify --help`
+    - `python .\soenc.py transport`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_plugin_registry.py`
+
+### CARD `ENC-P0-009`
+
+- Status: `done`
+- Goal: land a first-class `release` gate for the mainline so package output is validated and auditable before downstream handoff
+- Type: launch governance + integrity
+- Depends on: `ENC-P0-007`, `ENC-P1-012`, `ENC-P1-013`
+- Main files:
+  - `enc2sop/cli.py`
+  - `encryption_helper.py`
+  - `soenc_config.py`
+  - tests and operator docs
+- Deliverables:
+  - `soenc release` command in unified CLI
+  - fail-closed validation of packaged release directory against manifest + bundle contract
+  - generated `release_receipt.json` audit artifact
+  - config alias for release output path (`[build].release_dir`)
+- Acceptance:
+  - release command fails on missing/mismatched release bundle data
+  - runtime artifact fingerprints are re-verified from packaged artifacts
+  - signature-required policy can be enforced at release step
+- Notes (2026-05-09, iteration 11):
+  - Added first-class `soenc release` command to `enc2sop/cli.py`:
+    - resolves release directory from `--dist-dir` or `soenc.toml` `[build].dist_dir`
+    - supports `--require-manifest-signature/--no-require-manifest-signature`
+    - writes and reports `release_receipt.json`
+  - Added release governance helpers in `encryption_helper.py`:
+    - `RELEASE_RECEIPT_SCHEMA`, `RELEASE_RECEIPT_FILENAME`
+    - `release_bundle_path(...)`, `release_receipt_path(...)`
+    - `write_release_receipt(...)` with fail-closed checks:
+      - release bundle schema/layout validation
+      - `build_manifest.json` presence + optional signature requirement
+      - bundle-manifest signature/state consistency checks
+      - packaged native/runtime/init artifact inventory match checks
+      - runtime compiled fingerprint re-hash checks on packaged runtime artifacts
+      - license-file sidecar presence checks when declared by key management metadata
+  - Added config compatibility alias in `soenc_config.py`:
+    - `[build].release_dir` is accepted as alias for release output directory
+    - mutually exclusive with `[build].dist_dir` to prevent ambiguous routing
+  - Added focused tests:
+    - `tests/test_soenc_cli.py`:
+      - `test_release_command_generates_release_receipt`
+      - `test_release_command_rejects_missing_release_bundle`
+    - `tests/test_encryption_helper.py`:
+      - `test_write_release_receipt_validates_bundle_and_runtime_fingerprints`
+      - `test_write_release_receipt_rejects_runtime_fingerprint_mismatch`
+    - `tests/test_soenc_config.py`:
+      - rejects conflicting `dist_dir` + `release_dir`
+      - accepts `release_dir` alias mapping to CLI `dist_dir` default
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_encryption_helper.py tests/test_soenc_config.py -k "release or receipt or release_dir"`
+    - `python -m pytest -q`
+
+## Recommended Immediate Execution Order
+
+1. Post-enforcement production dry run and key-rotation drill
+2. Protected-branch environment rollout validation
+
+Rationale:
+
+- release-governance validation is complete in core command paths; promotion artifact generation and signed release gating are implemented; remaining launch risk is operational custody/rotation discipline and branch protection rollout correctness
+
+### CARD `ENC-P0-015`
+
+- Status: `done`
+- Goal: provide a single fail-closed promotion dry-run gate command that executes rollout evidence collection plus policy audit
+- Type: launch governance + operator hardening
+- Depends on: `ENC-P0-014`
+- Main files:
+  - `enc2sop/cli.py`
+  - `tests/test_soenc_cli.py`
+  - `README.md`
+  - `USAGE_MANUAL.md`
+- Deliverables:
+  - first-class `soenc promotion-dry-run` command
+  - online mode: collect evidence from GitHub APIs then audit policy in one call
+  - offline mode: `--skip-collect` audits an existing evidence file
+  - fail-closed exit behavior for missing repo/token, missing offline evidence, and audit failures
+- Acceptance:
+  - command exits non-zero when rollout evidence collection or policy audit fails
+  - command exits non-zero when `--skip-collect` is used without a valid evidence file
+  - operator docs position dry-run command as preferred rollout validation gate
+- Notes (2026-05-10, iteration 17):
+  - Added unified CLI command in `enc2sop/cli.py`:
+    - `soenc promotion-dry-run [--skip-collect] [--github-repo ...] [--github-token ...] [--github-api-url ...] [--policy-file ...] [--workflow-file ...] [--evidence-file ...] [--report-file ...]`
+    - online mode runs `collect-promotion-evidence` then `audit-promotion` in-process with shared paths.
+    - offline mode requires existing `--evidence-file` and audits it directly.
+    - outputs policy/evidence/report paths and fail reasons; exits `1` on audit failure.
+  - Added focused CLI regression tests in `tests/test_soenc_cli.py`:
+    - online success path with mocked collect/audit wiring.
+    - offline mode missing evidence fail-closed path.
+    - offline mode audit-failure propagation path.
+    - online mode repo/token requirement fail-closed paths.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include command surface and runbook usage for `promotion-dry-run`.
+- Verification:
+  - `python -m pytest -q tests/test_soenc_cli.py -k "promotion_dry_run or collect_promotion_evidence or audit_promotion"`
+
+### CARD `ENC-P0-016`
+
+- Status: `blocked`
+- Goal: execute a real protected-branch promotion dry run with key-rotation rehearsal and archived evidence artifacts
+- Type: launch governance + operational execution
+- Depends on: `ENC-P0-015`
+- Blocker: requires real protected-branch GitHub Actions execution plus archived CI artifacts, which cannot be produced safely from this local workspace
+- Main files:
+  - `.github/workflows/release_promotion.yml`
+  - `docs/PROMOTION_ROLLOUT_POLICY.json`
+  - `USAGE_MANUAL.md`
+- Deliverables:
+  - CI-executed `soenc promotion-dry-run` gate using real repository/environment state
+  - archived dry-run evidence and audit report artifacts from protected branch context
+  - documented approval-key rotation rehearsal output and rollback notes
+- Acceptance:
+  - dry-run fails closed when rollout controls are intentionally removed in rehearsal
+  - dry-run passes with expected branch/environment/secret rollout configuration
+  - rotation rehearsal confirms old approval key no longer passes release gate
+- Notes (2026-05-10, iteration 18):
+  - Delivered executable in-repo vertical slice for protected-branch promotion rehearsal in `.github/workflows/release_promotion.yml`:
+    - workflow now runs `soenc promotion-dry-run` in CI after signed approval gate enforcement.
+    - dry-run supports collection mode by default and offline mode through workflow input `skip_promotion_collect`.
+    - workflow archives promotion evidence + audit artifacts alongside release artifacts:
+      - `promotion_evidence.json`
+      - `promotion_audit_report.json`
+    - workflow adds optional key-rotation rehearsal input (`rotation_rehearsal`) that fail-closes unless stale approval key verification is rejected.
+    - workflow consumes `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64` for stale-key negative verification and fails if secret is missing when rehearsal is requested.
+  - Extended promotion policy workflow-fragment contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require:
+    - `promotion-dry-run` execution,
+    - offline-collect guard variable wiring,
+    - rotation rehearsal input and stale-key secret wiring,
+    - promotion evidence/report artifact paths.
+  - Added focused workflow contract coverage in `tests/test_release_promotion_workflow.py` for new dry-run and rotation rehearsal fragments.
+  - Remaining scope to complete card:
+    - run workflow in real protected branch/environment with live GitHub rollout state,
+    - capture and archive real generated artifacts from CI run,
+    - execute rotation rehearsal with real old-key material to produce operator evidence.
+- Notes (2026-05-10, iteration 19):
+  - Hardened CI evidence capture for rotation rehearsal outcomes in `.github/workflows/release_promotion.yml`:
+    - added `workflow_dispatch` input `rotation_report_file` (default `.tmp_ci/ops/rotation_rehearsal_report.json`).
+    - workflow now initializes `enc2sop-rotation-rehearsal/v1` report payload for every run and records:
+      - request state (`requested`),
+      - execution state (`executed`),
+      - stale-key rejection outcome (`old_key_rejected`),
+      - terminal status/details (`not-requested`/`pending`/`blocked`/`failed`/`passed`).
+    - rotation rehearsal step now writes fail-closed report states for:
+      - missing `SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64` (`blocked`),
+      - unexpected old-key acceptance (`failed`),
+      - expected old-key rejection (`passed`).
+    - artifact upload now runs under `if: ${{ always() }}` and includes `rotation_rehearsal_report.json` so failed rehearsals still preserve evidence.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require rotation report wiring and schema fragment presence.
+  - Updated operator runbook (`USAGE_MANUAL.md`) with required rotation report artifact checks.
+  - Extended workflow contract regression coverage (`tests/test_release_promotion_workflow.py`) for new rotation-report fragments and artifact requirements.
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 20):
+  - Added fail-closed promotion artifact integrity gate command `soenc verify-promotion-artifacts` in `enc2sop/cli.py`:
+    - validates release artifacts (`release_bundle.json`, `release_approval.json`, `release_receipt.json`) for schema-critical integrity fields.
+    - verifies approval digest binding (`release_approval.release_bundle_sha256`) against current `release_bundle.json`.
+    - validates promotion evidence/report artifacts and enforces `promotion_audit_report.passed=true`.
+    - validates rotation rehearsal artifact schema/state and supports strict enforcement via `--require-rotation-pass`.
+    - writes machine-readable `promotion_artifact_audit_report.json` and exits non-zero on any mismatch.
+  - Added new module `enc2sop/promotion_artifacts.py` encapsulating promotion artifact validation policy.
+  - Updated CI promotion workflow `.github/workflows/release_promotion.yml`:
+    - now runs `soenc verify-promotion-artifacts` after `promotion-dry-run` and optional rotation rehearsal.
+    - automatically enforces `--require-rotation-pass` when `rotation_rehearsal=true`.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require `verify-promotion-artifacts` workflow fragment.
+  - Added focused tests:
+    - `tests/test_promotion_artifacts.py` for artifact-audit pass and fail-closed rotation-pass enforcement.
+    - `tests/test_soenc_cli.py` coverage for CLI wiring and fail-closed exit behavior.
+    - `tests/test_release_promotion_workflow.py` coverage for workflow command fragment.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include `verify-promotion-artifacts` command and CI gate sequencing.
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 21):
+  - Extended promotion artifact verification to emit deterministic run receipt evidence:
+    - `enc2sop/promotion_artifacts.py` now writes `promotion_run_receipt.json` (`enc2sop-promotion-run-receipt/v1`) by default alongside `promotion_artifact_audit_report.json`.
+    - run receipt captures SHA256 digests for:
+      - `release_bundle.json`
+      - `release_approval.json`
+      - `release_receipt.json`
+      - `promotion_evidence.json`
+      - `promotion_audit_report.json`
+      - `rotation_rehearsal_report.json`
+      - `promotion_artifact_audit_report.json`
+    - run receipt also records available GitHub context keys (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_SHA`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`).
+  - Updated CLI surface (`enc2sop/cli.py`):
+    - `soenc verify-promotion-artifacts` now supports `--run-receipt-file`.
+    - command output now prints `promotion_run_receipt=<path>`.
+  - Updated CI workflow `.github/workflows/release_promotion.yml`:
+    - new dispatch inputs:
+      - `promotion_artifact_audit_report_file`
+      - `promotion_run_receipt_file`
+    - verification step now passes explicit `--report-file` and `--run-receipt-file`.
+    - artifact upload now includes:
+      - `promotion_artifact_audit_report.json`
+      - `promotion_run_receipt.json`
+  - Updated promotion rollout policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require run-receipt and artifact-audit file wiring fragments.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` validates run receipt schema, digest fields, and artifact coverage.
+    - `tests/test_soenc_cli.py` validates CLI wiring for `run_receipt_file`.
+    - `tests/test_release_promotion_workflow.py` validates workflow contract fragments and uploaded artifact paths.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include promotion run receipt behavior and checks.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `30 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 37):
+  - Hardened strict CI-context job-level provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_JOB` as a required strict CI binding key under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires `GITHUB_JOB`.
+    - strict artifact CI-context comparisons now include job parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_job` vs `GITHUB_JOB`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_job` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_job` wiring and `GITHUB_JOB` fragment presence.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document job-level CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict job mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_JOB`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_JOB`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_job`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 22):
+  - Added fail-closed CI-context binding for promotion evidence artifacts:
+    - `enc2sop/promotion_evidence.py` now embeds `github_context` into `promotion_evidence.json` with available runtime keys (`GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_SHA`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`).
+    - `enc2sop/promotion_artifacts.py` now supports strict context consistency enforcement via `require_ci_context_match`:
+      - rejects runs when runtime GitHub context is unavailable but strict mode is requested,
+      - rejects mismatched `GITHUB_REPOSITORY`, `GITHUB_REF`, or `GITHUB_RUN_ID`,
+      - rejects mismatched `GITHUB_SHA` when both evidence and runtime SHA are present.
+    - `soenc verify-promotion-artifacts` now exposes `--require-ci-context-match`.
+  - Updated CI workflow `.github/workflows/release_promotion.yml`:
+    - promotion artifact gate now always runs with `--require-ci-context-match`.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require `--require-ci-context-match` workflow fragment.
+  - Added focused coverage:
+    - `tests/test_promotion_evidence.py` validates evidence includes `github_context`.
+    - `tests/test_promotion_artifacts.py` validates fail-closed behavior on CI-context mismatches under strict mode.
+    - `tests/test_soenc_cli.py` validates CLI wiring for `--require-ci-context-match`.
+    - `tests/test_release_promotion_workflow.py` validates workflow fragment presence.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `34 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-10, iteration 23):
+  - Added fail-closed promotion-report input digest binding to prevent audit-report/evidence substitution:
+    - `enc2sop/promotion_audit.py` now writes `inputs` metadata into `promotion_audit_report.json`:
+      - `policy_file` + `policy_sha256`
+      - `evidence_file` + `evidence_sha256`
+      - `workflow_file` + `workflow_sha256`
+    - `enc2sop/promotion_artifacts.py` now rejects artifact gates when report/evidence binding is missing or mismatched:
+      - `promotion_audit_report.inputs.evidence_file` must match the current evidence artifact path.
+      - `promotion_audit_report.inputs.evidence_sha256` must match the current evidence artifact digest.
+  - Added focused tests:
+    - `tests/test_promotion_audit.py` validates `audit-promotion` emits `inputs` digest/path metadata.
+    - `tests/test_promotion_artifacts.py` adds fail-closed mismatch coverage for report/evidence digest binding.
+    - updated promotion report fixtures in existing promotion tests to include new `inputs` schema fields.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_audit.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `33 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 24):
+  - Hardened promotion artifact verification to enforce full audit-input digest binding, not only evidence:
+    - `enc2sop/promotion_artifacts.py` now validates `promotion_audit_report.inputs` for all audited inputs under verification:
+      - `policy_file` + `policy_sha256`,
+      - `workflow_file` + `workflow_sha256`,
+      - existing `evidence_file` + `evidence_sha256`.
+    - `soenc verify-promotion-artifacts` now accepts:
+      - `--promotion-policy-file`
+      - `--promotion-workflow-file`
+    - report payload now records resolved `promotion_policy_file` and `promotion_workflow_file`.
+  - Updated CI workflow `.github/workflows/release_promotion.yml`:
+    - added `workflow_dispatch` inputs:
+      - `promotion_policy_file`
+      - `promotion_workflow_file`
+    - dry-run now receives explicit `--policy-file` / `--workflow-file`.
+    - artifact verification now receives explicit `--promotion-policy-file` / `--promotion-workflow-file`.
+  - Updated promotion policy contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require new policy/workflow wiring fragments.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` validates fail-closed policy/workflow digest-binding mismatches.
+    - `tests/test_soenc_cli.py` validates CLI wiring for policy/workflow override flags.
+    - `tests/test_release_promotion_workflow.py` validates workflow input/env fragment presence.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 25):
+  - Hardened strict CI-context replay resistance for artifact verification:
+    - `enc2sop/promotion_artifacts.py` now enforces `GITHUB_RUN_ATTEMPT` consistency under `--require-ci-context-match` when both runtime and evidence context values are present.
+    - this tightens archived-evidence/run identity binding for re-run scenarios without breaking offline evidence payloads that omit attempt metadata.
+  - Updated promotion rollout policy workflow fragment contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require `GITHUB_RUN_ATTEMPT` presence in workflow wiring.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document strict CI-context matching now covering run-attempt context when available.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now asserts fail-closed behavior on `GITHUB_RUN_ATTEMPT` mismatch under strict CI context mode.
+    - `tests/test_promotion_evidence.py` now verifies collector captures `GITHUB_RUN_ATTEMPT` when present.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 26):
+  - Hardened `--require-ci-context-match` to bind rotation rehearsal evidence to the current CI run:
+    - `enc2sop/promotion_artifacts.py` now verifies `rotation_rehearsal_report.json` run metadata fields when CI context is required:
+      - `workflow_run_id` vs `GITHUB_RUN_ID`
+      - `workflow_ref` vs `GITHUB_REF`
+      - `workflow_sha` vs `GITHUB_SHA`
+      - `workflow_run_attempt` vs `GITHUB_RUN_ATTEMPT`
+    - verification fails closed on missing/mismatched metadata for available runtime context keys.
+  - Updated policy/docs contracts:
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires rotation report workflow metadata fragments in `release_promotion.yml`.
+    - `README.md` and `USAGE_MANUAL.md` now document that strict CI-context mode validates both promotion evidence context and rotation report run metadata.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass case for matching rotation run metadata under strict CI-context mode.
+    - fail-closed case for mismatched rotation run metadata.
+    - existing strict-context mismatch test now asserts missing rotation metadata failures.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `32 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 27):
+  - Added fail-closed verification for pre-existing `promotion_run_receipt.json` artifacts in `enc2sop/promotion_artifacts.py`:
+    - `soenc verify-promotion-artifacts` now validates an existing run receipt before rewriting it.
+    - validation enforces:
+      - run receipt schema (`enc2sop-promotion-run-receipt/v1`),
+      - required artifact rows (`release_bundle`, `release_approval`, `release_receipt`, `promotion_evidence`, `promotion_audit_report`, `rotation_rehearsal_report`, `promotion_artifact_audit_report`),
+      - artifact path binding to current verification targets,
+      - SHA256 digest binding for each required artifact.
+    - this closes a replay/tamper window where a stale or modified archived run receipt could be silently overwritten without detection.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass case for matching pre-existing run receipt.
+    - fail-closed case for tampered pre-existing run receipt digest mismatch.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `10 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `32 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 28):
+  - Hardened strict CI-context replay resistance for pre-existing run receipts under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now validates `promotion_run_receipt.github_context` against runtime GitHub context when a prior `promotion_run_receipt.json` already exists.
+    - fail-closed checks now enforce:
+      - required identity keys: `GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`,
+      - run-hash/attempt mismatch checks when both sides are present: `GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`.
+    - this closes a replay window where stale pre-existing run receipts could pass artifact digest/path checks but still belong to a different protected-branch run attempt.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass case for strict CI-context verification with matching pre-existing run receipt context.
+    - fail-closed case for strict CI-context mismatch on pre-existing run receipt `GITHUB_RUN_ATTEMPT`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `12 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `32 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 29):
+  - Hardened strict CI-context governance binding in `enc2sop/promotion_artifacts.py`:
+    - added shared strict CI-context validator to enforce:
+      - required identity keys: `GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`,
+      - required workflow/event binding: `GITHUB_WORKFLOW`, `GITHUB_EVENT_NAME`,
+      - run-hash/attempt mismatch checks when both sides are present: `GITHUB_SHA`, `GITHUB_RUN_ATTEMPT`.
+    - strict checks now apply to both:
+      - `promotion_evidence.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - rotation report strict binding now additionally enforces:
+      - `workflow_name` vs `GITHUB_WORKFLOW`,
+      - `workflow_event` vs `GITHUB_EVENT_NAME`.
+  - Updated CI workflow/policy/doc contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_name` + `workflow_event` in `rotation_rehearsal_report.json` for init and executed rehearsal report writes.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires workflow fragments for those new metadata fields.
+    - `README.md` and `USAGE_MANUAL.md` now document workflow/event strict-context requirements.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now asserts workflow/event strict-context mismatch and missing-field fail-closed behavior across promotion evidence, rotation report, and pre-existing run receipt validation.
+    - `tests/test_release_promotion_workflow.py` now asserts workflow report fragments include `workflow_name` and `workflow_event`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_release_promotion_workflow.py tests/test_soenc_cli.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 30):
+  - Hardened promotion artifact verification with cryptographic release-approval signature checks:
+    - `enc2sop/promotion_artifacts.py` now supports optional HMAC verification for `release_approval.json` signatures using:
+      - `release_approval_key_file` / `release_approval_key_b64`
+      - optional `release_approval_key_id` pinning.
+    - added `require_release_approval_signature` fail-closed mode:
+      - verification now fails when signature verification is required but no approval verification key is provided.
+    - artifact report now records:
+      - `release_approval_signature_required`
+      - `release_approval_key_id_expected`.
+  - Extended unified CLI and CI workflow wiring:
+    - `soenc verify-promotion-artifacts` now supports:
+      - `--release-approval-key-file`
+      - `--release-approval-key-b64`
+      - `--release-approval-key-id`
+      - `--require-release-approval-signature`
+    - `.github/workflows/release_promotion.yml` now enforces:
+      - `--release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64"`
+      - `--release-approval-key-id "$SOENC_PROMOTION_KEY_ID"`
+      - `--require-release-approval-signature`.
+  - Updated policy and docs contracts:
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` required fragments now include release-approval signature verification flags for the promotion artifact gate.
+    - `README.md` and `USAGE_MANUAL.md` now document release-approval signature verification under `verify-promotion-artifacts`.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - pass case with valid approval signature + key + key-id.
+      - fail-closed case with wrong approval key.
+      - fail-closed case when signature verification is required but key is missing.
+    - `tests/test_soenc_cli.py`:
+      - CLI wiring coverage for new approval-signature flags.
+    - `tests/test_release_promotion_workflow.py`:
+      - workflow fragment checks for release-approval signature verification flags.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 31):
+  - Hardened release receipt provenance binding for promotion artifacts:
+    - `encryption_helper.write_release_receipt(...)` now records:
+      - `release_bundle_sha256`,
+      - `release_approval_sha256`,
+      - `release_approval_signature_digest`.
+    - `enc2sop/promotion_artifacts.py` now validates those receipt fields against the current archived `release_bundle.json` and `release_approval.json`.
+    - verification fails closed when receipt approval key/signature metadata diverges from the approval artifact.
+  - Updated operator docs to describe receipt digest binding inside `soenc verify-promotion-artifacts`.
+  - Added focused coverage:
+    - `tests/test_encryption_helper.py` asserts generated release receipts include bundle/approval/signature digest bindings.
+    - `tests/test_promotion_artifacts.py` asserts stale receipt approval digests are rejected by the promotion artifact gate.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 32):
+  - Hardened strict CI-context provenance for release approval artifacts:
+    - `encryption_helper.write_release_approval(...)` now embeds available GitHub workflow context into signed `release_approval.json`.
+    - `encryption_helper.write_release_receipt(...)` now records `release_approval_github_context` after validating the signed approval.
+    - `enc2sop/promotion_artifacts.py` now enforces, under `--require-ci-context-match`, that:
+      - `release_approval.github_context` matches the current governed workflow run,
+      - `release_receipt.release_approval_github_context` mirrors the approval artifact and also matches the current workflow run.
+    - this reduces approval replay risk where a valid signed approval from another governed run/workflow could otherwise be archived with current promotion evidence.
+  - Updated docs/policy contracts:
+    - `README.md` and `USAGE_MANUAL.md` document signed approval GitHub-context binding in `verify-promotion-artifacts`.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires GitHub context fragments used by the approval provenance contract.
+  - Added focused coverage:
+    - `tests/test_encryption_helper.py` verifies approval generation signs GitHub context and release receipts preserve it.
+    - `tests/test_promotion_artifacts.py` verifies strict artifact gates reject mismatched release approval context.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py` => `62 passed, 4 skipped`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-11, iteration 33):
+  - Tightened promotion artifact gate consistency:
+    - `enc2sop/promotion_artifacts.py` now snapshots GitHub runtime context once per validation pass and reuses that view for both release approval and release receipt CI-context checks.
+    - this keeps the strict approval provenance check and mirrored receipt provenance check aligned to the same runtime state within a single verification run.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `91 passed, 4 skipped`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 34):
+  - Hardened strict CI-context workflow-definition provenance binding across promotion artifacts:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_WORKFLOW_REF` and `GITHUB_WORKFLOW_SHA` as required workflow-definition binding keys under `--require-ci-context-match`.
+    - strict rotation report checks now require and validate:
+      - `workflow_name_ref` vs `GITHUB_WORKFLOW_REF`,
+      - `workflow_name_sha` vs `GITHUB_WORKFLOW_SHA`.
+    - promotion evidence and release approval context capture now include workflow-definition keys for downstream strict verification:
+      - `enc2sop/promotion_evidence.py` (`github_context`),
+      - `encryption_helper.py` release approval/receipt context snapshot keys.
+  - Updated CI/policy/docs wiring:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_name_ref` and `workflow_name_sha` into `rotation_rehearsal_report.json`.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires workflow fragments for `GITHUB_WORKFLOW_REF` and `GITHUB_WORKFLOW_SHA`.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document workflow-definition context binding in strict artifact verification.
+  - Added/updated focused coverage:
+    - `tests/test_promotion_artifacts.py` validates strict mismatch/missing fail-closed behavior for `GITHUB_WORKFLOW_REF` and `GITHUB_WORKFLOW_SHA` across evidence, rotation, release approval context, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures workflow-definition keys.
+    - `tests/test_encryption_helper.py` verifies approval/receipt context includes workflow-definition keys.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring fragments in CI workflow.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py tests/test_promotion_evidence.py tests/test_release_promotion_workflow.py tests/test_soenc_cli.py` => `94 passed, 4 skipped`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 35):
+  - Hardened strict CI-context runtime-key completeness checks in promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now validates runtime GitHub context completeness for strict mode before artifact cross-checks.
+    - under `--require-ci-context-match`, verification now fails closed when required binding keys are missing from runtime context:
+      - identity: `GITHUB_REPOSITORY`, `GITHUB_REF`, `GITHUB_RUN_ID`
+      - workflow-definition/event binding: `GITHUB_WORKFLOW`, `GITHUB_WORKFLOW_REF`, `GITHUB_WORKFLOW_SHA`, `GITHUB_EVENT_NAME`
+    - this closes a permissive edge where missing runtime workflow binding keys could previously bypass strict equality checks by skipping comparisons.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py::test_run_promotion_artifact_audit_requires_ci_context_runtime_binding_keys`
+      verifies fail-closed behavior when strict mode is enabled but runtime binding keys are missing.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "requires_ci_context_match or runtime_binding or rotation_context"` => `3 passed`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_promotion_artifacts.py tests/test_promotion_evidence.py tests/test_release_promotion_workflow.py tests/test_soenc_cli.py` => `95 passed, 4 skipped`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 36):
+  - Hardened strict protected-ref governance context binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_REF_PROTECTED` under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires `GITHUB_REF_PROTECTED`.
+    - strict artifact CI-context comparisons now include protected-ref parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_ref_protected` vs `GITHUB_REF_PROTECTED`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_ref_protected` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_ref_protected` wiring and `GITHUB_REF_PROTECTED` fragment presence.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document protected-ref CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict protected-ref mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_REF_PROTECTED`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_REF_PROTECTED`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_ref_protected`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 38):
+  - Hardened strict actor-level provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_ACTOR` under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires `GITHUB_ACTOR`.
+    - strict artifact CI-context comparisons now include actor parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_actor` vs `GITHUB_ACTOR`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_actor` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_actor` wiring and `GITHUB_ACTOR` fragment presence.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document actor-level CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict actor mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_ACTOR`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_ACTOR`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_actor`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 50):
+  - Added offline-capable cross-artifact CI-context consistency enforcement to promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now supports `require_artifact_context_consistency`:
+      - validates required GitHub context completeness on archived `promotion_evidence.github_context`,
+      - validates strict parity from that evidence context to:
+        - `release_approval.github_context`,
+        - `release_receipt.github_context`,
+        - `release_receipt.release_approval_github_context`,
+        - `rotation_rehearsal_report` projected `workflow_*` context,
+        - pre-existing `promotion_run_receipt.github_context` (when present).
+      - this provides fail-closed mixed-artifact replay/substitution detection even without relying on current runtime CI env context.
+  - Extended CLI surface in `enc2sop/cli.py`:
+    - new `soenc verify-promotion-artifacts` flag:
+      - `--require-artifact-context-consistency`.
+  - Wired promotion workflow and policy contracts:
+    - `.github/workflows/release_promotion.yml` now passes `--require-artifact-context-consistency` into `verify-promotion-artifacts`.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires the same workflow fragment.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - pass case for artifact-context consistency with fully aligned archived artifacts.
+      - fail-closed mismatch case when archived release-approval context diverges from promotion evidence context.
+    - `tests/test_soenc_cli.py`:
+      - verifies flag wiring into `run_promotion_artifact_audit(...)`.
+    - `tests/test_release_promotion_workflow.py`:
+      - verifies workflow fragment includes `--require-artifact-context-consistency`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) for new verification mode and workflow expectation.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "artifact_context_consistency"` => `2 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts_command"` => `4 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "artifact_context_consistency or verify_promotion_artifacts or promotion"` => `39 passed, 19 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 51):
+  - Hardened promotion-evidence repository identity binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now validates `promotion_evidence.repository` when present and fail-closes on invalid slug format (must be `owner/repo`).
+    - when present, verification now enforces `promotion_evidence.repository` parity with `promotion_evidence.github_context.GITHUB_REPOSITORY`.
+    - under `--require-ci-context-match`, when present, verification now also enforces `promotion_evidence.repository` parity with runtime `GITHUB_REPOSITORY`.
+    - strict rotation-report checks now additionally validate:
+      - `rotation_rehearsal_report.workflow_repository` vs `GITHUB_REPOSITORY`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_repository` in both initialized and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires the `workflow_repository` fragment.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document promotion evidence repository binding and rotation-report repository metadata requirements.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - strict rotation context mismatch test now asserts `workflow_repository` mismatch fail-closed behavior.
+      - new fail-closed case for `promotion_evidence.repository` mismatch vs `promotion_evidence.github_context.GITHUB_REPOSITORY`.
+      - new fail-closed case for `promotion_evidence.repository` mismatch vs runtime `GITHUB_REPOSITORY` under `--require-ci-context-match`.
+    - `tests/test_release_promotion_workflow.py` verifies workflow contract includes `workflow_repository` emission.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository or rotation_context"` => passed
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => passed
+    - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts_command"` => passed
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 39):
+  - Hardened strict numeric-identity provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_ACTOR_ID` and `GITHUB_REPOSITORY_ID` under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires:
+      - `GITHUB_ACTOR_ID`
+      - `GITHUB_REPOSITORY_ID`
+    - strict artifact CI-context comparisons now include numeric identity parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_actor_id` vs `GITHUB_ACTOR_ID`,
+      - `rotation_rehearsal_report.workflow_repository_id` vs `GITHUB_REPOSITORY_ID`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_actor_id` and `workflow_repository_id` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_actor_id` / `workflow_repository_id` wiring and `GITHUB_ACTOR_ID` / `GITHUB_REPOSITORY_ID` fragment presence.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document numeric actor/repository identity CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict numeric identity mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_ACTOR_ID` and `GITHUB_REPOSITORY_ID`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_ACTOR_ID` and `GITHUB_REPOSITORY_ID`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_actor_id` and `workflow_repository_id`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 40):
+  - Hardened strict triggering-actor provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_TRIGGERING_ACTOR` under `--require-ci-context-match`.
+    - strict CI-context comparisons now include optional triggering-actor parity (when present on both sides) for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_triggering_actor` vs `GITHUB_TRIGGERING_ACTOR` (when runtime value is present).
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_triggering_actor` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_triggering_actor` wiring and `GITHUB_TRIGGERING_ACTOR` fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `GITHUB_TRIGGERING_ACTOR` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document optional triggering-actor CI-context parity checks.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict triggering-actor mismatch/missing behavior across evidence, release approval/receipt provenance, rotation report metadata, and pre-existing run receipt checks, while preserving optional runtime completeness semantics.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_TRIGGERING_ACTOR`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_TRIGGERING_ACTOR`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_triggering_actor`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 41):
+  - Hardened strict repository-owner provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_REPOSITORY_OWNER` and `GITHUB_REPOSITORY_OWNER_ID` under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires:
+      - `GITHUB_REPOSITORY_OWNER`
+      - `GITHUB_REPOSITORY_OWNER_ID`
+    - strict artifact CI-context comparisons now include repository-owner parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_repository_owner` vs `GITHUB_REPOSITORY_OWNER`,
+      - `rotation_rehearsal_report.workflow_repository_owner_id` vs `GITHUB_REPOSITORY_OWNER_ID`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_repository_owner` and `workflow_repository_owner_id` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_repository_owner` / `workflow_repository_owner_id` wiring and `GITHUB_REPOSITORY_OWNER` / `GITHUB_REPOSITORY_OWNER_ID` fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `GITHUB_REPOSITORY_OWNER` and `GITHUB_REPOSITORY_OWNER_ID` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document repository-owner CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict repository-owner mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_REPOSITORY_OWNER` and `GITHUB_REPOSITORY_OWNER_ID`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_REPOSITORY_OWNER` and `GITHUB_REPOSITORY_OWNER_ID`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_repository_owner` and `workflow_repository_owner_id`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-12, iteration 42):
+  - Hardened strict CI host/API provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires:
+      - `GITHUB_SERVER_URL`
+      - `GITHUB_API_URL`
+      - `GITHUB_GRAPHQL_URL`
+    - strict artifact CI-context comparisons now include host/API parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_server_url` vs `GITHUB_SERVER_URL`,
+      - `rotation_rehearsal_report.workflow_api_url` vs `GITHUB_API_URL`,
+      - `rotation_rehearsal_report.workflow_graphql_url` vs `GITHUB_GRAPHQL_URL`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_server_url`, `workflow_api_url`, and `workflow_graphql_url` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires these rotation host/API wiring fragments and `GITHUB_SERVER_URL` / `GITHUB_API_URL` / `GITHUB_GRAPHQL_URL` workflow fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document host/API CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` strict-context suites now cover host/API mismatch and missing fail-closed checks through evidence/approval/rotation/run-receipt paths.
+    - `tests/test_promotion_evidence.py` verifies collector output captures host/API context keys.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures host/API context keys.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes host/API fragments.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 43):
+  - Hardened strict CI replay resistance by upgrading run hash/attempt checks from optional to required under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_SHA` and `GITHUB_RUN_ATTEMPT` as required strict binding keys.
+    - strict runtime-context completeness now fail-closes when `GITHUB_SHA` or `GITHUB_RUN_ATTEMPT` is missing.
+    - strict artifact CI-context comparisons now require `GITHUB_SHA` and `GITHUB_RUN_ATTEMPT` parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to describe required SHA/run-attempt binding in strict CI-context mode while preserving optional triggering-actor parity semantics.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` runtime-binding strictness test now asserts missing `GITHUB_SHA` and missing `GITHUB_RUN_ATTEMPT` fail-closed behavior.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_binding or ci_context_match"` => `5 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 44):
+  - Hardened strict CI run-ordinal provenance binding under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_RUN_NUMBER` as a required strict binding key.
+    - strict runtime-context completeness now fail-closes when `GITHUB_RUN_NUMBER` is missing.
+    - strict artifact CI-context comparisons now require `GITHUB_RUN_NUMBER` parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now bind:
+      - `rotation_rehearsal_report.workflow_run_number` vs `GITHUB_RUN_NUMBER`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_run_number` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_run_number` wiring and `GITHUB_RUN_NUMBER` workflow fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `GITHUB_RUN_NUMBER` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document run-number CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict run-number mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_RUN_NUMBER`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_RUN_NUMBER`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_run_number`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `8 passed`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 45):
+  - Hardened strict branch-ref provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now captures and validates `GITHUB_REF_NAME` and `GITHUB_REF_TYPE` under `--require-ci-context-match`.
+    - strict runtime context completeness now also requires:
+      - `GITHUB_REF_NAME`
+      - `GITHUB_REF_TYPE`
+    - strict artifact CI-context comparisons now include ref-name/ref-type parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_ref_name` vs `GITHUB_REF_NAME`,
+      - `rotation_rehearsal_report.workflow_ref_type` vs `GITHUB_REF_TYPE`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_ref_name` and `workflow_ref_type` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_ref_name` / `workflow_ref_type` wiring and `GITHUB_REF_NAME` / `GITHUB_REF_TYPE` fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `GITHUB_REF_NAME` and `GITHUB_REF_TYPE` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document ref-name/ref-type CI-context binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict ref-name/ref-type mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_REF_NAME` and `GITHUB_REF_TYPE`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_REF_NAME` and `GITHUB_REF_TYPE`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_ref_name` and `workflow_ref_type`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => passed
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => passed
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => passed
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 46):
+  - Hardened promotion run-receipt integrity by adding cryptographic signature binding to archived receipts:
+    - `enc2sop/promotion_artifacts.py` now emits signed `promotion_run_receipt.json` when approval-key inputs are provided to `soenc verify-promotion-artifacts`:
+      - `promotion_run_receipt.signature.algorithm = hmac-sha256`
+      - `promotion_run_receipt.signature.key_id = release_approval_key_id`
+      - `promotion_run_receipt.signature.digest_hex` computed over canonical receipt payload bytes (excluding `signature`).
+    - pre-existing run receipts are now verified fail-closed before rewrite when signature policy is enabled:
+      - requires `promotion_run_receipt.signature` object fields (`algorithm`, `key_id`, `digest_hex`),
+      - requires `promotion_run_receipt.release_approval_key_id` and key-id parity checks,
+      - verifies signature digest with the provided release-approval verification key.
+    - this closes a replay/tamper window where a stale pre-existing run receipt could satisfy path/digest row checks but still be modified at metadata level.
+  - Behavior compatibility:
+    - unsigned pre-existing run receipts remain accepted when `--require-release-approval-signature` is not set (backward-compatible for older archived artifacts),
+    - strict signature enforcement applies when `--require-release-approval-signature` is enabled in the promotion artifact gate workflow.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - existing-run-receipt pass paths now cover signed receipt generation/verification with `require_release_approval_signature=True`,
+      - fail-closed case for tampered existing run-receipt signature digest,
+      - fail-closed case for missing verification key when existing signed run-receipt signature verification is required.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `20 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 47):
+  - Hardened strict CI runtime-activation provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_ACTIONS` and `CI` as required strict binding keys under `--require-ci-context-match`.
+    - strict runtime-context completeness now fail-closes when `GITHUB_ACTIONS` or `CI` is missing.
+    - strict artifact CI-context comparisons now require `GITHUB_ACTIONS` + `CI` parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_github_actions` vs `GITHUB_ACTIONS`,
+      - `rotation_rehearsal_report.workflow_ci` vs `CI`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_github_actions` and `workflow_ci` in both initial and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_github_actions` / `workflow_ci` wiring and `GITHUB_ACTIONS` / `CI` workflow fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `GITHUB_ACTIONS` and `CI` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document CI runtime-activation binding in strict artifact verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict `GITHUB_ACTIONS`/`CI` mismatch and missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, runtime strict-key completeness, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures `GITHUB_ACTIONS` and `CI`.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures `GITHUB_ACTIONS` and `CI`.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes `workflow_github_actions` and `workflow_ci`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `7 passed, 10 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `17 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 48):
+  - Hardened strict CI runner-execution provenance binding for promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now treats the following runner keys as required strict binding context under `--require-ci-context-match`:
+      - `RUNNER_ENVIRONMENT`
+      - `RUNNER_OS`
+      - `RUNNER_ARCH`
+    - strict runtime-context completeness now fail-closes when any of these runner keys is missing.
+    - strict artifact CI-context comparisons now require runner-key parity for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now validate:
+      - `rotation_rehearsal_report.workflow_runner_environment` vs `RUNNER_ENVIRONMENT`,
+      - `rotation_rehearsal_report.workflow_runner_os` vs `RUNNER_OS`,
+      - `rotation_rehearsal_report.workflow_runner_arch` vs `RUNNER_ARCH`.
+  - Updated workflow/policy/docs contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_runner_environment`, `workflow_runner_os`, and `workflow_runner_arch` in both initialized and executed `rotation_rehearsal_report.json` payloads.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires runner metadata wiring fragments and `RUNNER_ENVIRONMENT` / `RUNNER_OS` / `RUNNER_ARCH` workflow fragment presence.
+    - `encryption_helper.py` and `enc2sop/promotion_evidence.py` now include `RUNNER_ENVIRONMENT`, `RUNNER_OS`, and `RUNNER_ARCH` in signed approval/evidence context capture.
+    - operator docs (`README.md`, `USAGE_MANUAL.md`) now document strict runner provenance binding and rotation report runner metadata requirements.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now validates strict runner-key mismatch/missing fail-closed behavior across evidence, release approval/receipt provenance, rotation report metadata, and pre-existing run receipt checks.
+    - `tests/test_promotion_evidence.py` verifies collector output captures runner-key context.
+    - `tests/test_encryption_helper.py` verifies signed release approval context captures runner-key context.
+    - `tests/test_release_promotion_workflow.py` verifies rotation report wiring includes runner metadata fragments.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or existing_run_receipt"` => `7 passed, 10 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `31 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 49):
+  - Hardened strict CI release-execution provenance binding for promotion artifact verification:
+    - `encryption_helper.write_release_receipt(...)` now captures `release_receipt.github_context` from the release-step runtime environment.
+    - `enc2sop/promotion_artifacts.py` now enforces, under `--require-ci-context-match`, that:
+      - `release_receipt.github_context` is present and matches current workflow CI context with the same strict required identity/binding key set used for other governed artifacts.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include release-receipt runtime-context binding in strict artifact verification behavior.
+  - Added focused coverage:
+    - `tests/test_encryption_helper.py` now verifies `release_receipt.json` records `github_context` when release runs under GitHub context.
+    - `tests/test_promotion_artifacts.py` now fail-closes on strict mismatch in `release_receipt.github_context` and keeps strict-match pass fixtures aligned by recording matching receipt context.
+  - Verification:
+    - `python -m pytest -q tests/test_encryption_helper.py -k "preserves_signed_approval_github_context"` => `1 passed`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "release_receipt_context or release_approval_context_mismatches"` => `2 passed, 16 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or release_receipt_context or existing_run_receipt"` => `8 passed, 10 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `18 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion or release"` => `21 passed, 8 deselected`
+    - `python -m pytest -q tests/test_encryption_helper.py -k "release_receipt or github_context"` => `6 passed, 43 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py -k "collect_promotion_evidence_builds_audit_ready_payload"` => `1 passed, 2 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 52):
+  - Closed a strict protected-ref completeness gap under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now fail-closes when runtime `GITHUB_REF_PROTECTED` is present but artifact contexts omit that key.
+    - this now applies to strict CI-context bindings for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - rotation-report strict checks already failed on missing `workflow_ref_protected`; this iteration aligns non-rotation artifact contexts with the same completeness posture.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now includes strict fail-closed regression coverage for missing `GITHUB_REF_PROTECTED` across all strict CI-context artifact surfaces listed above.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ref_protected_missing or rotation_context or release_approval_context_mismatches or release_receipt_context_mismatches or ci_context_match_accepts_existing_matching_run_receipt"` => `5 passed, 18 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `23 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 53):
+  - Hardened strict protected-ref value validation for both runtime and artifact context surfaces:
+    - `enc2sop/promotion_artifacts.py` now fail-closes when runtime `GITHUB_REF_PROTECTED` is present but not parseable as a boolean-like value (`true/false`, `1/0`, `yes/no`, `on/off`).
+    - under `--require-artifact-context-consistency`, `promotion_evidence.github_context.GITHUB_REF_PROTECTED` now fail-closes when present but not parseable as a boolean-like value.
+    - this removes a permissive path where malformed protected-ref values could be treated as missing/empty and skip strict protected-ref semantics.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document invalid protected-ref value fail-closed behavior in strict verification.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now includes:
+      - strict runtime CI-context fail-closed coverage for invalid `GITHUB_REF_PROTECTED` value.
+      - offline artifact-context consistency fail-closed coverage for invalid `promotion_evidence.github_context.GITHUB_REF_PROTECTED` value.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ref_protected or context_consistency"` => `5 passed, 20 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `25 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-13, iteration 54):
+  - Hardened strict runner-instance provenance binding under `ENC-P0-016` by adding `RUNNER_NAME` to required strict CI-context checks.
+  - `enc2sop/promotion_artifacts.py` now enforces `RUNNER_NAME` parity/completeness across:
+    - `promotion_evidence.github_context`,
+    - signed `release_approval.github_context`,
+    - `release_receipt.github_context` and mirrored `release_receipt.release_approval_github_context`,
+    - pre-existing `promotion_run_receipt.github_context`,
+    - rotation report metadata via `rotation_rehearsal_report.workflow_runner_name`.
+  - `enc2sop/promotion_evidence.py` and `encryption_helper.py` now capture `RUNNER_NAME` in emitted/signed GitHub context snapshots.
+  - Workflow/policy contracts now require rotation-report runner-name metadata:
+    - `.github/workflows/release_promotion.yml` emits `workflow_runner_name` in both initialized and executed rotation reports.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_runner_name`/`RUNNER_NAME` fragments.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include `RUNNER_NAME` strict provenance coverage.
+  - Added focused coverage:
+    - `tests/test_promotion_evidence.py` validates captured `RUNNER_NAME`.
+    - `tests/test_encryption_helper.py` validates signed approval/release-context capture includes `RUNNER_NAME`.
+    - `tests/test_promotion_artifacts.py` validates strict mismatch/missing fail-closed behavior for `RUNNER_NAME` across evidence/rotation/run-receipt paths.
+    - `tests/test_release_promotion_workflow.py` validates workflow emits `workflow_runner_name`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or rotation_context or existing_run_receipt or artifact_context_consistency"`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 55):
+  - Closed a strict triggering-actor completeness gap under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now fail-closes when runtime `GITHUB_TRIGGERING_ACTOR` is present but artifact contexts omit that key.
+    - triggering-actor completeness/parity now applies to strict CI-context bindings for:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`,
+      - `rotation_rehearsal_report.workflow_triggering_actor`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed triggering-actor behavior when runtime exports `GITHUB_TRIGGERING_ACTOR`.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py` now includes strict fail-closed regression coverage for missing `GITHUB_TRIGGERING_ACTOR` across all strict CI-context artifact surfaces listed above.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "triggering_actor_missing or ref_protected_missing or ci_context_match_accepts_matching_rotation_metadata or ci_context_match_accepts_existing_matching_run_receipt"`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "release_approval_context_mismatches or release_receipt_context_mismatches"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 56):
+  - Closed strict CI-activation boolean value-validation gaps under both strict runtime and offline consistency checks:
+    - `enc2sop/promotion_artifacts.py` now normalizes `GITHUB_ACTIONS` and `CI` as explicit boolean-like values (`true/false`, `1/0`, `yes/no`, `on/off`) for strict context bindings.
+    - under `--require-ci-context-match`, verification now fail-closes when runtime `GITHUB_ACTIONS` or `CI` is present but invalid.
+    - under `--require-ci-context-match`, governed artifact contexts now fail-close when `GITHUB_ACTIONS` or `CI` is present but invalid across:
+      - `promotion_evidence.github_context`,
+      - `release_approval.github_context`,
+      - `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - under `--require-artifact-context-consistency`, invalid `promotion_evidence.github_context` encodings for `GITHUB_ACTIONS`/`CI` now fail-close before cross-artifact parity checks.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to explicitly document fail-closed invalid-value behavior for strict CI-activation boolean keys.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_ACTIONS` and `CI`.
+    - offline artifact-context consistency fail-closed coverage for invalid `promotion_evidence.github_context` `GITHUB_ACTIONS` and `CI`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ci_boolean_keys_invalid or context_consistency_fails_on_invalid_ci_booleans or runtime_ref_protected_value_is_invalid or context_consistency_fails_on_invalid_ref_protected"` => `4 passed, 24 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "release_approval_context_mismatches or release_receipt_context_mismatches or triggering_actor_missing or ref_protected_missing"` => `4 passed, 24 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `28 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 57):
+  - Added strict retention-window provenance binding under `--require-ci-context-match`:
+    - `enc2sop/promotion_artifacts.py` now treats `GITHUB_RETENTION_DAYS` as a required strict binding key and validates parity across:
+      - `promotion_evidence.github_context`,
+      - signed `release_approval.github_context`,
+      - mirrored `release_receipt.release_approval_github_context`,
+      - `release_receipt.github_context`,
+      - pre-existing `promotion_run_receipt.github_context`.
+    - strict rotation-report checks now also bind:
+      - `rotation_rehearsal_report.workflow_retention_days` vs `GITHUB_RETENTION_DAYS`.
+  - Updated context-capture surfaces to emit `GITHUB_RETENTION_DAYS`:
+    - `enc2sop/promotion_evidence.py`
+    - `encryption_helper.py` (signed approval + release receipt context snapshots)
+  - Updated CI/policy contracts:
+    - `.github/workflows/release_promotion.yml` now emits `workflow_retention_days` in both initialized and executed rotation reports.
+    - `docs/PROMOTION_ROLLOUT_POLICY.json` now requires `workflow_retention_days` and `GITHUB_RETENTION_DAYS` workflow fragments.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include retention-window provenance in strict context checks.
+  - Added focused coverage:
+    - `tests/test_promotion_evidence.py` validates evidence capture of `GITHUB_RETENTION_DAYS`.
+    - `tests/test_encryption_helper.py` validates signed approval/release-context capture includes `GITHUB_RETENTION_DAYS`.
+    - `tests/test_promotion_artifacts.py` validates strict missing/mismatch fail-closed behavior for `GITHUB_RETENTION_DAYS` across evidence/approval/receipt/rotation/run-receipt paths.
+    - `tests/test_release_promotion_workflow.py` validates workflow emits `workflow_retention_days`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "triggering_actor_missing or runtime_ci_boolean_keys_invalid or release_receipt_context_mismatches or ci_context_match_fails_with_existing_run_receipt_attempt_mismatch or ci_context_match_accepts_matching_rotation_metadata or ci_context_match_accepts_existing_matching_run_receipt"`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"`
+    - `python -m pytest -q tests/test_release_promotion_workflow.py`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 58):
+  - Hardened strict CI-context value semantics for numeric/ref-type provenance bindings:
+    - `enc2sop/promotion_artifacts.py` now fail-closes invalid value encodings (not only missing/mismatch) for:
+      - `GITHUB_RUN_ID`,
+      - `GITHUB_RUN_ATTEMPT`,
+      - `GITHUB_RUN_NUMBER`,
+      - `GITHUB_RETENTION_DAYS`,
+      - `GITHUB_ACTOR_ID`,
+      - `GITHUB_REPOSITORY_ID`,
+      - `GITHUB_REPOSITORY_OWNER_ID`,
+      - `GITHUB_REF_TYPE` (must be one of `branch`/`tag`).
+    - strict numeric keys are now normalized as positive integers and must not use malformed/non-numeric forms.
+    - this validation is enforced across both:
+      - `--require-ci-context-match` runtime/artifact binding checks,
+      - `--require-artifact-context-consistency` evidence-rooted cross-artifact parity checks.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed invalid-value behavior for numeric/ref-type strict context keys.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid numeric/ref-type runtime keys.
+    - offline artifact-context consistency fail-closed coverage for invalid numeric/ref-type evidence keys.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_numeric_or_ref_type_values_are_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type or runtime_ci_boolean_keys_invalid or context_consistency_fails_on_invalid_ci_booleans or runtime_ref_protected_value_is_invalid or context_consistency_fails_on_invalid_ref_protected"` => `6 passed, 25 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match or runtime_binding or rotation_context or approval_context or release_receipt_context or existing_run_receipt or artifact_context_consistency"` => `14 passed, 17 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 59):
+  - Hardened strict CI-context value semantics for rotation-report bindings:
+    - `enc2sop/promotion_artifacts.py` now applies the same key-aware semantic normalization to `rotation_rehearsal_report.workflow_*` strict checks that is already enforced for runtime and other artifact contexts.
+    - strict checks now normalize and compare:
+      - boolean-like values (`workflow_github_actions`, `workflow_ci`, `workflow_ref_protected`),
+      - positive-integer identity values (`workflow_run_id`, `workflow_run_attempt`, `workflow_run_number`, `workflow_retention_days`, `workflow_actor_id`, `workflow_repository_id`, `workflow_repository_owner_id`),
+      - enum values (`workflow_ref_type`),
+      - and string identity/binding values across repository/ref/workflow/job/actor/host fragments.
+    - strict mode now fail-closes invalid rotation-report value encodings (not only missing/mismatch), removing a residual inconsistency where malformed rotation metadata could previously be compared as raw strings.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to state rotation-report strict checks now use the same semantic normalization/fail-closed rules as other CI-context bindings.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - pass coverage for normalized-equivalent rotation metadata values (`03` vs `3`, `TRUE` vs `true`, uppercase `BRANCH`, etc.) under strict CI-context mode.
+    - fail-closed coverage for invalid rotation metadata encodings across boolean/integer/enum/protected-ref keys.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "rotation_context_metadata_mismatches or ci_context_match_accepts_normalized_rotation_values or fails_when_rotation_context_values_invalid"`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 60):
+  - Refined strict CI-context numeric normalization semantics to align with normalized-equivalence intent:
+    - `enc2sop/promotion_artifacts.py` now accepts zero-padded positive integer encodings (for example `03`, `011`, `090`) for strict CI-context numeric keys and normalizes them canonically before parity checks.
+    - this applies consistently across runtime/artifact binding checks and rotation-report `workflow_*` projection checks under `--require-ci-context-match`.
+  - Updated focused tests in `tests/test_promotion_artifacts.py`:
+    - normalized-rotation pass coverage now explicitly includes zero-padded numeric metadata values (`workflow_run_attempt`, `workflow_run_number`, `workflow_retention_days`, `workflow_actor_id`, `workflow_repository_id`, `workflow_repository_owner_id`).
+    - invalid-runtime numeric coverage now uses clearly malformed non-numeric input (`3rd`) instead of zero-padded numeric forms.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "ci_context_match_accepts_normalized_rotation_values or runtime_numeric_or_ref_type_values_are_invalid or fails_when_rotation_context_values_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type"` => `4 passed, 29 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 61):
+  - Hardened strict CI-context ref-identity semantics across promotion artifact verification:
+    - `enc2sop/promotion_artifacts.py` now fails closed when `GITHUB_REF` and `GITHUB_REF_TYPE` are semantically inconsistent:
+      - `GITHUB_REF_TYPE=branch` requires `GITHUB_REF` prefix `refs/heads/`.
+      - `GITHUB_REF_TYPE=tag` requires `GITHUB_REF` prefix `refs/tags/`.
+    - the ref-semantics check is now applied consistently to:
+      - runtime strict CI-context completeness validation,
+      - strict governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context under both strict runtime binding and offline `--require-artifact-context-consistency`.
+    - this closes a residual gap where malformed ref identity could pass strict provenance checks through raw parity without branch/tag prefix semantics.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document strict branch/tag ref-prefix enforcement in addition to existing numeric/ref-type value checks.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for ref semantic mismatch (`GITHUB_REF=refs/pull/...` with `GITHUB_REF_TYPE=branch`).
+    - offline artifact-context consistency fail-closed coverage for invalid evidence ref semantics with valid `GITHUB_REF_TYPE`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ref_semantics_are_invalid or runtime_numeric_or_ref_type_values_are_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type or artifact_context_consistency_fails_on_invalid_ref_semantics or fails_when_rotation_context_values_invalid or ci_context_match_accepts_normalized_rotation_values"` => `6 passed, 29 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 62):
+  - Hardened strict CI-context commit-SHA provenance semantics in `enc2sop/promotion_artifacts.py`:
+    - strict validation now fail-closes invalid commit-SHA encodings for:
+      - `GITHUB_SHA`,
+      - `GITHUB_WORKFLOW_SHA`.
+    - both keys now require 40-character hexadecimal values and are normalized before strict parity checks.
+    - this validation applies consistently across:
+      - runtime strict CI-context completeness and binding checks under `--require-ci-context-match`,
+      - governed artifact context checks (`promotion_evidence`, release approval/receipt provenance, pre-existing run receipt),
+      - offline `--require-artifact-context-consistency` checks rooted at `promotion_evidence.github_context`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed SHA-format enforcement in strict CI-context mode.
+  - Added focused coverage:
+    - `tests/test_promotion_artifacts.py`:
+      - strict runtime fail-closed coverage for invalid `GITHUB_SHA` and `GITHUB_WORKFLOW_SHA` values.
+      - offline artifact-context consistency fail-closed coverage for invalid evidence SHA values.
+    - refreshed context fixtures in `tests/test_promotion_evidence.py` and `tests/test_encryption_helper.py` to use canonical 40-character SHA forms.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_sha_values_are_invalid or artifact_context_consistency_fails_on_invalid_sha_values or runtime_numeric_or_ref_type_values_are_invalid or artifact_context_consistency_fails_on_invalid_numeric_or_ref_type or runtime_ref_semantics_are_invalid"` => `5 passed, 32 deselected`
+    - `python -m pytest -q tests/test_promotion_evidence.py tests/test_encryption_helper.py -k "github_context"` => `2 passed, 50 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 63):
+  - Hardened strict CI-context workflow-definition reference semantics in `enc2sop/promotion_artifacts.py`:
+    - strict validation now fail-closes invalid `GITHUB_WORKFLOW_REF` encodings.
+    - accepted strict format:
+      - `<owner>/<repo>/.github/workflows/<file>.yml@refs/heads/*`, or
+      - `<owner>/<repo>/.github/workflows/<file>.yml@refs/tags/*`.
+    - this validation applies consistently across:
+      - runtime strict CI-context completeness and binding checks under `--require-ci-context-match`,
+      - governed artifact context checks (`promotion_evidence`, release approval/receipt provenance, pre-existing run receipt),
+      - offline `--require-artifact-context-consistency` checks rooted at `promotion_evidence.github_context`,
+      - rotation-report projected context checks via `workflow_name_ref`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed workflow-ref-format enforcement in strict CI-context mode.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid `GITHUB_WORKFLOW_REF` value.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_WORKFLOW_REF`.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref or runtime_sha_values_are_invalid or artifact_context_consistency_fails_on_invalid_sha_values or runtime_ref_semantics_are_invalid"`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-14, iteration 64):
+  - Hardened strict CI-context ref-name semantic validation parity in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when `GITHUB_REF_NAME` does not match the suffix implied by `GITHUB_REF` + `GITHUB_REF_TYPE`.
+    - enforced mappings:
+      - `GITHUB_REF_TYPE=branch` requires `GITHUB_REF_NAME == GITHUB_REF[len(\"refs/heads/\"):]`.
+      - `GITHUB_REF_TYPE=tag` requires `GITHUB_REF_NAME == GITHUB_REF[len(\"refs/tags/\"):]`.
+    - this validation now applies consistently across:
+      - runtime strict CI-context completeness/binding checks under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt provenance, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document fail-closed `GITHUB_REF_NAME` semantic enforcement in strict CI-context mode.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_REF_NAME` semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_REF_NAME` semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ref_name_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_ref_name_semantics or runtime_ref_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_ref_semantics"` => `4 passed, 37 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 65):
+  - Hardened strict repository-owner semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when `GITHUB_REPOSITORY_OWNER` does not match the owner segment of `GITHUB_REPOSITORY`.
+    - this semantic validation now applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_REPOSITORY_OWNER` semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_REPOSITORY_OWNER` semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_owner_semantics_are_invalid or context_consistency_invalid_repository_owner_semantics or runtime_ref_name_semantics_are_invalid or context_consistency_fails_on_invalid_ref_name_semantics"` => `3 passed, 42 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 66):
+  - Hardened strict workflow-definition repository semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when `GITHUB_WORKFLOW_REF` points to a different repository slug than `GITHUB_REPOSITORY`.
+    - this semantic validation now applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_WORKFLOW_REF` repository semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_WORKFLOW_REF` repository semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_repository_semantics"` => `2 passed, 45 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_owner_semantics_are_invalid or context_consistency_invalid_repository_owner_semantics or runtime_ref_name_semantics_are_invalid or context_consistency_fails_on_invalid_ref_name_semantics"` => `3 passed, 44 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "verify_promotion_artifacts or promotion"` => `14 passed, 15 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 67):
+  - Hardened strict workflow-definition ref semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict checks now fail-close when the `@ref` segment of `GITHUB_WORKFLOW_REF` does not exactly match `GITHUB_REF`.
+    - this semantic validation now applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts (`promotion_evidence`, release approval/receipt contexts, pre-existing run receipt),
+      - rotation-report projected context checks under both strict runtime binding and offline `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime `GITHUB_WORKFLOW_REF` ref semantics.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence `GITHUB_WORKFLOW_REF` ref semantics.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_ref_semantics"` => `2 passed, 47 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_repository_semantics or workflow_ref_ref_semantics or repository_owner_semantics or ref_name_semantics"` => `8 passed, 41 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 68):
+  - Hardened strict CI host/API URL value semantics in `enc2sop/promotion_artifacts.py`:
+    - strict context normalization now fail-closes malformed/non-HTTP(S) values for:
+        - `GITHUB_SERVER_URL`,
+        - `GITHUB_API_URL`,
+        - `GITHUB_GRAPHQL_URL`.
+    - this validation applies consistently to:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks (via `workflow_server_url`, `workflow_api_url`, `workflow_graphql_url`) because they map to the same strict key normalization layer.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime host/API URL values.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence host/API URL values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 49 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 69):
+  - Hardened strict repository-slug semantic validation in `enc2sop/promotion_artifacts.py`:
+    - strict CI-context normalization now validates `GITHUB_REPOSITORY` as an explicit `owner/repo` slug (instead of only non-empty string parity).
+    - strict checks now fail-close when runtime `GITHUB_REPOSITORY` is malformed (for example missing slash/owner-repo segments) under `--require-ci-context-match`.
+    - offline artifact-context consistency now fail-closes when `promotion_evidence.github_context.GITHUB_REPOSITORY` is malformed under `--require-artifact-context-consistency`.
+    - this validation applies consistently across runtime/artifact/rotation-projection parity because all strict context bindings use the same key-normalization layer.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid runtime repository slug value.
+    - offline artifact-context consistency fail-closed coverage for invalid evidence repository slug value.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `4 passed, 49 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_owner_semantics or workflow_ref_repository_semantics or runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value"` => `6 passed, 47 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 70):
+  - Hardened strict CI-context activation and URL endpoint semantics in `enc2sop/promotion_artifacts.py`:
+    - strict semantic checks now require `GITHUB_ACTIONS=true` and `CI=true` when those keys are present in runtime/artifact strict-context payloads (not only boolean-like parseability).
+    - strict semantic checks now validate host/path relationships for `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL`:
+      - on `github.com`, enforce `GITHUB_API_URL=https://api.github.com/` and `GITHUB_GRAPHQL_URL=https://api.github.com/graphql`;
+      - on enterprise hosts, enforce same-origin with `GITHUB_SERVER_URL` plus expected API paths (`/api/v3`, `/api/graphql`);
+      - enforce API/GraphQL origin parity and fail-close on mismatched origins/paths.
+    - this semantic validation applies consistently to:
+      - runtime strict CI-context validation under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks because they map through the same key-normalization and semantic validation layer.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for semantically invalid boolean activation values (`false`/`0`) that are parseable but unacceptable for CI provenance.
+    - strict runtime fail-closed coverage for semantically invalid GitHub-host URL endpoint mappings (wrong API/GraphQL host/path against `GITHUB_SERVER_URL`).
+    - offline artifact-context consistency fail-closed coverage for semantically invalid evidence activation values and URL endpoint mappings.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ci_boolean_keys_invalid or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or artifact_context_consistency_fails_on_invalid_url_values"` => `4 passed, 49 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans"` => `6 passed, 47 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 71):
+  - Hardened strict CI URL value normalization against query/fragment ambiguity in `enc2sop/promotion_artifacts.py`:
+    - strict context URL normalization now fail-closes when `GITHUB_SERVER_URL`, `GITHUB_API_URL`, or `GITHUB_GRAPHQL_URL` include query strings, URL params, or fragments.
+    - this removes a permissive path where canonical endpoints could be decorated with extra URL components and still pass strict key normalization.
+    - semantics continue to apply consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict context normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for query/fragment-decorated runtime URL values.
+    - offline artifact-context consistency fail-closed coverage for query/fragment-decorated evidence URL values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 51 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ci_boolean_keys_invalid or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or artifact_context_consistency_fails_on_invalid_url_values"` => `4 passed, 49 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 72):
+  - Hardened strict CI URL provenance semantics to enforce HTTPS-only endpoint origins in `enc2sop/promotion_artifacts.py`:
+    - strict URL semantic validation now fail-closes when `GITHUB_SERVER_URL`, `GITHUB_API_URL`, or `GITHUB_GRAPHQL_URL` use non-HTTPS schemes.
+    - this closes a permissive path where `http://` endpoint values could still satisfy host/path relationship checks under strict CI context verification.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL semantic validation.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for `http://` runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for `http://` evidence URL provenance values.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document HTTPS-only strict URL provenance expectations.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 73):
+  - Hardened strict CI repository-slug semantics in `enc2sop/promotion_artifacts.py`:
+    - strict `GITHUB_REPOSITORY` normalization now fail-closes values that are not exact two-segment slugs.
+    - fail-closed rules now require exactly one slash plus constrained slug segment characters (`[a-z0-9._-]`) for both owner and repo segments.
+    - this closes a permissive path where malformed multi-segment values (for example `owner/repo/extra`) could previously pass strict parity checks as valid repository identity.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed multi-segment runtime `GITHUB_REPOSITORY` values.
+    - offline artifact-context consistency fail-closed coverage for malformed multi-segment evidence `GITHUB_REPOSITORY` values.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to document stricter `GITHUB_REPOSITORY` slug semantics under strict CI mode.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value"` => `2 passed, 51 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans"` => `6 passed, 47 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-15, iteration 74):
+  - Hardened strict `GITHUB_WORKFLOW_REF` repository-prefix semantics in `enc2sop/promotion_artifacts.py`:
+    - strict workflow-ref normalization now fail-closes values unless the repository prefix before `/.github/workflows/` is a valid `owner/repo` slug.
+    - this closes a permissive path where malformed multi-segment workflow repository prefixes (for example `owner/repo/extra/.github/workflows/...`) could pass strict CI-context key validation.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed multi-segment runtime `GITHUB_WORKFLOW_REF` repository-prefix values.
+    - offline artifact-context consistency fail-closed coverage for malformed multi-segment evidence `GITHUB_WORKFLOW_REF` repository-prefix values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_repository_slug_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_repository_slug or runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `6 passed, 49 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_repository_slug_is_invalid or context_consistency_fails_on_invalid_repository_slug_value or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans or workflow_ref_repository_semantics or workflow_ref_ref_semantics"` => `10 passed, 45 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 75):
+  - Hardened strict `GITHUB_WORKFLOW_REF` canonical workflow-path semantics in `enc2sop/promotion_artifacts.py`:
+    - strict workflow-ref normalization now fail-closes non-canonical workflow definition paths inside `/.github/workflows/`:
+      - empty path segments,
+      - traversal-like segments (`.` / `..`),
+      - backslash-separated segments.
+    - this closes a permissive path where malformed workflow-definition path encodings could still satisfy strict CI-context key checks while bypassing canonical path-shape expectations.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed runtime `GITHUB_WORKFLOW_REF` path segments.
+    - offline artifact-context consistency fail-closed coverage for malformed evidence `GITHUB_WORKFLOW_REF` path segments.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `5 passed, 50 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "workflow_ref_repository_slug_is_invalid or workflow_ref_repository_semantics or workflow_ref_ref_semantics"` => `5 passed, 50 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 76):
+  - Hardened strict git-refname provenance semantics in `enc2sop/promotion_artifacts.py`:
+    - strict `GITHUB_REF` normalization now fail-closes invalid git-refname values (for example `..`, `@{`, control chars, disallowed metacharacters, dot-leading segments, `.lock` segments, trailing dot/slash).
+    - strict `GITHUB_WORKFLOW_REF` normalization now also fail-closes when the `@ref` segment is not a valid git refname even if it still matches `refs/heads/*` or `refs/tags/*` prefix shape.
+    - this closes a permissive path where malformed refname encodings could satisfy branch/tag prefix checks yet remain semantically invalid as Git references.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for malformed runtime `GITHUB_REF` git-refname values.
+    - offline artifact-context consistency fail-closed coverage for malformed evidence `GITHUB_REF` git-refname values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_ref_git_refname_is_invalid or artifact_context_consistency_fails_on_invalid_ref_git_refname or runtime_ref_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_ref_semantics or runtime_workflow_ref_ref_semantics_are_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_ref_semantics"` => `6 passed, 51 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_repository_slug_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref_repository_slug or runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values or runtime_ci_boolean_keys_invalid or artifact_context_consistency_fails_on_invalid_ci_booleans"` => `6 passed, 51 deselected`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 77):
+  - Hardened strict CI URL provenance parsing in `enc2sop/promotion_artifacts.py`:
+    - strict URL normalization now fail-closes `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` values when URL userinfo is present (for example `https://token@github.com`).
+    - this closes a residual permissive path where credential-bearing endpoint encodings could still pass strict CI URL syntax checks despite being non-canonical provenance values.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks via shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for userinfo-bearing runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for userinfo-bearing evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 78):
+  - Hardened strict CI URL canonicalization in `enc2sop/promotion_artifacts.py`:
+    - strict URL normalization now fail-closes non-canonical host/authority encodings for `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL`, including:
+      - trailing-dot hostnames (for example `https://github.com.`),
+      - default-port forms (for example `:443` on HTTPS, `:80` on HTTP),
+      - non-lowercase authority/netloc encodings.
+    - this closes a residual permissive path where semantically equivalent but non-canonical endpoint encodings could pass strict provenance checks and reduce determinism of CI context evidence.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks via shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for non-canonical runtime URL provenance values (trailing-dot host, default-port URL, mixed-case authority).
+    - offline artifact-context consistency fail-closed coverage for non-canonical evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+- Notes (2026-05-16, iteration 79):
+  - Hardened strict CI URL parsing fail-closed behavior in `enc2sop/promotion_artifacts.py`:
+    - strict URL normalization now catches malformed port encodings (for example `https://github.com:abc`) and rejects them as invalid context values instead of allowing parser exceptions to bubble.
+    - this closes a residual reliability risk where malformed URL authorities in runtime/artifact provenance fields could raise and abort verification rather than producing deterministic fail-closed audit failures.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks via shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for invalid non-numeric URL port values.
+    - offline artifact-context consistency fail-closed coverage for invalid non-numeric URL port values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 80):
+    - Hardened strict CI URL path canonicalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes non-canonical double-slash path encodings (for example `https://api.github.com//` and `https://api.github.com//graphql`) for:
+          - `GITHUB_SERVER_URL`,
+          - `GITHUB_API_URL`,
+          - `GITHUB_GRAPHQL_URL`.
+    - this closes a residual permissive path where equivalent-but-non-canonical endpoint paths could still pass strict provenance checks and weaken deterministic context binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for non-canonical double-slash runtime URL values.
+    - offline artifact-context consistency fail-closed coverage for non-canonical double-slash evidence URL values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 81):
+    - Hardened strict CI URL provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes `GITHUB_SERVER_URL`, `GITHUB_API_URL`, and `GITHUB_GRAPHQL_URL` when values contain leading/trailing whitespace instead of trimming them.
+      - this closes a residual permissive path where whitespace-decorated endpoint values could normalize into canonical URLs and pass strict CI-context provenance checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 82):
+    - Hardened strict `GITHUB_WORKFLOW_REF` canonical workflow-path normalization in `enc2sop/promotion_artifacts.py`:
+      - strict workflow-ref normalization now fail-closes percent-encoded traversal/separator bypasses in workflow path segments, including:
+        - `%2e` / `%2E` (encoded `.` segment),
+        - `%2e%2e` / `%2E%2E` (encoded `..` segment),
+        - any decoded segment containing `/` or `\`.
+      - this closes a residual permissive path where encoded workflow-path traversal-like segments could bypass raw segment checks and still satisfy strict provenance key-value validation.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared workflow-ref normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - runtime strict invalid-workflow-ref coverage now includes encoded traversal segment variants.
+    - offline artifact-context consistency invalid-workflow-ref coverage now includes encoded traversal segment variants.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `5 passed, 52 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-16, iteration 83):
+    - Hardened strict `GITHUB_WORKFLOW_REF` canonical workflow-path normalization in `enc2sop/promotion_artifacts.py`:
+      - strict workflow-ref normalization now fail-closes workflow-path segments that contain percent-encoding markers (`%`) even when decoded values are non-traversal.
+      - this closes a residual permissive path where encoded filename variants (for example `release%5Fpromotion.yml` and `release%2epromotion.yml`) could normalize into canonical workflow names and still satisfy strict provenance key-value validation.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared workflow-ref normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - runtime strict invalid-workflow-ref coverage now includes encoded workflow filename variants.
+    - offline artifact-context consistency invalid-workflow-ref coverage now includes encoded workflow filename variants.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref"` => `5 passed, 52 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 84):
+    - Hardened strict CI URL provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes empty-port authority encodings (for example `https://github.com:` and `https://api.github.com:/graphql`) for:
+        - `GITHUB_SERVER_URL`,
+        - `GITHUB_API_URL`,
+        - `GITHUB_GRAPHQL_URL`.
+      - this closes a residual permissive path where malformed authority encodings with a trailing colon could pass strict URL checks as parseable values and weaken deterministic CI-context binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for empty-port runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for empty-port evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 85):
+    - Hardened strict CI URL path canonicalization in `enc2sop/promotion_artifacts.py`:
+      - strict URL normalization now fail-closes non-root trailing-slash path encodings for CI provenance URL keys:
+        - `GITHUB_SERVER_URL`,
+        - `GITHUB_API_URL`,
+        - `GITHUB_GRAPHQL_URL`.
+      - this closes a residual permissive path where decorated endpoint values such as `https://api.github.com/graphql/` could still satisfy URL parsing but weaken deterministic canonical binding in strict provenance checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict URL normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for trailing-slash runtime URL provenance values.
+    - offline artifact-context consistency fail-closed coverage for trailing-slash evidence URL provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_url_values_are_invalid or artifact_context_consistency_fails_on_invalid_url_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 86):
+    - Hardened strict CI SHA provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict SHA normalization now fail-closes leading/trailing whitespace for:
+        - `GITHUB_SHA`,
+        - `GITHUB_WORKFLOW_SHA`.
+      - this closes a residual permissive path where whitespace-decorated SHA values could normalize into canonical digests and still satisfy strict provenance checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated runtime SHA provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated evidence SHA provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_sha_values_are_invalid or artifact_context_consistency_fails_on_invalid_sha_values"` => `2 passed, 55 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 87):
+    - Hardened strict CI repository/ref provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict normalization now fail-closes leading/trailing whitespace for:
+        - `GITHUB_REPOSITORY`,
+        - `GITHUB_REF`,
+        - `GITHUB_WORKFLOW_REF`.
+      - this closes a residual permissive path where whitespace-decorated repository/ref provenance values could normalize into canonical identity strings and still satisfy strict CI-context checks.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated runtime repository/ref/workflow-ref provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated evidence repository/ref/workflow-ref provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_workflow_ref_is_invalid or runtime_repository_slug_is_invalid or runtime_ref_git_refname_is_invalid or artifact_context_consistency_fails_on_invalid_workflow_ref or artifact_context_consistency_fails_on_invalid_repository_slug_value or artifact_context_consistency_fails_on_invalid_ref_git_refname"` => `9 passed, 48 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `57 passed`
+  - Notes (2026-05-17, iteration 88):
+    - Hardened strict CI plain-text provenance normalization in `enc2sop/promotion_artifacts.py`:
+      - strict CI context normalization now fail-closes leading/trailing whitespace (and control characters) for non-specialized text keys instead of trimming and accepting them.
+      - this applies to strict identity/binding keys such as:
+        - `GITHUB_EVENT_NAME`
+        - `GITHUB_WORKFLOW`
+        - `GITHUB_JOB`
+        - `GITHUB_ACTOR`
+      - this closes a residual permissive path where whitespace-decorated text provenance values could normalize into canonical text and still satisfy strict CI-context binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict context normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for whitespace-decorated plain-text runtime provenance values.
+    - offline artifact-context consistency fail-closed coverage for whitespace-decorated plain-text evidence provenance values.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "runtime_text_binding_values_have_whitespace or artifact_context_consistency_fails_on_text_whitespace_values"` => `2 passed, 57 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `59 passed`
+  - Notes (2026-05-17, iteration 89):
+    - Hardened strict CI boolean provenance canonicalization in `enc2sop/promotion_artifacts.py`:
+      - strict CI-context normalization now fail-closes non-canonical boolean aliases for:
+        - `GITHUB_ACTIONS`,
+        - `CI`,
+        - `GITHUB_REF_PROTECTED`.
+      - accepted values are now canonical lowercase `true`/`false` only (no `1/0`, `yes/no`, or `on/off` aliases).
+      - this closes a residual permissive path where semantically truthy/falsy aliases could bypass deterministic provenance string binding.
+    - enforcement applies consistently across:
+      - runtime strict CI-context checks under `--require-ci-context-match`,
+      - governed artifact contexts under `--require-artifact-context-consistency`,
+      - rotation-report projected context checks through shared strict context normalization.
+  - Added focused coverage in `tests/test_promotion_artifacts.py`:
+    - strict runtime fail-closed coverage for non-canonical boolean runtime provenance values.
+    - updated normalization acceptance coverage to require canonical boolean tokens.
+  - Verification:
+    - `python -m pytest -q tests/test_promotion_artifacts.py -k "rotation_context_normalization_accepts_valid_aliases or runtime_boolean_values_are_noncanonical"` => `1 passed, 59 deselected`
+    - `python -m pytest -q tests/test_promotion_artifacts.py` => `60 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "verify_promotion_artifacts"` => `3 passed, 27 deselected`
+  - Notes (2026-05-18, iteration 90):
+    - Landed Linux acceptance-blocker vertical slice for interpreter determinism across `soenc build`:
+      - root cause: explicit/venv `--python-exe` paths were normalized via `Path.resolve()`, which dereferenced symlinked venv launchers to system interpreters on Linux (for example `/usr/bin/python3.12`), causing `py2_linux_rec_opera.py` to run outside the prepared venv and fail on `ModuleNotFoundError: No module named 'Cython'`.
+      - fix: `toolchain_profile.resolve_python_executable(...)` now preserves explicit interpreter path identity (absolute path without symlink dereference) for:
+        - CLI `--python-exe` input,
+        - `SOENC_PYTHON_EXE` override,
+        - fallback `sys.executable`.
+      - this keeps build invocation bound to the caller-selected interpreter context and prevents venv/system drift in release acceptance runs.
+    - Added focused regression coverage:
+      - `tests/test_toolchain_profile.py`:
+        - symlink-preservation test for explicit interpreter path resolution.
+        - updated env-override assertion to match absolute non-dereferenced behavior.
+      - `tests/test_soenc_cli.py`:
+        - build command regression ensuring explicit symlink interpreter path is forwarded unchanged into `compile_with_batch_builder(...)`.
+    - Verification:
+      - `python -m pytest -q tests/test_toolchain_profile.py tests/test_soenc_cli.py -k "python_exe or symlink"` (local workspace)
+  - Notes (2026-05-18, iteration 91):
+    - Landed Linux acceptance-blocker vertical slice for runtime artifact mapping under non-package directories:
+      - root cause: `validate_runtime_delivery(...)` only looked for compiled runtime artifacts at package-shaped paths derived from `runtime_files` (for example `tests/enc_rt_tests_x.py -> tests/enc_rt_tests_x.so`).
+      - in large projects where directories like `tests/` are namespace-style (no `__init__.py`), Cython can emit extensions at build root (`enc_rt_tests_x.so`), so strict package-path lookup produced false missing-runtime failures.
+      - fix: `_pick_compiled_runtime_candidate(...)` now includes a bounded fallback for runtime stubs (`enc_rt_*`) to also match build-root artifacts by runtime stem while keeping existing strict suffix policy behavior.
+    - Added focused regression coverage:
+      - `tests/test_encryption_helper.py`:
+        - `test_validate_runtime_delivery_accepts_non_package_runtime_artifact_at_build_root`.
+    - Verification:
+      - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_delivery and (non_package or marks_manifest_validated or rejects_missing_compiled_runtime)"` => `3 passed`
+      - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `83 passed, 6 skipped`
+  - Notes (2026-05-18, iteration 92):
+    - Landed Linux acceptance fail-closed verification hardening for runtime manifest integrity:
+      - root cause: `validate_runtime_delivery(...)` recomputed runtime fingerprints and wrote fresh values without first validating pre-existing manifest runtime-delivery metadata, so a tampered `compiled_runtime_fingerprints[].digest_hex` could be silently overwritten and pass `soenc verify`.
+      - fix:
+        - added strict pre-write checks for existing runtime delivery metadata:
+          - `compiled_runtime_files` must match recomputed runtime artifact set,
+          - `compiled_runtime_fingerprints` source set/metadata/digests must match recomputed values.
+        - any mismatch now fails closed before manifest rewrite.
+      - this aligns `soenc verify` behavior with tamper-evidence expectations used by `scripts/linux_release_acceptance.sh` fail-closed test B.
+    - Added focused regression coverage:
+      - `tests/test_encryption_helper.py`:
+        - `test_validate_runtime_delivery_rejects_tampered_runtime_fingerprint_digest`
+        - `test_validate_runtime_delivery_rejects_tampered_compiled_runtime_file_set`
+    - Minor acceptance-script observability improvement:
+      - `scripts/linux_release_acceptance.sh` now prints explicit `ok:` lines when fail-closed tamper checks are correctly rejected.
+    - Verification:
+      - `python -m pytest -q tests/test_encryption_helper.py -k "runtime_delivery and (tampered_runtime_fingerprint_digest or tampered_compiled_runtime_file_set or non_package or marks_manifest_validated)"` => `4 passed`
+      - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+  - Notes (2026-05-18, iteration 93):
+    - External Linux pre-production acceptance run is now complete against a real target project (`omniprompt-gateway`) using:
+      - `TARGET_DIR=/home/saksim/program_git/omniprompt-gateway nohup bash scripts/linux_release_acceptance.sh > logs 2>&1 &`
+    - The run completed through `[9/9] Acceptance checks passed`.
+    - Verified production mainline in a Linux environment:
+      - `protect -> build -> verify -> package -> approve-release -> release`.
+    - Verified fail-closed tamper checks in the same run:
+      - tampered `release_approval.json` was rejected by the release gate,
+      - tampered runtime fingerprint in `build_manifest.json` was rejected by the verify gate,
+      - restoring the manifest allowed `verify` to pass again.
+    - Current progress assessment:
+      - core mainline is now pre-production-candidate for Linux project packaging,
+      - remaining `ENC-P0-016` scope is no longer local code-path validation; it is live protected-branch/environment promotion execution and evidence archival.
+    - Next iteration target:
+      - execute `.github/workflows/release_promotion.yml` from a real protected branch/environment,
+      - archive real CI promotion/rotation/run-receipt artifacts,
+      - complete live stale-key rejection rehearsal with real previous-key material.
+  - Notes (2026-05-18, iteration 94):
+    - Hardened live CI promotion artifact archival determinism in `.github/workflows/release_promotion.yml`:
+      - artifact upload name now includes both run id and run attempt:
+        - `soenc-promotion-${{ github.run_id }}-attempt-${{ github.run_attempt }}`
+      - this removes a remaining operational ambiguity where reruns of the same workflow run id could collide or be confused during manual artifact retrieval/audit handoff.
+      - per-attempt naming aligns archived artifact identity with strict provenance keys already enforced in promotion evidence/receipt validation (`GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`).
+    - Updated workflow contract regression coverage:
+      - `tests/test_release_promotion_workflow.py` now requires the run-id + run-attempt artifact name fragment.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py -k "release_promotion_workflow or verify_promotion_artifacts"` => `4 passed, 89 deselected`
+  - Notes (2026-05-19, iteration 95):
+    - Hardened protected-branch enforcement for live promotion evidence closure (`ENC-P0-016`):
+      - `enc2sop/promotion_artifacts.py` now treats `GITHUB_REF_PROTECTED` as a strict CI-activation semantic key under `--require-ci-context-match`, requiring canonical `true` (not merely present/parseable).
+      - this fail-closes runtime, release approval/receipt contexts, rotation-report projections, and run-receipt contexts when promotion evidence is bound to unprotected refs (`GITHUB_REF_PROTECTED=false`).
+    - Added early workflow guard in `.github/workflows/release_promotion.yml`:
+      - new `Require Protected Ref Context` step fails immediately unless `${GITHUB_REF_PROTECTED}` is exactly `true`.
+      - prevents unprotected/manual branch runs from producing misleading promotion evidence artifacts.
+    - Updated promotion policy workflow-fragment contract (`docs/PROMOTION_ROLLOUT_POLICY.json`) to require the protected-ref guard fragment and error string.
+    - Added focused regression coverage:
+      - `tests/test_promotion_artifacts.py`:
+        - `test_run_promotion_artifact_audit_fails_when_runtime_ref_is_not_protected`
+        - `test_run_promotion_artifact_audit_artifact_context_consistency_fails_on_unprotected_ref`
+      - `tests/test_release_promotion_workflow.py` now asserts protected-ref guard step presence.
+    - Verification:
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_release_promotion_workflow.py -k "ref_not_protected or Require Protected Ref Context or release_promotion_workflow"`
+  - Notes (2026-05-19, iteration 96):
+    - Added executable live CI evidence-capture helper for `ENC-P0-016` external-closure operations:
+      - new script: `scripts/github_release_promotion_evidence.sh`.
+      - purpose: drive deterministic protected-branch/environment evidence retrieval without manual run/artifact selection drift.
+    - Script behavior:
+      - dispatches `.github/workflows/release_promotion.yml` via `gh workflow run` with configurable:
+        - `--repo`,
+        - `--ref`,
+        - `--rotation-rehearsal`,
+        - `--skip-promotion-collect`,
+        - `--approver`.
+      - resolves workflow run id (from dispatch output or bounded fallback query),
+      - polls run completion and fails closed on non-success conclusions,
+      - downloads exact per-attempt artifact:
+        - `soenc-promotion-<run_id>-attempt-<run_attempt>`,
+      - verifies all required launch-gate evidence files are present:
+        - `release_bundle.json`,
+        - `release_approval.json`,
+        - `release_receipt.json`,
+        - `promotion_evidence.json`,
+        - `promotion_audit_report.json`,
+        - `rotation_rehearsal_report.json`,
+        - `promotion_artifact_audit_report.json`,
+        - `promotion_run_receipt.json`,
+      - emits `promotion_capture_receipt.json` with absolute artifact paths and SHA256 digests for replayable handoff.
+    - Added workflow-level regression coverage for the helper contract:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract`.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with a dedicated live-evidence-capture section and prerequisites.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-19, iteration 97):
+    - Extended live CI evidence-capture helper for constrained operators (`ENC-P0-016`):
+      - `scripts/github_release_promotion_evidence.sh` now supports existing-run capture mode:
+        - `--run-id <id>` to skip workflow dispatch and retrieve artifacts from a pre-triggered run.
+        - `--run-attempt <int>` optional strict attempt pin to fail-close replay ambiguity.
+      - helper now emits explicit `capture_mode` (`dispatch` or `existing-run`) in `promotion_capture_receipt.json`, with nullable `dispatch_utc` for replay mode.
+      - replay mode preserves the same deterministic artifact expectations and required-file digest verification as dispatch mode.
+    - Why this matters for closure:
+      - live protected-branch/environment evidence can now be archived from this workspace even when dispatch rights or network path for `gh workflow run` are unavailable, reducing operational friction while preserving audit determinism.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with `--run-id` replay-capture usage.
+    - Updated workflow helper contract test coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now validates replay-mode CLI/options and receipt metadata fragments.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-19, iteration 98):
+    - Hardened live CI promotion evidence capture run-identity validation for `ENC-P0-016`:
+      - `scripts/github_release_promotion_evidence.sh` now resolves workflow run details via GitHub API (`repos/<repo>/actions/runs/<run_id>`) and fails closed unless:
+        - workflow run identity includes valid `path@ref` metadata,
+        - workflow path matches expected promotion workflow path (when resolvable from `--workflow-file`),
+        - dispatch capture run event is `workflow_dispatch`,
+        - existing-run capture event is within allowed set (`workflow_dispatch` or `push`),
+        - expected branch matches `head_branch` when dispatching (or when replay capture explicitly sets `--ref`).
+      - helper now cross-checks attempt parity between summary/run-detail responses.
+    - Strengthened replay/audit receipt metadata:
+      - `promotion_capture_receipt.json` now records:
+        - `workflow_path`,
+        - resolved workflow-definition identity in `workflow_ref` (`<path>@<git-ref>`),
+        - requested dispatch/ref input in `workflow_dispatch_ref`,
+        - `workflow_event`,
+        - `workflow_head_branch`,
+        - `workflow_run_html_url`.
+      - this makes archived evidence handoff more deterministic for auditor replay, especially in `--run-id` capture mode.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with run-identity fail-closed behavior and receipt-field expectations.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts run-identity API checks and new receipt metadata keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py`
+  - Notes (2026-05-19, iteration 99):
+    - Hardened live CI promotion evidence capture artifact identity verification for `ENC-P0-016`:
+      - `scripts/github_release_promotion_evidence.sh` now resolves per-run artifact metadata from GitHub API (`repos/<repo>/actions/runs/<run_id>/artifacts`) before download and fails closed unless:
+        - exactly one matching `soenc-promotion-<run_id>-attempt-<run_attempt>` artifact is present,
+        - artifact is not expired,
+        - artifact `workflow_run.id` matches the targeted run,
+        - artifact metadata contains valid `digest` (`sha256:<64hex>`) and numeric `size_in_bytes`.
+      - helper now also cross-checks summary/detail run parity for:
+        - `event`,
+        - `head_branch`,
+        - `run_attempt`.
+    - Strengthened replay/audit receipt metadata:
+      - `promotion_capture_receipt.json` now records:
+        - run identity additions: `workflow_head_sha`, `workflow_run_number`,
+        - `artifact_metadata` block with:
+          - `id`, `digest`, `size_in_bytes`, `created_at`, `updated_at`, `expires_at`, `archive_download_url`,
+          - artifact-linked `workflow_run_id`, `workflow_head_branch`, `workflow_head_sha`.
+      - this makes archived promotion evidence more deterministic for third-party audit replay and artifact provenance handoff without requiring trust in local filesystem-only extraction state.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with pre-download artifact metadata fail-closed checks and receipt field expectations.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts artifact-metadata API checks and new receipt metadata keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"` => `2 passed`
+  - Notes (2026-05-19, iteration 100):
+    - Hardened live CI promotion evidence capture with downloaded archive integrity enforcement for `ENC-P0-016`:
+      - `scripts/github_release_promotion_evidence.sh` now downloads the artifact archive by artifact id (`actions/artifacts/<id>/zip`) before extraction.
+      - helper now fails closed unless downloaded archive bytes match GitHub artifact metadata:
+        - SHA256 digest parity (`artifact_metadata.digest`),
+        - byte-size parity (`artifact_metadata.size_in_bytes`).
+      - extraction now occurs only after archive digest/size verification passes.
+    - Strengthened replay/audit receipt metadata:
+      - `promotion_capture_receipt.json` now records `artifact_archive_verification` with:
+        - `path`,
+        - `digest_verified`,
+        - `size_in_bytes_verified`.
+      - this binds extracted artifact contents to the exact downloaded archive identity, reducing residual trust on post-extraction filesystem state.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with pre-extraction archive verification behavior and receipt fields.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts archive download-by-id, digest/size mismatch fail-closed strings, and receipt metadata fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-19, iteration 101):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted additional deterministic promotion evidence hardening under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` extraction and artifact-bundle verification:
+      - archive extraction now fail-closes on path traversal member names (`..`, absolute-path forms, drive-prefixed forms, null-byte names) before extraction.
+      - archive extraction now fail-closes if symlink entries are present in the downloaded artifact archive.
+      - capture now requires `promotion_artifact_bundle.zip` in the downloaded artifact set and validates `bundle_manifest.json` (`enc2sop-promotion-artifact-bundle/v1`) before receipt generation.
+      - bundle manifest verification fail-closes unless required entries and archive paths are present and entry SHA256 digests match extracted `release_*` / `promotion_*` / `rotation_*` artifacts.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` now records:
+        - `artifact_archive_verification.entry_count_verified`,
+        - `bundle_manifest_verification` (`schema`, `path`, `required_entries_verified`, `required_entry_count_verified`, `file_count_reported`, `manifest_sha256`).
+    - Updated operator runbook (`USAGE_MANUAL.md`) with bundle-manifest verification behavior and new receipt fields.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts traversal/symlink fail-closed messages, bundle-manifest verification checks, required promotion bundle artifact presence, and new receipt metadata keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py -k "release_promotion_workflow or verify_promotion_artifacts or bundle_promotion_artifacts or live_promotion_capture_script_contract"` => `7 passed, 89 deselected`
+  - Notes (2026-05-19, iteration 102):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted deterministic capture reliability and rotation-evidence closure hardening under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` artifact metadata retrieval:
+      - added bounded artifact-index wait (`--artifact-index-wait-seconds`, default `180`) for post-run GitHub indexing lag.
+      - helper now retries when run artifacts are temporarily absent (`found 0`) and fails closed on timeout with explicit run URL context.
+    - Hardened rotation rehearsal evidence validation in capture receipt generation:
+      - when `--rotation-rehearsal true`, capture now fail-closes unless `rotation_rehearsal_report.json` proves `requested=true`, `executed=true`, `old_key_rejected=true`, and `status=passed`.
+      - when `--rotation-rehearsal false`, capture now fail-closes unless rotation report indicates non-requested mode (`requested=false` or omitted, `status=not-requested` or omitted).
+      - `promotion_capture_receipt.json` now records `rotation_report_verification` (`requested`, `executed`, `old_key_rejected`, `status`) for replay/audit handoff.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with artifact-index wait option and explicit rotation-report capture invariants.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts artifact-index retry/timeout behavior and rotation-report validation fail-closed strings.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py -k "release_promotion_workflow or verify_promotion_artifacts or bundle_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-19, iteration 103):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted additional deterministic promotion evidence capture hardening under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` artifact-metadata/run-identity parity checks:
+      - capture now fail-closes when artifact metadata `workflow_head_branch` diverges from resolved run-detail `head_branch`.
+      - capture now fail-closes when artifact metadata `workflow_head_sha` diverges from resolved run-detail `head_sha`.
+      - this closes a residual ambiguity where a mismatched artifact record could still pass earlier run/artifact-id checks before receipt archival.
+    - Updated operator runbook (`USAGE_MANUAL.md`) to document head-branch/head-sha parity enforcement in artifact metadata validation.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed mismatch strings for artifact head-branch/head-sha parity.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-19, iteration 104):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted additional deterministic evidence semantics binding under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` with pre-receipt fail-closed checks for extracted promotion audit/receipt artifacts:
+      - `promotion_artifact_audit_report.json` must be `enc2sop-promotion-artifact-audit/v1` with `passed=true` and `summary.total_failures=0`.
+      - `promotion_run_receipt.json` must be `enc2sop-promotion-run-receipt/v1` with:
+        - `passed=true`,
+        - boolean `rotation_pass_required` matching requested `--rotation-rehearsal` mode,
+        - required artifact entries (`release_*`, `promotion_*`, `rotation_*`) with digest parity against extracted files.
+      - helper now fail-closes if `promotion_run_receipt.promotion_artifact_audit_report_file` diverges from the corresponding artifact-row path.
+      - helper now fail-closes if run-receipt GitHub context is missing or mismatched for:
+        - `GITHUB_REPOSITORY`,
+        - `GITHUB_RUN_ID`,
+        - `GITHUB_RUN_ATTEMPT`,
+        - `GITHUB_ACTIONS=true`,
+        - `CI=true`,
+        - `GITHUB_REF_PROTECTED=true`,
+        - and, when available from run identity, `GITHUB_EVENT_NAME` / `GITHUB_WORKFLOW_REF`.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` now records `promotion_run_receipt_verification`:
+        - `schema`,
+        - `passed`,
+        - `rotation_pass_required`,
+        - `artifact_entries_verified`,
+        - `artifact_entry_count_verified`.
+    - Updated operator runbook (`USAGE_MANUAL.md`) to document run-receipt semantic/context verification and new capture receipt fields.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts run-receipt/audit-report fail-closed verification strings and new capture-receipt verification keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-19, iteration 105):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted deterministic run-identity capture hardening under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` workflow-dispatch/run-id resolution:
+      - helper now attempts GitHub workflow dispatch through REST API with `return_run_details=true` and extracts `workflow_run_id` directly from structured dispatch response fields (`workflow_run_id`, `run_id`, optional run URL forms) when available.
+      - if API dispatch-with-details is unavailable, helper now fail-open only to the previous compatibility path (`gh workflow run` + run-id extraction/fallback), preserving operator compatibility while improving deterministic run binding where supported.
+      - capture logs now include explicit `run_id_resolution_mode` (`provided`, `dispatch-api`, `dispatch-output`, `recent-runs`) and receipt archives now persist this mode as `workflow_run_id_resolution_mode`.
+    - Updated operator runbook (`USAGE_MANUAL.md`) to document API-first dispatch behavior, compatibility fallback behavior, and receipt resolution-mode metadata.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts API-dispatch endpoint usage, `return_run_details` dispatch behavior, dispatch fallback message, and resolution-mode receipt metadata.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-20, iteration 106):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger deterministic execution evidence binding under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` with fail-closed run-attempt job/step verification before artifact acceptance:
+      - helper now calls `repos/<repo>/actions/runs/<run_id>/attempts/<run_attempt>/jobs` and requires exactly one `Signed Approval Promotion Gate` job.
+      - capture now fail-closes unless that job reports `status=completed` and `conclusion=success`.
+      - capture now fail-closes unless required promotion-control steps conclude `success`:
+        - `Require Protected Ref Context`,
+        - `Verify Promotion Artifacts`,
+        - `Bundle Promotion Artifacts`,
+        - `Upload Promotion Artifacts`,
+        - plus core promotion steps (`protect/build/approve/release/promotion-dry-run` chain).
+      - rotation-step parity is now enforced at job-step level:
+        - with `--rotation-rehearsal true`, `Rehearse Approval Key Rotation (old key must fail)` must conclude `success`,
+        - with `--rotation-rehearsal false`, the same step must conclude `skipped`.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` now records `promotion_job_verification`:
+        - job identity/status/conclusion/timestamps,
+        - `required_step_count_verified`,
+        - rotation-step name and verified conclusion.
+    - Updated operator runbook (`USAGE_MANUAL.md`) to document attempt-level promotion job/step verification and receipt fields.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts jobs-API verification path, fail-closed job/step mismatch strings, and new receipt metadata keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-20, iteration 107):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger actor/runner provenance binding for deterministic live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-detail and promotion-job identity checks:
+      - run-detail parsing now captures authoritative run-level `actor.login` and `triggering_actor.login` from `repos/<repo>/actions/runs/<run_id>`.
+      - promotion job verification now fail-closes unless:
+        - `runner_name` and `runner_group_name` are present/non-whitespace,
+        - job labels are structurally valid and do not mix `self-hosted` with `github-hosted`,
+        - when run-level actor metadata exists, job-level `actor.login` / `triggering_actor.login` exactly match run identity.
+      - capture receipt generation now enforces run-receipt context parity for:
+        - `GITHUB_ACTOR`,
+        - `GITHUB_TRIGGERING_ACTOR`,
+        - `RUNNER_NAME`,
+        when these values are available from verified run/job metadata.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` `promotion_job_verification` now records:
+        - `runner_name`,
+        - `runner_group_name`,
+        - `runner_labels`,
+        - `actor_login`,
+        - `triggering_actor_login`.
+    - Updated operator runbook (`USAGE_MANUAL.md`) for actor/runner parity verification and new receipt fields.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed actor/runner mismatch strings and receipt keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-20, iteration 108):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger run-identity parity and replay determinism under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` promotion-job/run parity checks before artifact acceptance:
+      - promotion job verification now fail-closes unless `Signed Approval Promotion Gate` job metadata matches resolved run identity for:
+        - `run_id`,
+        - `head_sha` (canonical 40-char lowercase hex),
+        - `head_branch` (when run identity includes a branch).
+    - Hardened run-receipt GitHub-context parity checks in capture receipt generation:
+      - when available from resolved run identity, capture now fail-closes unless `promotion_run_receipt.github_context` matches:
+        - `GITHUB_SHA`,
+        - `GITHUB_RUN_NUMBER`,
+        - and, when run head branch is present:
+          - `GITHUB_REF=refs/heads/<head_branch>`,
+          - `GITHUB_REF_NAME=<head_branch>`,
+          - `GITHUB_REF_TYPE=branch`.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with these additional fail-closed parity expectations.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new promotion-job parity failure strings and run-receipt context key bindings.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-20, iteration 109):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger workflow-identity provenance binding for deterministic live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` promotion job/run parity checks before artifact acceptance:
+      - promotion-job verification now fail-closes when run-summary workflow identity is present but job metadata diverges on:
+        - missing/whitespace `workflow_name`,
+        - `workflow_name` mismatch versus run summary `workflowName`.
+    - Hardened run-receipt GitHub-context parity checks in capture receipt generation:
+      - when verified promotion-job workflow identity is available, capture now fail-closes unless `promotion_run_receipt.github_context.GITHUB_WORKFLOW` matches it.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` `promotion_job_verification` now records verified `workflow_name`.
+    - Updated operator runbook (`USAGE_MANUAL.md`) with workflow-name parity expectations for promotion job verification and run-receipt context checks.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts workflow-name parity failure strings, `GITHUB_WORKFLOW` context binding, and `promotion_job_verification.workflow_name` receipt field.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-20, iteration 110):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted execution determinism for live evidence capture under `ENC-P0-016` without weakening provenance checks.
+    - Hardened `scripts/github_release_promotion_evidence.sh` actor-parity handling to avoid false failures on API-shape variance while preserving fail-closed mismatch behavior:
+      - promotion-job actor parity is now enforced when job-level `actor` / `triggering_actor` payloads are present,
+      - missing actor payloads are treated as non-fatal (parity check marked as not executed) instead of unconditional failure,
+      - malformed/whitespace/mismatched actor fields still fail closed when present.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` `promotion_job_verification` now records:
+        - `actor_parity_checked`,
+        - `triggering_actor_parity_checked`,
+      so downstream audit can distinguish "field unavailable" from "field verified".
+    - Updated operator runbook (`USAGE_MANUAL.md`) with conditional actor parity semantics and new receipt fields.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts conditional actor-parity validation strings and parity-check receipt keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+  - Notes (2026-05-20, iteration 111):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted additional run-identity determinism for replayable promotion evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` summary/detail run parity checks before artifact acceptance:
+      - `gh run view` polling now requests `headSha` and `number` alongside existing run summary fields.
+      - capture now fail-closes unless summary `headSha` is canonical lowercase 40-hex when present.
+      - capture now fail-closes on summary/detail `head_sha` mismatch (`headSha` vs `head_sha`).
+      - capture now fail-closes unless both summary/detail run numbers are numeric when present.
+      - capture now fail-closes on summary/detail run-number mismatch (`number` vs `run_number`).
+    - This closes a residual provenance ambiguity where run summary metadata drift on commit or run ordinal could be accepted as long as detail APIs and artifact metadata remained internally consistent.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts:
+        - `gh run view` summary request includes `headSha` and `number`,
+        - fail-closed head-sha canonicalization and summary/detail mismatch strings,
+        - fail-closed run-number numeric/mismatch strings.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-20, iteration 112):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted tighter run-identity parity for replayable promotion evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` summary/detail URL identity checks before artifact acceptance:
+      - capture now fail-closes when summary `gh run view` URL and run-detail `html_url` diverge for the same `run_id`.
+    - This closes a residual provenance ambiguity where event/branch/sha/run-number parity could pass while run URL identity drift remained undetected between summary and detail APIs.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the summary/detail `html_url` mismatch fail-closed string.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-20, iteration 113):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter promotion-job provenance determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` promotion-job identity/time checks before artifact acceptance:
+      - promotion-job verification now fail-closes unless:
+        - `job.id` is numeric,
+        - when provided, `job.run_attempt` is numeric and matches resolved run attempt,
+        - `job.html_url` is present/non-whitespace and structurally matches resolved run/job identity (`run_id` + `job_id`),
+        - `job.started_at` / `job.completed_at` are valid ISO-8601 timestamps with monotonic order (`completed_at >= started_at`).
+    - This closes residual ambiguity where a passing promotion job could still be accepted despite malformed or identity-incoherent job URL / attempt metadata, or non-monotonic execution timestamps.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed strings and timestamp parsing contract markers.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-21, iteration 114):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter canonical run-URL provenance binding for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run URL identity checks before artifact acceptance:
+      - capture now fail-closes unless both summary run URL (`gh run view`) and run-detail `html_url` are canonical HTTPS GitHub Actions run URLs with:
+        - no leading/trailing whitespace,
+        - no query/fragment components,
+        - canonical path shape `/<owner>/<repo>/actions/runs/<run_id>[/attempts/<attempt>]`,
+        - repository path parity with resolved `--repo`,
+        - run-id path parity with resolved `run_id`,
+        - if present, attempt-path parity with resolved `run_attempt`,
+        - host parity between summary and detail URL views.
+    - Capture receipt provenance was expanded:
+      - `promotion_capture_receipt.json` now records `workflow_run_url_verification` with:
+        - `host_summary`,
+        - `host_detail`,
+        - `attempt_summary`,
+        - `attempt_detail`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts canonical run-URL fail-closed strings and new receipt verification keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py -k "live_promotion_capture_script_contract or release_promotion_workflow"`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py -k "release_promotion_workflow or verify_promotion_artifacts or live_promotion_capture_script_contract"`
+  - Notes (2026-05-21, iteration 115):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter run/artifact timestamp provenance determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-timestamp semantic checks before artifact acceptance:
+      - `gh run view` polling now requests `createdAt` and `startedAt` in addition to existing run summary fields.
+      - capture now fail-closes unless summary timestamps are valid ISO-8601 with monotonic order:
+        - `createdAt <= startedAt <= updatedAt`.
+      - capture now fail-closes unless run-detail timestamps from `actions/runs/<run_id>` are valid ISO-8601 with monotonic order:
+        - `created_at <= run_started_at <= updated_at`.
+      - capture now fail-closes on summary/detail timestamp mismatches for:
+        - created timestamp (`createdAt` vs `created_at`),
+        - started timestamp (`startedAt` vs `run_started_at`),
+        - updated timestamp (`updatedAt` vs `updated_at`).
+    - Hardened artifact timestamp semantic checks before archive extraction:
+      - artifact metadata timestamps (`created_at`, `updated_at`, `expires_at`) must be valid ISO-8601 and monotonic:
+        - `created_at <= updated_at <= expires_at`.
+    - Capture receipt provenance was expanded:
+      - `promotion_capture_receipt.json` now records `workflow_run_timestamp_verification` with:
+        - `created_at_summary`,
+        - `started_at_summary`,
+        - `updated_at_summary`,
+        - `created_at_detail`,
+        - `started_at_detail`,
+        - `updated_at_detail`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts run/artifact timestamp fail-closed strings, expanded run-summary field request, and new receipt verification keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 116):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter artifact download-URL provenance determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` artifact metadata URL checks before archive download:
+      - capture now fail-closes unless artifact `archive_download_url` is:
+        - non-empty and trimmed (no leading/trailing whitespace),
+        - HTTPS scheme,
+        - non-empty host,
+        - query/fragment free,
+        - canonical path-matched to the resolved artifact id and repository slug:
+          - `/repos/<owner>/<repo>/actions/artifacts/<artifact_id>/zip`, or
+          - `/api/v3/repos/<owner>/<repo>/actions/artifacts/<artifact_id>/zip` (GHES-compatible).
+      - capture now fail-closes unless artifact download URL host matches verified run URL host identity.
+    - Capture receipt provenance was expanded:
+      - `promotion_capture_receipt.json` now records `artifact_metadata.archive_download_url_host`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts archive download URL fail-closed checks, run-host parity guard, and new receipt key.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 117):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter promotion-job URL provenance determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` promotion job URL checks before artifact acceptance:
+      - capture now fail-closes unless `Signed Approval Promotion Gate` `job.html_url` is:
+        - non-empty and trimmed (no leading/trailing whitespace),
+        - HTTPS scheme,
+        - non-empty host,
+        - query/fragment free,
+        - canonical job path with repository/run/job identity parity:
+          - `/<owner>/<repo>/(actions/)?runs/<run_id>[/attempts/<attempt>]/(job|jobs)/<job_id>`.
+      - capture now fail-closes unless promotion job URL host matches previously verified run URL host identity.
+    - Capture receipt provenance was expanded:
+      - `promotion_capture_receipt.json` `promotion_job_verification` now records:
+        - `job_html_url_host`,
+        - `job_html_url_path`,
+        - `job_html_url_attempt`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts promotion-job URL fail-closed checks and new receipt keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 118):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter run-state and workflow-ref semantic parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-detail state checks before artifact acceptance:
+      - capture now fail-closes unless run-detail payload (`actions/runs/<run_id>`) reports:
+        - non-empty `status`,
+        - `status=completed`,
+        - non-empty `conclusion`,
+        - `conclusion=success`.
+      - capture now fail-closes on summary/detail state drift for:
+        - `status`,
+        - `conclusion`.
+    - Hardened workflow-ref semantic normalization from run-detail `path`:
+      - run workflow ref segment must be non-empty/trimmed and semantically normalizable to canonical `refs/...`.
+      - supported normalization paths include canonical `refs/*`, `heads/*`, `tags/*`, and short branch names consistent with run `head_branch` under `push`/`workflow_dispatch`.
+      - capture now fail-closes when normalized workflow ref diverges from `refs/heads/<head_branch>` when `head_branch` is present.
+    - Hardened run-receipt context binding for `GITHUB_WORKFLOW_REF`:
+      - capture now validates path/ref structure of both resolved `workflow_path_ref` and receipt `github_context.GITHUB_WORKFLOW_REF`.
+      - capture now fail-closes unless workflow path segments match exactly and receipt workflow-ref segment matches normalized canonical workflow ref.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed run-state checks and workflow-ref normalization/context-parity checks.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 119):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter run-attempt provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-attempt checks before artifact acceptance:
+      - capture now fail-closes unless run-detail payload (`actions/runs/<run_id>`) provides non-empty `run_attempt`.
+      - capture now fail-closes unless run-detail `run_attempt` is numeric.
+      - capture now fail-closes unless summary `attempt` from `gh run view` is numeric.
+      - capture now fail-closes on summary/detail `run_attempt` mismatch.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new run-attempt fail-closed checks.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 120):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter workflow job-id provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-receipt context checks:
+      - added explicit `--workflow-job-id` input (default `promotion-gate`) with fail-closed argument validation.
+      - capture now fail-closes unless `promotion_run_receipt.github_context.GITHUB_JOB` matches the expected workflow job id.
+      - capture receipt now records `workflow_job_id` in `promotion_capture_receipt.json` for deterministic replay/audit provenance.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts:
+        - `--workflow-job-id` command contract and invalid-token fail-closed message,
+        - `GITHUB_JOB` parity check binding,
+        - `workflow_job_id` receipt field presence.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 121):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter workflow-file identity and repository/server context parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-receipt context checks:
+      - capture now fail-closes unless `promotion_run_receipt.github_context.GITHUB_WORKFLOW_SHA` is present and a canonical 40-char lowercase hex digest.
+      - capture now fail-closes unless numeric GitHub identity fields are present and valid:
+        - `GITHUB_REPOSITORY_ID`,
+        - `GITHUB_REPOSITORY_OWNER_ID`,
+        - `GITHUB_ACTOR_ID`.
+      - capture now fail-closes unless `GITHUB_REPOSITORY_OWNER` matches the owner segment of the resolved `--repo`.
+      - capture now fail-closes unless GitHub URL context matches the verified run host:
+        - `GITHUB_SERVER_URL=https://<run-host>`,
+        - for github.com host: `GITHUB_API_URL=https://api.github.com` and `GITHUB_GRAPHQL_URL=https://api.github.com/graphql`,
+        - for enterprise hosts: `GITHUB_API_URL=https://<run-host>/api/v3` and `GITHUB_GRAPHQL_URL=https://<run-host>/api/graphql`.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` now records `workflow_context_verification`:
+        - `repository_owner`,
+        - `repository_id`,
+        - `repository_owner_id`,
+        - `actor_id`,
+        - `workflow_sha`,
+        - `server_url`,
+        - `api_url`,
+        - `graphql_url`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed context checks and `workflow_context_verification` receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 122):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter run-detail numeric identity parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-detail identity checks:
+      - capture now fail-closes unless `actions/runs/<run_id>` returns numeric:
+        - `repository.id`,
+        - `repository.owner.id`,
+        - `actor.id`.
+      - capture now fail-closes unless these run-detail ids exactly match archived run-receipt context:
+        - `promotion_run_receipt.github_context.GITHUB_REPOSITORY_ID` == run `repository.id`,
+        - `promotion_run_receipt.github_context.GITHUB_REPOSITORY_OWNER_ID` == run `repository.owner.id`,
+        - `promotion_run_receipt.github_context.GITHUB_ACTOR_ID` == run `actor.id`.
+    - Strengthened replay/audit capture receipt metadata:
+      - `promotion_capture_receipt.json` `workflow_context_verification` now records:
+        - `run_repository_id`,
+        - `run_repository_owner_id`,
+        - `run_actor_id`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new run-detail identity fail-closed checks, mismatch diagnostics, and receipt metadata keys.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-21, iteration 123):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter run-detail slug/owner identity parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` run-detail payload identity checks:
+      - capture now fail-closes unless `actions/runs/<run_id>` returns:
+        - numeric `id` matching resolved `run_id`,
+        - non-empty `repository.full_name` exactly matching resolved `--repo` (trimmed, no whitespace drift),
+        - non-empty `repository.owner.login` exactly matching the owner segment of resolved `--repo` (trimmed, no whitespace drift).
+    - This closes residual ambiguity where numeric identity parity could pass while run-detail repository slug/owner metadata drifted from resolved repository scope.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new run-detail id/full_name/owner.login fail-closed checks and mismatch diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-22, iteration 124):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger signed-approval provenance binding for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` promotion-artifact bundle verification before capture receipt emission:
+      - capture now fail-closes unless `promotion_artifact_audit_report.json` explicitly proves strict gate modes are enabled:
+        - `release_approval_signature_required=true`,
+        - `ci_context_match_required=true`,
+        - `artifact_context_consistency_required=true`,
+        - `rotation_pass_required` is boolean and matches requested rehearsal mode.
+      - capture now fail-closes unless release approval/receipt schema and key-id lineage are coherent:
+        - `release_approval.json` must be `enc2sop-release-approval/v1` with non-empty trimmed `signature.key_id`,
+        - `release_receipt.json` must be `enc2sop-release-receipt/v1` with non-empty trimmed `release_approval_key_id`.
+      - capture now fail-closes unless `promotion_run_receipt.json` carries strict signature metadata bound to release-approval key lineage:
+        - non-empty trimmed `release_approval_key_id`,
+        - required `signature` object with `algorithm=hmac-sha256`,
+        - non-empty trimmed `signature.key_id`,
+        - `signature.digest_hex` canonical 64-char lowercase hex,
+        - key-id parity across:
+          - `promotion_run_receipt.release_approval_key_id`,
+          - `promotion_run_receipt.signature.key_id`,
+          - `release_approval.signature.key_id`,
+          - `release_receipt.release_approval_key_id`.
+    - This closes residual ambiguity where capture could previously accept artifact bundles with weaker audit-mode flags or key-id/signature-lineage drift despite passing digest/context checks.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed audit-mode and run-receipt signature/key-id provenance checks.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-22, iteration 125):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter release-gate receipt provenance for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` release-receipt approval gate checks before capture receipt emission:
+      - capture now fail-closes unless `release_receipt.json` explicitly proves:
+        - `release_approval_required=true`,
+        - `release_approval_verified=true`,
+        - non-empty trimmed `release_approval_file`.
+      - capture now fail-closes unless `release_receipt.release_approval_file` semantically points to `release_approval.json` (basename parity), reducing acceptance of mismatched approval-file references in replay bundles.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts these release-receipt approval-gate fail-closed checks.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-22, iteration 126):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter release-receipt digest provenance for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` release-receipt digest checks before capture receipt emission:
+      - capture now fail-closes unless `release_receipt.release_bundle_sha256` is a canonical 64-char lowercase hex digest.
+      - capture now fail-closes unless `release_receipt.release_bundle_sha256` exactly matches extracted `release_bundle.json` digest.
+      - capture now fail-closes unless `release_receipt.release_approval_sha256` is a canonical 64-char lowercase hex digest.
+      - capture now fail-closes unless `release_receipt.release_approval_sha256` exactly matches extracted `release_approval.json` digest.
+    - This closes residual ambiguity where release-gate approval booleans and key-id lineage could pass while release-receipt digest fields drifted from archived release artifacts.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts release-receipt digest format and parity fail-closed checks.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-22, iteration 127):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter release-approval lineage parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` release-approval artifact checks before capture receipt emission:
+      - capture now fail-closes unless `release_approval.signature.algorithm` is exactly `hmac-sha256`.
+      - capture now fail-closes unless `release_approval.signature.digest_hex` is a canonical 64-char lowercase hex digest.
+      - capture now fail-closes unless `release_approval.release_bundle_relative_path` is non-empty, trimmed, and semantically points to `release_bundle.json`.
+      - capture now fail-closes unless `release_approval.release_bundle_sha256` is a canonical 64-char lowercase hex digest and matches extracted `release_bundle.json`.
+      - capture now fail-closes unless `release_receipt.release_approval_signature_digest` is a canonical 64-char lowercase hex digest and matches `release_approval.signature.digest_hex`.
+    - This closes residual replay ambiguity where release-receipt and run-receipt lineage checks could pass while release-approval bundle binding/signature digest semantics drifted.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts these release-approval/signature-digest fail-closed checks.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-22, iteration 128):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter promotion-audit/report provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless promotion report and artifact-audit report provenance fields are internally consistent with archived artifacts:
+      - capture now validates `promotion_audit_report.json` contract before receipt emission:
+        - schema is `enc2sop-promotion-audit-report/v1`,
+        - `passed=true`,
+        - `summary.total_failures=0`,
+        - `failures` is an empty list,
+        - `inputs` object is present.
+      - capture now validates `promotion_audit_report.inputs` digest bindings:
+        - `inputs.evidence_sha256` must be canonical and match extracted `promotion_evidence.json`,
+        - `inputs.policy_sha256` must be canonical and match `promotion_policy` bundle entry when present,
+        - `inputs.workflow_sha256` must be canonical and match `promotion_workflow` bundle entry when present.
+      - capture now validates path-binding parity:
+        - `promotion_artifact_audit_report.{promotion_evidence_file,promotion_report_file,rotation_report_file}` must match `promotion_run_receipt.artifacts[*].path` for corresponding artifacts,
+        - `promotion_audit_report.inputs.evidence_file` must match `promotion_run_receipt.artifacts[promotion_evidence].path`,
+        - when present, `promotion_audit_report.inputs.{policy_file,workflow_file}` must match `promotion_run_receipt.artifacts[{promotion_policy,promotion_workflow}].path`.
+      - capture now validates artifact-audit report lineage fields:
+        - `promotion_artifact_audit_report.release_dir`, `promotion_evidence_file`, `promotion_report_file`, `rotation_report_file`, `promotion_policy_file`, `promotion_workflow_file`, and `promotion_run_receipt_file` must be non-empty trimmed strings,
+        - `promotion_artifact_audit_report.release_approval_key_id_expected` must be non-empty/trimmed and match:
+          - `release_approval.signature.key_id`,
+          - `release_receipt.release_approval_key_id`,
+          - `promotion_run_receipt.release_approval_key_id`.
+    - This closes residual replay ambiguity where earlier digest/signature checks could pass while promotion-audit input bindings or artifact-audit lineage fields drifted from the archived artifact set consumed in the same bundle.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` implicitly covers this slice by asserting all new fail-closed diagnostics emitted by the capture script.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-22, iteration 129):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter release-path and artifact-path provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless release-receipt path semantics and run-receipt artifact path lineage stay canonical and coherent:
+      - capture now fail-closes unless `release_receipt.release_bundle_relative_path` is present, trimmed, and exactly `release_bundle.json`.
+      - capture now fail-closes unless `release_receipt.release_bundle_relative_path` matches `release_approval.release_bundle_relative_path`.
+      - capture now fail-closes unless each required `promotion_run_receipt.artifacts[*].path` ends with the expected canonical filename for that artifact key (e.g., `release_bundle` -> `release_bundle.json`).
+      - capture now fail-closes unless `release_receipt.release_bundle_relative_path` basename matches `promotion_run_receipt.artifacts[release_bundle].path`.
+      - capture now fail-closes unless `release_receipt.release_approval_file` exactly matches `promotion_run_receipt.artifacts[release_approval].path`.
+    - This closes residual replay ambiguity where digest/signature and key-id lineage could pass while release path references drifted from archived run-receipt artifact path lineage.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed diagnostics for:
+        - release-receipt bundle-relative-path required/trimmed/canonical checks,
+        - receipt/approval bundle-relative-path parity,
+        - required run-receipt artifact path basename constraints,
+        - release-receipt path parity against run-receipt release artifact paths.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-22, iteration 130):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter cross-artifact approval timeline provenance for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless release/promotion artifact timestamps are canonical and monotonic across the signed-approval lineage:
+      - capture now validates `release_approval.approved_at_utc` as required, trimmed, and ISO-8601.
+      - capture now validates `release_approval.approvers` is a non-empty list of unique trimmed non-empty strings, and validates optional `release_approval.notes` as trimmed non-empty text when present.
+      - capture now validates `release_receipt.generated_at_utc` as required, trimmed, and ISO-8601, and fail-closes unless:
+        - `release_receipt.generated_at_utc >= release_approval.approved_at_utc`.
+      - capture now validates `promotion_audit_report.generated_at_utc` as required, trimmed, and ISO-8601, and fail-closes unless:
+        - `promotion_audit_report.generated_at_utc >= release_receipt.generated_at_utc`.
+      - capture now validates `promotion_artifact_audit_report.generated_at_utc` as required, trimmed, and ISO-8601, and fail-closes unless:
+        - `promotion_artifact_audit_report.generated_at_utc >= promotion_audit_report.generated_at_utc`.
+      - capture now validates `promotion_run_receipt.generated_at_utc` as required, trimmed, and ISO-8601, and fail-closes unless:
+        - `promotion_run_receipt.generated_at_utc >= promotion_artifact_audit_report.generated_at_utc`.
+      - capture receipts now archive explicit timeline and approval metadata verification blocks:
+        - `approval_lineage_timestamps`,
+        - `release_approval_metadata_verification`.
+    - This closes residual replay ambiguity where signature/digest/path lineage checks could pass while approval-to-release-to-audit emission chronology was malformed, non-canonical, or temporally inconsistent.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed timestamp-lineage and approval-metadata diagnostics plus receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-22, iteration 131):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter release-context provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless release-context artifacts are context-coherent with the verified run-receipt context:
+      - capture now requires `release_receipt.github_context` to exist as a JSON object.
+      - capture now requires `release_receipt.release_approval_github_context` to exist as a JSON object.
+      - capture now requires `release_approval.github_context` to exist as a JSON object.
+      - capture now fail-closes unless `release_receipt.release_approval_github_context` exactly matches `release_approval.github_context`.
+      - capture now fail-closes unless each release-context object matches `promotion_run_receipt.github_context` for required canonical keys:
+        - `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_ACTIONS`, `CI`, `GITHUB_REF_PROTECTED`,
+        - `GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_ID`, `GITHUB_REPOSITORY_OWNER_ID`, `GITHUB_ACTOR_ID`,
+        - `GITHUB_WORKFLOW_SHA`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`.
+      - capture now fail-closes on optional-key drift whenever optional keys are present in `promotion_run_receipt.github_context`:
+        - `GITHUB_SHA`, `GITHUB_RUN_NUMBER`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`,
+        - `GITHUB_EVENT_NAME`, `GITHUB_JOB`, `GITHUB_WORKFLOW`, `GITHUB_WORKFLOW_REF`,
+        - `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, `RUNNER_NAME`.
+    - Promotion capture receipt now records `release_context_verification` metadata:
+      - `contexts_verified`,
+      - `required_keys_verified`,
+      - `optional_keys_verified_when_present`.
+    - This reduces residual replay ambiguity where artifact-audit strict-mode booleans could pass while release/approval context payloads drifted from the run-receipt context archived in the same bundle.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed release-context diagnostics and receipt metadata fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-22, iteration 132):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter retention-window provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless retention metadata is coherent across run details, rotation evidence, run receipt, and release contexts:
+      - capture now fail-closes unless run-detail `retention_days` from `actions/runs/<run_id>` is present, numeric, and positive.
+      - capture now fail-closes unless `rotation_rehearsal_report.workflow_retention_days` is present, trimmed, positive integer, and exactly matches run-detail `retention_days`.
+      - capture now fail-closes unless `promotion_run_receipt.github_context.GITHUB_RETENTION_DAYS` matches run-detail `retention_days`.
+      - release-context parity requirements now include required `GITHUB_RETENTION_DAYS` matching run-receipt context for:
+        - `release_receipt.github_context`,
+        - `release_receipt.release_approval_github_context`,
+        - `release_approval.github_context`.
+    - Promotion capture receipt metadata now archives retention provenance for replay audits:
+      - `workflow_context_verification.retention_days`,
+      - `rotation_report_verification.workflow_retention_days`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed retention diagnostics, `GITHUB_RETENTION_DAYS` run-receipt binding, and receipt metadata fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 133):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter fail-closed promotion artifact-audit report semantics for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `promotion_artifact_audit_report.json` failure-list semantics are internally coherent:
+      - `promotion_artifact_audit_report.failures` must exist as a JSON list.
+      - capture now rejects non-list `failures` payloads even when `passed=true` and `summary.total_failures=0`.
+      - capture now rejects non-empty `failures` lists when `passed=true`, matching existing strict semantics already enforced for `promotion_audit_report`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed `promotion_artifact_audit_report.failures` diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 134):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter summary/failure-count coherence semantics for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless both promotion audit reports enforce typed and coherent failure-count semantics:
+      - `promotion_audit_report.summary.total_failures` must be an integer (rejects boolean/non-integer ambiguity).
+      - `promotion_artifact_audit_report.summary.total_failures` must be an integer.
+      - both `summary.total_failures` values must exactly match the length of their corresponding `failures` list payload.
+      - existing pass-state requirements remain enforced (`passed=true`, `summary.total_failures=0`, and empty `failures` list).
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed typed/coherent `summary.total_failures` diagnostics for both report schemas.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 135):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter rotation-report provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `rotation_rehearsal_report.json` is context- and timeline-coherent with verified run metadata and run-receipt context:
+      - `rotation_rehearsal_report.schema` must be exactly `enc2sop-rotation-rehearsal/v1`.
+      - `rotation_rehearsal_report.generated_at_utc` is required ISO-8601 and must be `<= promotion_artifact_audit_report.generated_at_utc`.
+      - required rotation context fields must exactly match `promotion_run_receipt.github_context`:
+        - `workflow_repository`, `workflow_run_id`, `workflow_run_attempt`, `workflow_github_actions`, `workflow_ci`,
+        - `workflow_retention_days`, `workflow_job`, `workflow_actor_id`, `workflow_repository_id`,
+        - `workflow_repository_owner`, `workflow_repository_owner_id`, `workflow_ref_protected`,
+        - `workflow_name_sha`, `workflow_server_url`, `workflow_api_url`, `workflow_graphql_url`.
+      - optional rotation fields are now parity-checked whenever corresponding run-receipt keys are present:
+        - `workflow_sha`, `workflow_run_number`, `workflow_ref`, `workflow_ref_name`, `workflow_ref_type`,
+        - `workflow_event`, `workflow_name`, `workflow_name_ref`, `workflow_actor`,
+        - `workflow_triggering_actor`, `workflow_runner_name`.
+      - capture receipt `rotation_report_verification` now archives:
+        - `generated_at_utc`,
+        - `context_required_keys_verified`,
+        - `context_optional_keys_verified_when_present`.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed rotation report schema/timestamp/context diagnostics and new capture-receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 136):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter runner-platform provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless rotation report runner-platform fields are parity-bound to run-receipt context:
+      - `rotation_rehearsal_report.workflow_runner_environment` must exactly match `promotion_run_receipt.github_context.RUNNER_ENVIRONMENT`.
+      - `rotation_rehearsal_report.workflow_runner_os` must exactly match `promotion_run_receipt.github_context.RUNNER_OS`.
+      - `rotation_rehearsal_report.workflow_runner_arch` must exactly match `promotion_run_receipt.github_context.RUNNER_ARCH`.
+    - This extends the required rotation context parity set and closes residual ambiguity where rotation report identity checks could pass while runner platform metadata drifted.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the runner-platform context mappings are present in the required parity set.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 137):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter workflow-window timeline provenance for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless archived promotion artifact timestamps are bounded by authoritative run timing from run details:
+      - validates `workflow_run_timestamp_verification.started_at_detail` and `workflow_run_timestamp_verification.updated_at_detail` as canonical ISO-8601 and enforces `updated_at_detail >= started_at_detail`.
+      - enforces `rotation_rehearsal_report.generated_at_utc` within the workflow run window.
+      - enforces `release_approval.approved_at_utc`, `release_receipt.generated_at_utc`, `promotion_audit_report.generated_at_utc`, `promotion_artifact_audit_report.generated_at_utc`, and `promotion_run_receipt.generated_at_utc` each remain within the same workflow run window.
+    - Fixed capture-script execution ordering so `promotion_audit_report.generated_at_utc >= release_receipt.generated_at_utc` is evaluated only after `release_receipt.generated_at_utc` is parsed.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts workflow-window fail-closed diagnostics and the release-receipt ordering diagnostic.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 138):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter rotation-report execution-state semantics for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `rotation_rehearsal_report.json` execution-state fields remain canonical and mode-coherent:
+      - `rotation_rehearsal_report.details` is now required, trimmed, and archived in `promotion_capture_receipt.json` (`rotation_report_verification.details`).
+      - when rotation rehearsal is **not** required, capture now rejects contradictory execution-state payloads:
+        - `rotation_rehearsal_report.executed` must be `false`/absent,
+        - `rotation_rehearsal_report.old_key_rejected` must be `null`.
+    - This closes a residual replay ambiguity where `status=not-requested` could coexist with contradictory execution-state fields and still pass evidence capture.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed `rotation_rehearsal_report.details`, non-rehearsal execution-state diagnostics, and receipt `rotation_report_verification.details` field.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 139):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter explicit rotation state encoding for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless non-rehearsal rotation report state is explicitly canonical (no implicit/omitted fields):
+      - `rotation_rehearsal_report.status` is now required and must be trimmed in all modes.
+      - when rotation rehearsal is **not** required, capture now enforces:
+        - `rotation_rehearsal_report.requested` must be explicit `false` (not null/absent),
+        - `rotation_rehearsal_report.executed` must be explicit `false`,
+        - `rotation_rehearsal_report.old_key_rejected` must remain `null`,
+        - `rotation_rehearsal_report.status` must be explicit `not-requested`.
+    - This closes a residual replay ambiguity where omitted status/requested fields could still be interpreted as "not requested" and accepted.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts required `rotation_rehearsal_report.status` diagnostics and explicit non-rehearsal `requested=false` semantics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 140):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter artifact timestamp provenance within the authoritative workflow-run execution window for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless artifact metadata timestamps are canonical and window-coherent with run details:
+      - `artifact_metadata.created_at` and `artifact_metadata.updated_at` are now parsed as required canonical ISO-8601 UTC timestamps.
+      - capture now rejects malformed artifact chronology where `artifact_metadata.updated_at < artifact_metadata.created_at`.
+      - capture now enforces workflow-window bounds:
+        - `artifact_metadata.created_at >= workflow_run_timestamp_verification.started_at_detail`,
+        - `artifact_metadata.updated_at <= workflow_run_timestamp_verification.updated_at_detail`.
+    - This closes residual replay ambiguity where run-scoped report/receipt timestamps could pass window checks while downloaded artifact metadata timestamps drifted outside the same authoritative run execution window.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts artifact timestamp chronology diagnostic plus artifact-window timestamp binding markers.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 141):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter policy/workflow bundle-entry determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `bundle_manifest.json` explicitly includes canonical policy/workflow entries declared by promotion audit inputs:
+      - `promotion_policy` entry is now required and must use `archive_path=policy/promotion_rollout_policy.json`.
+      - `promotion_workflow` entry is now required and must use `archive_path=workflow/release_promotion.yml`.
+      - existing digest parity checks remain enforced against `promotion_audit_report.inputs.{policy_sha256,workflow_sha256}`.
+    - This closes residual replay ambiguity where promotion-input digest checks could pass without explicit policy/workflow bundle entry presence/path determinism.
+    - Updated workflow helper contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts required bundle-entry diagnostics and canonical archive-path mismatch diagnostics for `promotion_policy` and `promotion_workflow`.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 142):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter policy/workflow run-receipt provenance parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `enc2sop/promotion_artifacts.py` to emit and require canonical policy/workflow lineage entries in `promotion_run_receipt.json`:
+      - run-receipt artifact inventory now always includes:
+        - `promotion_policy`
+        - `promotion_workflow`
+      - existing run-receipt binding validation now fail-closes unless those entries are present and digest/path-coherent with the same `policy_path` / `workflow_path` inputs used by promotion audit and artifact audit.
+    - This closes a residual replay ambiguity where bundle-manifest and audit-input policy/workflow provenance could be correct, but run-receipt lineage could still omit policy/workflow rows and pass local checks.
+    - Updated focused fixture coverage in `tests/test_promotion_artifacts.py` so existing existing-run-receipt scenarios include canonical policy/workflow artifact rows.
+    - Verification:
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_release_promotion_workflow.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 143):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter cross-report policy/workflow path parity for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless policy/workflow provenance paths are fully coherent across promotion audit report, promotion artifact-audit report, and run receipt:
+      - `promotion_artifact_audit_report.promotion_policy_file` must exactly match `promotion_audit_report.inputs.policy_file`.
+      - `promotion_artifact_audit_report.promotion_workflow_file` must exactly match `promotion_audit_report.inputs.workflow_file`.
+      - `promotion_artifact_audit_report.promotion_policy_file` must exactly match `promotion_run_receipt.artifacts[promotion_policy].path`.
+      - `promotion_artifact_audit_report.promotion_workflow_file` must exactly match `promotion_run_receipt.artifacts[promotion_workflow].path`.
+    - This closes a residual replay ambiguity where policy/workflow digest lineage could pass while artifact-audit report path fields drifted from the same canonical provenance paths.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts new fail-closed diagnostics for cross-report policy/workflow path mismatch.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-23, iteration 144):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter required-entry determinism for policy/workflow provenance inside `promotion_run_receipt.artifacts` during replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless run-receipt artifact inventory includes canonical policy/workflow entries:
+      - `promotion_run_receipt.artifacts` now requires `promotion_policy` with filename `promotion_rollout_policy.json`.
+      - `promotion_run_receipt.artifacts` now requires `promotion_workflow` with filename `release_promotion.yml`.
+      - capture now emits explicit fail-closed diagnostics when either entry is missing, before downstream path-parity checks.
+    - This closes a residual replay ambiguity where cross-report policy/workflow path parity checks could be bypassed by omitting policy/workflow rows from the run-receipt artifact inventory.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts required-entry diagnostics for missing `promotion_policy` and `promotion_workflow` in `promotion_run_receipt.artifacts`.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py`
+  - Notes (2026-05-23, iteration 145):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter bundle-manifest cardinality determinism for replayable live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `bundle_manifest.json` explicitly proves coherent file-count metadata:
+      - `bundle_manifest.file_count` must be present and integer-typed.
+      - `bundle_manifest.file_count` must exactly match `len(bundle_manifest.files)`.
+    - This closes a residual replay ambiguity where required-entry and digest/path checks could pass while bundle-manifest cardinality metadata drifted or was malformed.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts `bundle_manifest.file_count` type/coherence fail-closed diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-24, iteration 146):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter promotion artifact-bundle replay determinism for live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless `promotion_artifact_bundle.zip` and `bundle_manifest.json` are exactly aligned:
+      - bundle ZIP entries must be safe relative forward-slash paths, with no traversal, symlinks, directories, or duplicate member paths.
+      - `bundle_manifest.files[*].archive_path` must be trimmed, relative, forward-slash-only, traversal-free, unique, and must not target `bundle_manifest.json`.
+      - `bundle_manifest.files[*].name` must exactly match the required promotion evidence artifact names, including `promotion_policy` and `promotion_workflow`.
+      - ZIP member paths must exactly equal `bundle_manifest.files[*].archive_path` plus `bundle_manifest.json`; missing or undeclared payload entries are rejected.
+    - Capture receipts now archive `bundle_manifest_verification.archive_entries_verified` and `archive_entry_count_verified` for replay handoff.
+    - This closes residual replay ambiguity where manifest row digest/path checks could pass while the bundle ZIP carried undeclared or missing payload entries.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new bundle ZIP/member-name fail-closed diagnostics and receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-24, iteration 147):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter nested bundle digest replay determinism for live evidence capture under `ENC-P0-016`.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed unless every `bundle_manifest.files[*].sha256` digest is coherent with both:
+      - the corresponding member bytes inside `promotion_artifact_bundle.zip`,
+      - the separately uploaded/extracted promotion artifact file for each required evidence artifact.
+    - Capture receipts now archive `bundle_manifest_verification.archive_member_sha256` so replay auditors can compare nested bundle bytes without recomputing the ZIP.
+    - This closes residual replay ambiguity where bundle names and archive paths matched, but nested ZIP member bytes could differ from separately uploaded evidence artifacts.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new nested bundle digest diagnostics and receipt metadata.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - embedded Python heredoc compile check for `scripts/github_release_promotion_evidence.sh` => `compiled_python_heredocs=11`
+      - `git diff --check` => clean
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 148):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted operational capture reliability for external `ENC-P0-016` closure without weakening provenance checks.
+    - Hardened `scripts/github_release_promotion_evidence.sh` GitHub preflight to fail closed on functional API access instead of login-state-only checks:
+      - added strict `--repo` slug validation (`owner/repo`) before API calls.
+      - replaced unconditional `gh auth status` hard gate with repo-scoped functional probe (`gh api repos/<owner>/<repo> --jq .full_name`).
+      - capture now tolerates non-zero `gh auth status` only when API probe proves repository access and identity parity.
+      - when API probe fails, capture now emits explicit remediation to provide token-based access (`GH_TOKEN`/`GITHUB_TOKEN`) or run `gh auth login`.
+    - This reduces false-negative launch blockers in constrained environments where keyring/login state is degraded but valid token-backed API access exists.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new auth preflight diagnostics and repo-slug validation wiring.
+    - Updated operator runbook prerequisite wording in `USAGE_MANUAL.md` to reflect functional API-access requirement rather than strict `gh auth status` success.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 149):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stronger pre-dispatch workflow-target determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed before dispatch/capture unless workflow-definition identity is resolvable and coherent:
+      - added workflow-definition preflight probe: `gh api repos/<owner>/<repo>/actions/workflows/<workflow-file-or-id>`.
+      - requires resolved workflow metadata to be valid and launch-safe:
+        - numeric workflow id,
+        - canonical workflow path under `.github/workflows/`,
+        - `state=active`,
+        - non-empty trimmed workflow name.
+      - when `--workflow-file` is alias/id-driven, resolved path is now promoted to canonical expected workflow path for downstream run-path parity checks.
+      - run-detail provenance now fail-closes unless `actions/runs/<run_id>.workflow_id` is present, numeric, and matches preflight-resolved workflow definition id.
+    - Capture receipt now records explicit workflow-definition provenance in `promotion_capture_receipt.json`:
+      - `workflow_definition_verification.id`,
+      - `workflow_definition_verification.path`,
+      - `workflow_definition_verification.state`,
+      - `workflow_definition_verification.name`,
+      - `workflow_definition_verification.run_workflow_id`.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new workflow-definition preflight and run-workflow-id parity diagnostics plus receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 150):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter artifact metadata/archive parity determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` final capture receipt validator to fail closed unless artifact metadata and extracted archive verification are internally coherent and run-bound:
+      - requires `artifact_metadata.workflow_run_id` as positive integer and exact parity with resolved `workflow_run_id`.
+      - requires `artifact_metadata.size_in_bytes` and `artifact_archive_verification.size_in_bytes_verified` as positive integers with exact parity.
+      - requires canonical `sha256:<64-hex>` formatting for both:
+        - `artifact_metadata.digest`,
+        - `artifact_archive_verification.digest_verified`,
+        and exact digest parity between them.
+      - requires `artifact_archive_verification.entry_count_verified` as a positive integer.
+      - requires non-empty trimmed `artifact_metadata.archive_download_url_host` and enforces case-insensitive host parity with resolved workflow run URL host.
+      - enforces trimmed/typed parity for optional artifact run identity echoes when present:
+        - `artifact_metadata.workflow_head_branch` (trimmed + parity with resolved `workflow_head_branch`),
+        - `artifact_metadata.workflow_head_sha` (trimmed, canonical 40-hex, parity with resolved `workflow_head_sha`).
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new fail-closed diagnostics and field bindings.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 151):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted removal of a false-negative host-binding condition while preserving fail-closed artifact provenance checks for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` artifact host provenance semantics to enforce canonical API-host parity instead of raw run-URL host equality:
+      - added deterministic mapping helper for expected artifact API host:
+        - `github.com -> api.github.com`,
+        - non-public hosts (GHES) -> same host.
+      - pre-download artifact host check now fail-closes on mismatch with expected API host.
+      - final capture receipt validator now fail-closes on mismatch with expected API host.
+    - This prevents valid GitHub.com promotion runs from being rejected solely because run URLs are on `github.com` while artifact API metadata hosts are `api.github.com`.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts expected API-host mismatch diagnostics.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 152):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` reports invalid token), so this slice targeted stricter dispatch-to-run identity determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` to fail closed when `workflow_dispatch` response identity is ambiguous or drifts from captured run identity:
+      - `extract_run_id_from_dispatch_response_json` now parses and returns:
+        - run id,
+        - dispatch `run_url`,
+        - dispatch `html_url`,
+        - dispatch `workflow_id`.
+      - dispatch response now fails closed if run-id candidates disagree across available fields (`workflow_run_id`, `run_id`, `workflow_run.id`, and run URLs).
+      - when dispatch metadata is present, capture now enforces:
+        - dispatch `workflow_id` is numeric and matches preflight-resolved workflow definition id,
+        - dispatch `run_url`/`html_url` are whitespace-free, include canonical `/actions/runs/<id>`, and bind to resolved `run_id`.
+      - final receipt validator now fail-closes when `run_id_resolution_mode=dispatch-api` unless dispatch response lineage remains coherent with resolved run/workflow identity.
+    - Capture receipt now records explicit dispatch lineage for replay handoff:
+      - `dispatch_response_verification.run_id`,
+      - `dispatch_response_verification.workflow_id`,
+      - `dispatch_response_verification.run_url`,
+      - `dispatch_response_verification.html_url`.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts dispatch-response ambiguity/mismatch diagnostics and new receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+  - Notes (2026-05-25, iteration 153):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` still reports invalid keyring token), so this slice targeted stricter dispatch URL lineage determinism for external `ENC-P0-016` closure.
+    - Hardened `scripts/github_release_promotion_evidence.sh` dispatch-response URL verification so dispatch API lineage must remain canonical and run-bound:
+      - dispatch `run_url` and `html_url`, when present, must be HTTPS URLs with no query/fragment, no leading/trailing whitespace, and canonical `/owner/repo/actions/runs/<id>` paths.
+      - dispatch URL repository path must match the requested `--repo` slug.
+      - dispatch URL run id must match the resolved workflow run id.
+      - dispatch URL attempt segment, when present, must match the resolved run attempt.
+      - dispatch URL host must match the verified workflow run URL host, and dispatch `run_url` / `html_url` hosts must agree with each other.
+    - Capture receipt now records replayable dispatch URL verification metadata:
+      - `dispatch_response_verification.run_url_host`,
+      - `dispatch_response_verification.html_url_host`,
+      - `dispatch_response_verification.run_url_attempt`,
+      - `dispatch_response_verification.html_url_attempt`.
+    - Refactored the final capture-receipt heredoc argument handling to tuple unpacking so added provenance fields cannot silently shift later positional bindings.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now asserts the new dispatch URL host/repo/run/attempt diagnostics and capture receipt fields.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py` => `2 passed`
+      - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+      - MSYS Bash syntax check: `C:\msys64\usr\bin\bash.exe -n scripts/github_release_promotion_evidence.sh` => passed
+      - embedded Python heredoc compile check for `scripts/github_release_promotion_evidence.sh` => `compiled_python_heredocs=14`
+      - `git diff --check` => clean
+  - Notes (2026-05-25, iteration 157):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` still reports invalid keyring token), so this slice targeted real-run capture executability for external `ENC-P0-016` closure.
+    - Fixed live evidence-capture JSON plumbing in `scripts/github_release_promotion_evidence.sh`:
+      - removed broken `pipe | python - <<'PY'` patterns where Bash fed the heredoc program to Python stdin and discarded the piped GitHub API JSON payload.
+      - workflow definition and recent-run fallback JSON are now passed explicitly to Python validators.
+      - dispatch response URL run-id parsing now passes URL values explicitly instead of reading from stdin under a heredoc.
+      - promotion job API payloads are written to `${OUTPUT_ROOT}/run-<id>-attempt-<attempt>/promotion_jobs.json` before validation.
+      - artifact metadata API payloads are written to `${OUTPUT_ROOT}/run-<id>-attempt-<attempt>/artifact_metadata.json` on each index-poll attempt before validation.
+    - This improves the first live protected-branch/environment run by removing a capture-time parsing failure mode and preserving raw GitHub API payloads for replay diagnostics without weakening approval, provenance, artifact, or rotation checks.
+    - Updated workflow capture-script contract coverage:
+      - `tests/test_release_promotion_workflow.py::test_live_promotion_capture_script_contract` now rejects the broken pipe/heredoc pattern and asserts raw job/artifact API payload archival.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+      - MSYS Bash syntax check: `C:\msys64\usr\bin\bash.exe -n scripts/github_release_promotion_evidence.sh` => passed
+  - Notes (2026-05-25, iteration 158):
+    - Live GitHub dispatch remains unavailable in this workspace (`gh auth status` still reports invalid keyring token), so this slice targeted pre-dispatch operational determinism for external `ENC-P0-016` closure.
+    - Added `--preflight-only` to `scripts/github_release_promotion_evidence.sh`:
+      - validates the requested `owner/repo` slug and repo API access through the same fail-closed repository probe used by live capture,
+      - resolves the target workflow definition through `repos/<owner>/<repo>/actions/workflows/<id-or-file>`,
+      - enforces numeric workflow id, active workflow state, canonical `.github/workflows/...` path, and non-empty workflow name before any dispatch,
+      - writes `.tmp_ci/live_promotion/promotion_preflight_receipt.json` with schema `enc2sop-promotion-preflight/v1`,
+      - records `repository_api_verified=true`, `dispatch_executed=false`, requested rotation/collect inputs, and workflow-definition identity for replayable operator handoff.
+    - The preflight receipt is explicitly not launch evidence; it only proves the target repo/workflow identity before operators rerun without `--preflight-only` or capture an existing protected-branch run.
+    - Updated `USAGE_MANUAL.md` with the preflight command and receipt semantics.
+    - Updated workflow capture-script contract coverage in `tests/test_release_promotion_workflow.py`.
+    - Verification:
+      - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_promotion_artifacts.py tests/test_soenc_cli.py` => `95 passed, 1 skipped`
+      - MSYS Bash syntax check: `C:\msys64\usr\bin\bash.exe -n scripts/github_release_promotion_evidence.sh` => passed
+      - `git diff --check` => clean, with existing CRLF/LF warnings for docs files
+  - Remaining scope to complete card:
+    - execute workflow from real protected branch/environment and archive generated promotion + rotation + run-receipt artifacts from actual CI runs,
+    - run live stale-key rehearsal using real previous-key material and attach resulting report to rollout records.
+
+### CARD `ENC-P0-017`
+
+- Status: `done`
+- Goal: add a transport reliability certification harness that produces replayable evidence for QR/OCR/cross-medium transfer readiness
+- Type: product reliability + QA automation
+- Depends on: `ENC-P0-002`
+- Product scope:
+  - required for "Beta With Airgap" or any launch claim that QR/OCR/cross-medium transfer is reliable
+  - not required for mainline-only Beta when transport remains optional/experimental
+- Main files:
+  - `enc2sop/transport/`
+  - `qrcode_helper.py`
+  - `enc2sop/cli.py` or transport CLI boundary
+  - new tests under `tests/`
+  - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`
+- Deliverables:
+  - deterministic payload corpus generation
+  - export/recover certification loop for generated transport pages
+  - first `transport_reliability_report.json` schema
+  - per-backend result records for sidecar/structured/OCR provider modes where available
+  - success-rate, failure-reason, missing-chunk, parity-recovered, runtime, and artifact-digest fields
+  - focused tests proving report generation and fail-closed behavior on unrecoverable cases
+- Acceptance:
+  - a local command or test helper can generate `transport_reliability_report.json`
+  - sidecar recovery on tool-generated digital pages is measured and expected to be 100%
+  - report includes enough metadata to replay payload sizes, page counts, chunk settings, backend choices, and recovery outcomes
+  - failures are categorized rather than only reported as generic exceptions
+  - existing transport tests remain green:
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py`
+- Notes (2026-05-25):
+  - Current transport has sidecar-first recovery, manifest-guided extraction, external OCR provider support, optional tesseract/easyocr fallback, line/page CRC, raw/compressed SHA256, parity recovery, and retake diagnostics.
+  - Those mechanisms reduce failure probability but do not prove OCR/cross-medium reliability.
+  - At that point, this card became the next recommended local product-readiness card when live GitHub execution for `ENC-P0-016` was unavailable.
+  - Notes (2026-05-25, iteration 154):
+    - Added `enc2sop/transport/certify.py` with schema `enc2sop-transport-reliability-report/v1`.
+    - Added `soenc transport certify` / `qrcode_helper.py certify` command support.
+    - The harness generates deterministic payloads, exports digital PNG pages, recovers them with the selected backend, and writes `transport_reliability_report.json`.
+    - The first certified profile is `digital-sidecar-v1`:
+      - manifest-guided sidecar recovery,
+      - deterministic payload sizes/iterations/seed,
+      - redundancy and parity settings,
+      - per-case payload, manifest, image, and restored-output SHA256 bindings,
+      - page/chunk counts,
+      - runtime elapsed milliseconds,
+      - recovery metrics for missing chunks, line errors, warnings, parity recovery, and package-hash resolution,
+      - categorized failure reasons.
+    - CLI behavior is fail-closed: `certify` returns non-zero when the required success-rate threshold is not met.
+    - Local implementation evidence generated:
+      - `.tmp_transport_certification_20260525/transport_reliability_report.json`
+      - parameters: payload sizes `64` and `257`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+      - result: `2/2` passed, success rate `1.0`
+    - Verification:
+      - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py` => `25 passed`
+      - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`
+      - `python .\soenc.py transport certify -o .tmp_transport_certification_20260525 --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --max-list 20` => success
+    - Remaining product scope:
+      - `ENC-P0-019` must add the distortion corpus before OCR/camera/screenshot cross-medium transfer can be claimed Beta/GA-ready.
+
+### CARD `ENC-P0-018`
+
+- Status: `done`
+- Goal: add a reliable airgap production profile that fails closed on unsafe transport/OCR configurations
+- Type: product hardening + UX guardrails
+- Depends on: `ENC-P0-017`
+- Product scope:
+  - required before marketing airgap/QR/OCR transport as Beta-ready
+- Main files:
+  - `enc2sop/transport/cli.py`
+  - `qrcode_helper.py`
+  - `QRCODE_AIRGAP_MANUAL.md`
+  - transport tests
+- Deliverables:
+  - production profile, for example `reliable-airgap-v1`
+  - default requirements for sidecar, manifest, line CRC, page CRC, SHA256 verification, and parity/redundancy
+  - explicit opt-in for generic OCR fallback under production profile
+  - warnings converted to fail-closed errors when profile reliability would be weakened
+  - docs showing supported vs experimental transport modes
+- Acceptance:
+  - profile rejects OCR-only or no-redundancy settings unless explicit unsafe/experimental flags are provided
+  - profile preserves backward compatibility outside the production profile
+  - tests cover accepted safe config and rejected unsafe config
+- Notes (2026-05-25, iteration 155):
+  - Added `reliable-airgap-v1` to the transport certification harness.
+  - `soenc transport certify --profile reliable-airgap-v1` now emits profile compliance data in `transport_reliability_report.json`.
+  - Production profile checks require:
+    - sidecar backend unless `--allow-ocr-fallback` is explicitly provided,
+    - sidecar rendering enabled,
+    - manifest-guided certification,
+    - line CRC enabled,
+    - compact page/hash metadata for page CRC/hash fragments,
+    - line index mode not `off`,
+    - redundancy copies `>= 2` or parity group size `>= 2` above the configured threshold,
+    - payload/restored SHA256 verification.
+  - Unsafe settings fail closed unless `--allow-unsafe-profile` is explicitly provided.
+  - Unsafe override runs remain distinguishable from production-certified evidence through `profile_certified=false` and profile-compliance warnings.
+  - Backward compatibility is preserved outside `--profile reliable-airgap-v1`; the default generated-page sidecar profile remains `digital-sidecar-v1`.
+  - Local implementation evidence generated:
+    - `.tmp_transport_reliable_profile_20260525/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, payload sizes `64` and `257`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `2/2` passed, success rate `1.0`, `profile_certified=true`
+  - Negative evidence:
+    - `python .\qrcode_helper.py certify -o .tmp_transport_reliable_profile_reject_20260525 --profile reliable-airgap-v1 --payload-size 64 --backend sidecar --no-sidecar` exits with code `2` and reports `render_sidecar_required observed False`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py tests/test_qrcode_helper_sidecar.py` => `66 passed`
+    - `python .\qrcode_helper.py certify -o .tmp_transport_reliable_profile_20260525 --profile reliable-airgap-v1 --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --max-list 20` => success
+  - Remaining product scope:
+    - `ENC-P0-019` must add distortion corpus certification before screenshot/camera/photo/generic-OCR transfer can be claimed Beta/GA-ready.
+
+### CARD `ENC-P0-019`
+
+- Status: `in_progress`
+- Goal: add distortion/capture certification gates and an OCR-safe human-correctable transfer profile for realistic cross-medium transport degradation
+- Type: product reliability + acceptance testing
+- Depends on: `ENC-P0-017`
+- Product scope:
+  - required before GA claims for QR/OCR/cross-medium transport
+- Main files:
+  - `enc2sop/transport/`
+  - new test utilities or scripts for image distortion
+  - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`
+- Deliverables:
+  - deterministic distortion suite for compression, resize, rotation, crop, blur, contrast, brightness, perspective, noise, screenshot-like degradation, and print-scan-like degradation
+  - `ocr-safe-human-correctable-v1` alphabet/profile support that avoids ambiguous glyphs at generation time instead of relying on OCR guesswork after the fact
+  - OCR/text normalization with hard-safe mappings, ambiguous candidate expansion, line-CRC candidate resolution, and full-payload SHA256 final validation
+  - operator correction template/report for lines that cannot be resolved uniquely by CRC
+  - synthetic OCR confusion suite that can exercise OCR-like substitutions without requiring real photos before feature development continues
+  - report fields that bind distortion parameters to recovery outcomes
+  - threshold checks for selected launch profiles
+  - documented limits for generic OCR fallback
+- Acceptance:
+  - certification can run a bounded local distortion suite deterministically
+  - `ocr-safe-human-correctable-v1` generation emits only the canonical safe alphabet and records that profile in manifests/reports
+  - OCR/text recovery normalizes safe confusions, explores ambiguous candidates, accepts only candidates that satisfy line CRC, and rejects or routes unresolved lines to a correction template
+  - synthetic OCR confusion tests cover the high-risk glyph families before real photos/scans are available
+  - `transport_reliability_report.json` records per-distortion pass/fail and aggregate success rates
+  - failures include enough detail to decide whether stronger FEC is required
+  - generic OCR fallback is not treated as GA-ready unless measured thresholds pass.
+- Current core direction (2026-05-29):
+  - Real photos/scans are not a prerequisite for implementing the next feature slice. They are required only before the product can claim real camera/photo, physical print-scan, or backend-specific OCR production certification.
+  - Local implementation should continue or harden `ocr-safe-human-correctable-v1` when no actual capture corpus is available.
+  - Generation must use a restricted canonical alphabet so the renderer never emits most known-confusing glyphs. Proposed v1 alphabet:
+    - `12356789OAEFHJKMNPRUVWXY`
+    - excluded by default: `0`, `4`, `B`, `C`, `D`, `G`, `I`, `L`, `Q`, `S`, `T`, `Z`, and all lowercase letters.
+  - Decode-time normalization must be layered:
+    - hard-safe mappings where the canonical alphabet excludes the competing glyph: `0/o/O/Q/D -> O`, `I/i/l/L/|/! -> 1`, `S/s/$ -> 5`, `B/b -> 8`, `G -> 6`, `4 -> A`.
+    - ambiguous candidate mappings where one OCR shape can plausibly represent multiple canonical symbols: `g -> {6,9}`, `q -> {O,9}`, `Z/z -> {2,7}`. If `T` or `C` are ever reintroduced into a later alphabet profile, `T/7` and `C/G/6` must move into candidate resolution instead of hard replacement.
+    - all other unexpected glyphs must be reported, not silently dropped.
+  - Candidate resolution must be mechanical, not visual guessing:
+    - generate candidate normalized lines,
+    - accept a line only when exactly one candidate passes line CRC,
+    - emit all unresolved or multi-pass lines into a correction template,
+    - require final payload SHA256 before any recovery result is counted as success.
+  - Correction artifacts should be operator-friendly and replayable, for example `corrections_template.csv` with `page,line,raw_text,normalized_text,candidates,status,expected_crc,actual_crc,corrected_text`.
+  - Synthetic confusion tests should inject OCR-like substitutions such as `6/G/g`, `9/g/q`, `2/7/Z/z`, `O/0/o/Q/D`, `1/I/i/l/L`, `5/S/s`, `8/B/b`, whitespace insertion, dash/noise insertion, and line breaks. This proves the algorithmic repair loop without claiming real-camera readiness.
+  - Product claim boundary remains unchanged: passing synthetic confusion tests can make the feature usable and testable, but real photos/scans or real backend OCR corpora are still required before any real camera, physical print-scan, or backend-specific OCR claim is `production-certified`.
+- Notes (2026-05-25, iteration 156):
+  - Added deterministic generated-page distortion support to `soenc transport certify` / `qrcode_helper.py certify`.
+  - New CLI options:
+    - `--distortion-suite none|generated-page-basic-v1|generated-page-stress-v1`
+    - `--distortion-required-success-rate`
+  - `generated-page-basic-v1` is the first production-profile certifying suite for generated pages. It covers:
+    - control PNG pages,
+    - PNG decode/re-encode,
+    - JPEG recompression at quality 95,
+    - mild blur,
+    - mild contrast/brightness shift,
+    - screenshot-like downscale/upscale plus high-quality recompression.
+  - `generated-page-stress-v1` adds measured-but-not-yet-production-certified stress distortions:
+    - resize down/up,
+    - small rotation,
+    - crop/margin loss,
+    - perspective-skew approximation,
+    - sparse noise,
+    - print-scan-like grayscale/contrast/blur approximation.
+  - Reports now record per-case distortion metadata, distorted image SHA256/size bindings, per-distortion success rates, per-distortion threshold gates, and per-distortion failure reason counts.
+  - Local implementation evidence generated:
+    - `.tmp_transport_distortion_basic_20260525/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, distortion suite `generated-page-basic-v1`, payload sizes `64` and `257`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `12/12` passed, success rate `1.0`, each basic distortion success rate `1.0`, `profile_certified=true`
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `9 passed`
+    - `python -m pytest -q tests/test_transport_modules.py -k certify` => `1 passed, 21 deselected`
+    - `python .\qrcode_helper.py certify -o .tmp_transport_distortion_basic_20260525 --profile reliable-airgap-v1 --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --distortion-suite generated-page-basic-v1 --max-list 20` => success
+  - Remaining product scope:
+    - camera/photo capture is still not certified.
+    - full print-scan and perspective/crop/rotation stress claims are still not production-certified.
+    - generic OCR fallback remains best-effort until measured backend-specific thresholds pass.
+- Notes (2026-05-25, iteration 157):
+  - Hardened render-layout sidecar decoding for synthetic cross-medium distortion:
+    - decodes each sidecar bit from the cell interior region instead of a single center pixel,
+    - uses floating-point grid placement to avoid resize-induced cumulative column drift,
+    - uses line CRC to select valid payload candidates across threshold, offset, and scale candidates,
+    - prioritizes common affine/perspective offsets before full offset fallback to keep certification runtime bounded.
+  - `generated-page-stress-v1` is now production-profile certifying for generated-page sidecar recovery. It covers:
+    - control PNG pages,
+    - PNG decode/re-encode,
+    - JPEG recompression at quality 95,
+    - resize down to 90 percent and up to 110 percent,
+    - mild blur,
+    - mild contrast/brightness shift,
+    - screenshot-like recompression,
+    - small rotation,
+    - crop/margin loss,
+    - deterministic skew approximation,
+    - sparse noise,
+    - print-scan-like grayscale/contrast/blur approximation.
+  - Local implementation evidence generated:
+    - `.tmp_transport_distortion_stress_iter157e/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, distortion suite `generated-page-stress-v1`, payload size `64`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `13/13` passed, success rate `1.0`, every synthetic stress distortion success rate `1.0`, `distortion_threshold_passed=true`, `profile_certified=true`
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py::TransportModuleExtractionTests::test_sidecar_payload_decode_survives_resize_and_affine_skew tests/test_transport_modules.py::TransportModuleExtractionTests::test_qrcode_helper_ocr_runtime_helpers_delegate_to_transport_module tests/test_transport_modules.py::TransportModuleExtractionTests::test_qrcode_helper_ocr_runtime_page_sidecar_helpers_delegate_to_transport_module` => `3 passed`
+    - `python .\soenc.py transport certify -o .tmp_transport_distortion_stress_iter157e --profile reliable-airgap-v1 --payload-size 64 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --distortion-suite generated-page-stress-v1 --max-list 20` => success
+  - Remaining product scope:
+    - real camera/photo capture is still not certified.
+    - full physical print-scan is still not certified.
+    - generic OCR fallback remains best-effort until measured backend-specific thresholds pass.
+- Notes (2026-05-25, iteration 159):
+  - Added operator-supplied capture corpus ingestion for `soenc transport certify` / `qrcode_helper.py certify`.
+  - New capture corpus schema:
+    - `enc2sop-transport-capture-corpus/v1`
+    - corpus `classification` must be one of `real`, `lab`, `synthetic`, or `stress-only`.
+    - each case binds `label`, `manifest_path`, `payload_path`, `image_path`, and optional `capture_metadata`.
+  - New CLI options:
+    - `--capture-corpus-file`
+    - `--capture-corpus-only`
+  - Reports now include:
+    - top-level `capture_corpus` metadata and certification boundary text,
+    - per-case `capture_corpus` records with label/classification/capture metadata,
+    - source and attached image SHA256 bindings in `capture_corpus` and `artifact_digests.source_images`,
+    - capture classification counts,
+    - capture profile-certified counts,
+    - per-classification success rates.
+  - Under `reliable-airgap-v1`, attached capture cases fail closed with `capture_profile_not_certified` when the bound manifest does not prove:
+    - sidecar layout metadata,
+    - line CRC,
+    - compact page/hash metadata,
+    - manifest-guided line indexing,
+    - payload SHA256 binding,
+    - redundancy or parity above threshold.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_contract_next/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, payload size `64`, seed `20260525`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: `1/1` generated control case passed, `profile_certified=true`
+    - `.tmp_transport_capture_corpus_contract_next/capture_corpus.json`
+    - `.tmp_transport_capture_corpus_contract_next/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, capture corpus classification `lab`, backend `sidecar`, redundancy copies `2`, parity group size `4`, `--capture-corpus-only`
+    - result: `1/1` capture-corpus contract case passed, `capture_profile_certified_counts={"lab": 1}`, `success_rates_by_classification={"lab": 1.0}`
+    - note: unit/CLI capture-corpus tests use generated lab fixtures to prove the attachment contract; they are not real camera or physical print-scan certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `74 passed`
+    - focused capture tests prove lab corpus success, CLI `--capture-corpus-only`, and fail-closed weak-manifest behavior.
+    - `python .\soenc.py transport certify -o .tmp_transport_capture_contract_next --profile reliable-airgap-v1 --payload-size 64 --iterations-per-size 1 --seed 20260525 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --max-list 20` => success
+    - `python .\soenc.py transport certify -o .tmp_transport_capture_corpus_contract_next\cert --profile reliable-airgap-v1 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-corpus-file .tmp_transport_capture_corpus_contract_next\capture_corpus.json --capture-corpus-only --max-list 20` => success
+  - Remaining product scope:
+    - archive an actual `real` or `lab` camera/photo or physical print-scan corpus using `--capture-corpus-file`.
+    - real camera perspective-correction evidence remains separate from synthetic `perspective-skew-lite`.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 160):
+  - Added a replayable physical/lab capture-kit preparation command for the next manual scanner/camera run:
+    - `soenc transport prepare-capture-corpus`
+    - schema `enc2sop-transport-capture-kit/v1`
+    - stages deterministic payloads, production-profile generated page exports, empty `captures/*` drop directories, `capture_corpus.json`, `capture_kit_manifest.json`, and `instructions/NEXT_STEPS.md`.
+  - Capture kits fail closed during preparation if the generated manifest cannot satisfy `reliable-airgap-v1` capture prerequisites:
+    - sidecar layout metadata,
+    - line CRC,
+    - compact page/hash metadata,
+    - manifest-guided line indexing,
+    - payload SHA256 binding,
+    - redundancy or parity above threshold.
+  - The generated kit explicitly states its certification boundary:
+    - the kit is only a replay contract,
+    - it is not real camera/photo or physical print-scan certification evidence until operator captures are placed in `captures/*` and measured with `soenc transport certify --capture-corpus-file ... --capture-corpus-only`.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_kit_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_capture_kit_20260526/capture_corpus.json`
+    - `.tmp_transport_capture_kit_20260526/instructions/NEXT_STEPS.md`
+    - `.tmp_transport_capture_kit_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, payload sizes `64` and `257`, seed `20260526`, backend `sidecar`, chunk chars `24`, lines per page `8`, redundancy copies `2`, parity group size `4`
+    - result: capture-kit staging succeeded with `2` cases and `8` generated page images; controlled fixture certification after copying generated pages into capture directories passed `2/2`, success rate `1.0`, `capture_profile_certified_counts={"lab": 2}`, `success_rates_by_classification={"lab": 1.0}`
+    - note: the controlled fixture proves the attachment/replay contract only; it is not real scanner/camera or physical print-scan certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py` => `41 passed`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `77 passed`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py tests/test_soenc_cli.py -k "transport or certify"` => `71 passed, 38 deselected`
+    - `python .\soenc.py transport prepare-capture-corpus -o .tmp_transport_capture_kit_20260526 --classification lab --payload-size 64 --payload-size 257 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata scanner=fixture-copy --capture-metadata dpi=300` => success
+    - `python .\soenc.py transport certify -o .tmp_transport_capture_kit_20260526\cert --profile reliable-airgap-v1 --backend sidecar --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-corpus-file .tmp_transport_capture_kit_20260526\capture_corpus.json --capture-corpus-only --max-list 20` => success
+  - Remaining product scope:
+    - replace the controlled fixture images in `.tmp_transport_capture_kit_20260526/captures/*` with actual `real` or `lab` camera/photo or physical print-scan captures and rerun certification.
+    - real camera perspective-correction evidence remains separate from synthetic `perspective-skew-lite`.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 161):
+  - Added explicit physical/lab capture evidence gates to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--capture-required-classification real|lab|synthetic|stress-only`
+    - `--capture-required-success-rate`
+    - `--require-distinct-capture-images`
+  - Prepared capture corpora now include `reference_image_paths` for generated source pages so attached captures can be compared against the reference PNGs.
+  - Reports now include per-case `capture_corpus.reference_images` and `capture_corpus.reference_transform` metadata:
+    - whether reference pages were provided,
+    - byte-identical capture/reference match count and SHA256 bindings,
+    - `distinct_from_reference`,
+    - `strict_gate_passed`,
+    - `status`.
+  - Report-level capture gates now record:
+    - `thresholds.capture_required_classification`,
+    - `thresholds.capture_required_classification_passed`,
+    - `thresholds.capture_required_success_rate`,
+    - `thresholds.capture_threshold_passed`,
+    - `thresholds.distinct_capture_images_required`,
+    - `thresholds.distinct_capture_images_passed`,
+    - per-classification capture thresholds.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_distinct_gate_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_capture_distinct_gate_20260526/capture_corpus.json`
+    - `.tmp_transport_capture_distinct_gate_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, payload size `64`, seed `20260526`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification lab`, `--require-distinct-capture-images`
+    - result: fixture-copied generated pages recovered successfully but report failed closed with `capture_reference_not_distinct`, `success=false`, and `distinct_capture_images_passed=false`; this proves generated fixture copies cannot be counted as physical/lab capture evidence.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `18 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `61 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "transport or certify"` => `3 passed, 29 deselected`
+    - `python .\soenc.py transport prepare-capture-corpus -o .tmp_transport_capture_distinct_gate_20260526 --classification lab --payload-size 64 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata scanner=fixture-copy --capture-metadata dpi=300` => success
+    - strict fixture-copy certification command wrote `.tmp_transport_capture_distinct_gate_20260526\cert\transport_reliability_report.json` with the expected fail-closed result.
+  - Remaining product scope:
+    - replace prepared-kit captures with actual `real` or `lab` camera/photo or physical print-scan captures and rerun certification using `--capture-required-classification` and `--require-distinct-capture-images`.
+    - real camera perspective-correction evidence remains separate from synthetic `perspective-skew-lite`.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 162):
+  - Added an explicit real camera perspective-correction evidence gate to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--require-real-camera-perspective-correction`
+  - Capture corpus cases now support:
+    - `raw_image_paths` / `raw_image_path` for uncorrected camera/photo inputs,
+    - `perspective_correction` metadata with `applied=true` and a declared `method` or `algorithm`.
+  - Reports now include per-case `capture_corpus.perspective_correction_evidence`:
+    - raw camera image SHA256 bindings,
+    - corrected recovery image SHA256 bindings,
+    - reference generated page SHA256 bindings,
+    - raw/reference, corrected/reference, and raw/corrected byte-distinct checks,
+    - individual check results for classification, raw image presence, corrected image presence, reference image presence, correction metadata, correction applied flag, and correction method declaration.
+  - Report-level camera perspective gates now record:
+    - `parameters.require_real_camera_perspective_correction`,
+    - `thresholds.real_camera_perspective_correction_required`,
+    - `thresholds.real_camera_perspective_correction_passed`,
+    - `capture_corpus.real_camera_perspective_evidence_counts`,
+    - `summary.capture_real_camera_perspective_evidence_counts`.
+  - The gate is intentionally non-default and fail-closed:
+    - enabling it without `--capture-corpus-file` raises a validation error,
+    - supplied capture cases fail with `capture_perspective_evidence_missing` unless they are classified `real`, include raw camera photos, include corrected images used for recovery, include generated reference images, declare correction metadata, and prove all image sets are byte-distinct.
+  - Local implementation evidence generated:
+    - `.tmp_transport_camera_perspective_gate_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_camera_perspective_gate_20260526/capture_corpus.json`
+    - `.tmp_transport_camera_perspective_gate_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `real`, payload size `64`, seed `20260526`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification real`, `--capture-required-success-rate 1.0`, `--require-real-camera-perspective-correction`
+    - result: fixture-copied corrected images recovered the payload, but report failed closed with `capture_perspective_evidence_missing`, `real_camera_perspective_correction_passed=false`, and `capture_real_camera_perspective_evidence_counts={}` because no raw camera photos or correction metadata were attached. This proves generated or corrected-only fixture captures cannot be counted as real camera perspective-correction evidence.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `21 passed`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `82 passed`
+    - `python .\soenc.py transport prepare-capture-corpus -o .tmp_transport_camera_perspective_gate_20260526 --classification real --payload-size 64 --iterations-per-size 1 --seed 20260526 --chunk-chars 24 --lines-per-page 8 --redundancy-copies 2 --parity-group-size 4 --capture-metadata device=fixture-camera --capture-metadata purpose=perspective-gate-negative` => success
+    - camera-gate certification command wrote `.tmp_transport_camera_perspective_gate_20260526\cert\transport_reliability_report.json` and exited non-zero as expected with `capture_perspective_evidence_missing`.
+  - Remaining product scope:
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - full physical print-scan evidence remains unarchived.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 163):
+  - Added an explicit backend-specific OCR-only evidence gate to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--require-ocr-only-backend`
+    - `--ocr-only-required-success-rate`
+  - The gate is intentionally non-default and fail-closed:
+    - enabling it with `backend=sidecar` or `backend=auto` raises a validation error.
+    - supplied/generated cases fail with `ocr_only_evidence_missing` unless the requested backend is `tesseract`, `easyocr`, or `external`, the selected backend and OCR extraction backend match the request, recovery succeeds, and the bound manifest has no binary sidecar boxes.
+    - generated OCR-only certification must use sidecar-free pages, for example `--backend tesseract --no-sidecar --require-ocr-only-backend`.
+  - Reports now include:
+    - top-level `ocr_only_certification`,
+    - per-case `ocr_only_evidence`,
+    - `parameters.require_ocr_only_backend`,
+    - `thresholds.ocr_only_backend_required`,
+    - `thresholds.ocr_only_required_success_rate`,
+    - `thresholds.ocr_only_threshold_passed`,
+    - `thresholds.ocr_only_backends`,
+    - `summary.ocr_only_backend_counts`,
+    - `summary.ocr_only_evidence_counts`,
+    - `summary.ocr_only_success_rates_by_backend`.
+  - Tightened certification semantics:
+    - top-level `profile_certified` now requires `profile_compliance.strict_profile`, so explicit OCR fallback runs are measured evidence but not production-certified profile proof.
+    - capture `profile_certified_counts` now counts only strict sidecar profile evidence rather than broad profile pass status.
+  - Local implementation evidence:
+    - focused unit tests simulate a successful `tesseract` OCR-only report on sidecar-free generated pages.
+    - focused negative tests prove sidecar-backed pages fail closed with `ocr_only_evidence_missing`, even when a mocked OCR backend recovers successfully.
+    - no real `tesseract`, `easyocr`, or external OCR provider threshold report was archived in this iteration.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `24 passed`
+  - Remaining product scope:
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - full physical print-scan evidence remains unarchived.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 164):
+  - Added an explicit physical print-scan evidence gate to `soenc transport certify` / `qrcode_helper.py certify`:
+    - `--require-physical-print-scan`
+  - Added capture-medium support to capture corpora and prepared kits:
+    - `capture_medium` supports `unspecified`, `camera-photo`, `print-scan`, and `mixed`.
+    - `soenc transport prepare-capture-corpus` now accepts `--capture-medium print-scan` so scanner kits can be staged without hand-editing `capture_corpus.json`.
+  - The print-scan gate is intentionally non-default and fail-closed:
+    - enabling it without `--capture-corpus-file` raises a validation error.
+    - supplied cases fail with `capture_print_scan_evidence_missing` unless they are classified `lab` or `real`, declare `capture_medium=print-scan`, include scanned recovery images, include generated `reference_image_paths`, prove scans are byte-distinct from generated references, and record printer/scanner/dpi metadata.
+  - Reports now include:
+    - per-case `capture_corpus.physical_print_scan_evidence`,
+    - per-case/top-level `capture_medium`,
+    - `summary.capture_medium_counts`,
+    - `summary.capture_physical_print_scan_evidence_counts`,
+    - `thresholds.physical_print_scan_required`,
+    - `thresholds.physical_print_scan_passed`,
+    - per-classification `physical_print_scan_evidence_count`.
+  - Local implementation evidence generated:
+    - `.tmp_transport_print_scan_gate_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_print_scan_gate_20260526/capture_corpus.json`
+    - `.tmp_transport_print_scan_gate_20260526/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, capture medium `print-scan`, payload size `64`, seed `20260526`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification lab`, `--capture-required-success-rate 1.0`, `--require-physical-print-scan`
+    - result: fixture-copied generated pages recovered the payload, but report failed closed with `capture_print_scan_evidence_missing`, `physical_print_scan_passed=false`, and `capture_physical_print_scan_evidence_counts={}` because the attached images were byte-identical to generated references. This proves generated fixtures and metadata alone cannot be counted as physical print-scan evidence.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py` => `27 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `61 passed`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "transport or certify"` => `3 passed, 29 deselected`
+    - print-scan gate certification command wrote `.tmp_transport_print_scan_gate_20260526\cert\transport_reliability_report.json` and exited non-zero as expected with `capture_print_scan_evidence_missing`.
+  - Remaining product scope:
+    - replace prepared-kit fixture copies with actual physical print-scan images and rerun with `--require-physical-print-scan`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-26, iteration 165):
+  - Added an operator attachment step for prepared physical/lab capture kits:
+    - CLI command: `soenc transport attach-capture-corpus`
+    - report schema: `enc2sop-transport-capture-attachment-report/v1`
+    - qrcode compatibility entrypoint: `AirgapTransportLayer.attach_capture_corpus(...)`
+  - The command scans each case's existing `image_path` capture directory/file, records attached image SHA256/size bindings, compares attached captures against `reference_image_paths`, and can fail closed with:
+    - `capture_images_missing` when `--require-captures` is set and a case has no attached image.
+    - `capture_reference_not_distinct` when `--require-distinct-capture-images` is set and captures are missing references or byte-identical to generated pages.
+  - The command refreshes `capture_corpus.json` with per-case `attached_capture_images` and `capture_attachment` metadata, and updates `capture_kit_manifest.json` operator-capture summary fields when present.
+  - Certification boundary remains strict:
+    - `transport_capture_attachment_report.json` is a hash-binding/staging artifact only.
+    - It does not prove recovery, physical print-scan readiness, camera transfer, perspective correction, OCR-only reliability, or production transport readiness until `soenc transport certify --capture-corpus-file ... --capture-corpus-only` measures the same corpus with the required gates.
+  - Local implementation evidence generated:
+    - `.tmp_transport_capture_attach_20260526/capture_kit_manifest.json`
+    - `.tmp_transport_capture_attach_20260526/capture_corpus.json`
+    - `.tmp_transport_capture_attach_20260526/attach/transport_capture_attachment_report.json`
+    - parameters: classification `lab`, capture medium `print-scan`, payload size `64`, seed `20260526`, `--require-captures`, `--require-distinct-capture-images`
+    - result: one intentionally modified fixture image was attached and hash-bound successfully; this proves the attachment workflow only, not real scanner/camera certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py tests/test_soenc_cli.py -k "transport or certify"` => `59 passed, 29 deselected`
+    - manual prepare/attach sample succeeded after fixing workspace-relative `--kit-manifest-file` resolution.
+  - Remaining product scope:
+    - replace prepared-kit fixture files with actual physical print-scan images, run `attach-capture-corpus`, then rerun certification with `--require-physical-print-scan`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images to a capture corpus, run `attach-capture-corpus`, declare correction metadata, and rerun with `--require-real-camera-perspective-correction`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 166):
+  - Added first-class raw-camera staging and attachment support for real camera perspective-correction evidence:
+    - `soenc transport prepare-capture-corpus --include-raw-capture-dirs`
+    - `--perspective-correction-method`
+    - `soenc transport attach-capture-corpus --require-raw-captures`
+  - Prepared camera kits now create a sibling `captures/*__raw` directory for each case, write that directory into `raw_image_paths`, and write per-case `perspective_correction.applied=true` plus a method into `capture_corpus.json`.
+  - Attachment reports now record raw-capture presence counts:
+    - `summary.cases_with_raw_captures`
+    - `summary.cases_missing_raw_captures`
+    - `summary.raw_capture_image_count`
+    - refreshed kit summary fields for operator raw-capture presence.
+  - The raw-capture attachment gate is intentionally non-default and fail-closed:
+    - `--require-raw-captures` fails with `raw_capture_images_missing` until every staged case has at least one image under `raw_image_paths`.
+    - empty staged raw directories are allowed at kit-creation time so the next operator run can attach external photos without hand-editing JSON.
+  - Local implementation evidence generated:
+    - `.tmp_transport_camera_raw_kit_20260527/capture_kit_manifest.json`
+    - `.tmp_transport_camera_raw_kit_20260527/capture_corpus.json`
+    - `.tmp_transport_camera_raw_kit_20260527/transport_capture_attachment_report.json`
+    - parameters: classification `real`, capture medium `camera-photo`, payload size `64`, seed `20260527`, `--include-raw-capture-dirs`, perspective method `operator-supplied homography correction`, attachment flags `--require-captures --require-raw-captures --require-distinct-capture-images`
+    - result: kit staging succeeded and created one corrected-image drop directory plus one raw-photo drop directory; attachment on the empty kit exited non-zero as expected with `capture_images_missing`, `raw_capture_images_missing`, and `capture_reference_not_distinct`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py` => `58 passed`
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - replace staged camera-kit placeholders with actual raw camera photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, then rerun certification with `--require-real-camera-perspective-correction`.
+    - replace prepared print-scan fixture files with actual physical print-scan images and rerun with `--require-physical-print-scan`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 167):
+  - Added attachment-report lineage gating for capture certification:
+    - `soenc transport certify --capture-attachment-report-file ...`
+    - `--require-capture-attachment-report`
+  - Certification reports now include per-case `capture_corpus.attachment_report_evidence` with:
+    - `transport_capture_attachment_report.json` SHA256 binding,
+    - current-vs-reported capture image path/SHA256/size comparisons,
+    - current-vs-reported raw-photo comparisons,
+    - current-vs-reported generated-reference comparisons,
+    - explicit fail-closed checks and status.
+  - Report summaries now include `capture_attachment_report_evidence_counts`, and thresholds now include `capture_attachment_report_required` / `capture_attachment_report_passed`.
+  - The gate fails closed with `capture_attachment_report_mismatch` when files change after `attach-capture-corpus` or when certification measures files not recorded by the attachment report.
+  - Generated capture-kit instructions now tell operators to run `attach-capture-corpus` before certification and to add `--require-capture-attachment-report` for physical/lab capture claims.
+  - Local implementation evidence generated:
+    - `.tmp_transport_attachment_lineage_20260527/capture_corpus.json`
+    - `.tmp_transport_attachment_lineage_20260527/attach/transport_capture_attachment_report.json`
+    - `.tmp_transport_attachment_lineage_20260527/cert/transport_reliability_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, capture medium `print-scan`, backend `sidecar`, `--capture-corpus-only`, `--capture-required-classification lab`, `--require-distinct-capture-images`, `--require-capture-attachment-report`
+    - result: fixture-based lab attachment certified only while image digests matched the attachment report; after appending bytes to the capture image, certification failed closed with `capture_attachment_report_mismatch`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "attachment_report or attach_capture_corpus_binds_operator_files"` => `3 passed, 31 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or certify_entrypoint"` => `2 passed, 24 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py -k "attachment_report or attach_capture_corpus or cli_aliases or certify_entrypoint"` => `9 passed, 51 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, then rerun certification with `--require-capture-attachment-report --require-physical-print-scan`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, then rerun certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 168):
+  - Added replayable transport evidence archive packaging:
+    - `soenc transport archive-evidence`
+    - report/API schema `enc2sop-transport-capture-evidence-archive/v1`
+    - default outputs `transport_capture_evidence_archive.zip` and `transport_capture_evidence_archive_manifest.json`
+  - The archive command records SHA256/size/path inventory for:
+    - `transport_reliability_report.json`
+    - `capture_corpus.json`
+    - `transport_capture_attachment_report.json`
+    - payload files
+    - transport manifests
+    - attached capture images
+    - raw camera images when present
+    - generated reference images
+    - recovery outputs and diagnostics when present
+  - The command can fail closed with:
+    - `--require-successful-report`
+    - `--require-capture-attachment-report`
+  - Local implementation evidence generated:
+    - `.tmp_transport_evidence_archive_20260527/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_evidence_archive_20260527/transport_capture_evidence_archive_manifest.json`
+    - parameters: archived `.tmp_transport_attachment_lineage_20260527/cert/transport_reliability_report.json` with `--require-successful-report --require-capture-attachment-report`
+    - result: archive manifest recorded 8 hash-bound files and final ZIP SHA256 `47141c48712e991038a39441b73e93f7e127c6988e2d0099cc7ee2d6bcbe3e13`
+    - note: this archive packages the prior fixture-based lab evidence, so it proves replay packaging only and does not certify real camera/photo or physical print-scan readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence or archive_evidence_command"` => `3 passed, 34 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "archive_transport_evidence or cli_aliases"` => `2 passed, 25 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `100 passed`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, then archive the passing report with `archive-evidence`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, then archive the passing report with `archive-evidence`.
+    - run and archive a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 169):
+  - Added transport evidence archive replay verification:
+    - `soenc transport verify-evidence-archive`
+    - report/API schema `enc2sop-transport-capture-evidence-archive-verification/v1`
+  - Verification checks include:
+    - embedded and external archive manifest schema/parity,
+    - safe relative ZIP member paths with no directories, symlinks, traversal, backslashes, or drive-prefixed names,
+    - exact ZIP inventory against `files[*].archive_path` plus the embedded manifest,
+    - per-file SHA256 and byte-size checks,
+    - summary file-count/role/size coherence,
+    - archived `transport_reliability_report.json`, `capture_corpus.json`, and `transport_capture_attachment_report.json` schema checks,
+    - optional gate checks for `--require-successful-report`, `--require-profile-certified`, `--require-capture-attachment-report`, `--require-physical-print-scan`, `--require-real-camera-perspective-correction`, and `--require-ocr-only-backend`.
+  - Added compatibility entrypoint `AirgapTransportLayer.verify_transport_evidence_archive(...)` and CLI parser/dispatch wiring.
+  - Updated operator docs and next-iteration prompt to add archive verification after `archive-evidence`.
+  - Local implementation evidence:
+    - focused unit evidence verifies a passing archive with `--require-successful-report --require-profile-certified --require-capture-attachment-report --require-physical-print-scan`,
+    - tampered ZIP evidence fails closed with duplicate member and external archive SHA256 mismatch diagnostics,
+    - CLI evidence writes `transport_archive_verification.json`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence or verify_transport_evidence_archive or verify_evidence_archive"` => `4 passed, 35 deselected` (one expected Python zipfile duplicate-member warning in the tamper test)
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or archive_transport_evidence or verify_transport_evidence_archive"` => `3 passed, 25 deselected`
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, archive with `archive-evidence`, then verify with `verify-evidence-archive`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, then verify.
+    - run, archive, and verify a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 170):
+  - Added strict archive-creation gates to prevent claim packaging before the measured report proves the same gate:
+    - `soenc transport archive-evidence --require-profile-certified`
+    - `--require-physical-print-scan`
+    - `--require-real-camera-perspective-correction`
+    - `--require-ocr-only-backend`
+  - Archive creation now fails closed unless the input `transport_reliability_report.json` both required and passed the requested medium/backend gate.
+  - `soenc transport verify-evidence-archive` now accepts workspace-relative external `--manifest-file` paths before falling back to paths relative to the archive ZIP directory.
+  - Local implementation evidence:
+    - `.tmp_transport_archive_strict_gate_20260527/archive/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_archive_strict_gate_20260527/archive/transport_capture_evidence_archive_manifest.json`
+    - `.tmp_transport_archive_strict_gate_20260527/archive/transport_archive_verification.json`
+    - parameters: fixture-based lab print-scan report archived with `--require-successful-report --require-profile-certified --require-capture-attachment-report --require-physical-print-scan`
+    - result: archive manifest recorded 9 hash-bound files and ZIP SHA256 `37866ab6f7db602537c26e749a866596741628b2aafbb3a1fb1b627110609013`; requiring `--require-real-camera-perspective-correction` on the same report failed closed before archive creation.
+    - note: this proves strict claim packaging and archive replay only; fixture-based captures still do not certify real physical print-scan or real camera readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence or archive_evidence_command or verify_evidence_archive"` => `7 passed, 35 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "archive_transport_evidence or verify_transport_evidence_archive or cli_aliases"` => `3 passed, 25 deselected`
+    - `python -m pytest -q tests/test_soenc_cli.py -k "transport or certify"` => `3 passed, 29 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `105 passed, 1 warning` (expected duplicate-member warning in tamper test)
+    - manual archive verification with workspace-relative manifest path passed with `failure_count=0`.
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, archive with matching archive gates, then verify with matching verification gates.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive with matching archive gates, then verify.
+    - run, archive, and verify a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 171):
+  - Added machine-readable transport certification claim boundaries:
+    - report/API schema block: `enc2sop-transport-certification-claims/v1`
+    - embedded in `transport_reliability_report.json`
+    - copied into `transport_capture_evidence_archive_manifest.json` under `certification_gates.certification_claims`
+    - emitted again by `soenc transport verify-evidence-archive`
+  - Claim records now independently label:
+    - `generated-page-sidecar`
+    - `generated-page-synthetic-stress`
+    - `physical-print-scan`
+    - `real-camera-perspective-correction`
+    - `backend-specific-ocr-only`
+  - Each claim records `certified`, `status`, `evidence_level`, required/passed/missing gates, scoped metrics, and a certification boundary. This lets launch/audit tooling distinguish production sidecar evidence, synthetic-stress evidence, lab print-scan evidence, real camera perspective evidence, backend-specific OCR-only measurement, and not-certified modes without inferring from scattered threshold fields.
+  - Physical print-scan and real camera perspective claim records require attachment-report lineage plus the corresponding medium/camera gate before reporting `certified=true`.
+  - Archive verification now fails closed on certification-claim snapshot drift between the archived `transport_reliability_report.json` and the archive manifest gate snapshot.
+  - Local implementation evidence:
+    - focused generated-page stress evidence reports `generated-page-synthetic-stress.certified=true` while physical/camera/OCR-only claims remain `certified=false`.
+    - focused fixture-based lab print-scan evidence reports `physical-print-scan.status=lab-certified` and keeps the boundary scoped to the measured lab corpus.
+    - focused tamper evidence rejects an archive whose embedded manifest claim snapshot is edited away from the archived report with `transport_claims_gate_mismatch`.
+    - focused archive packaging evidence rejects reports whose legacy medium/backend gate fields pass but whose matching `certification_claims` record is not certified.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "claim or archive_transport_evidence_fails_when_required_claim_not_certified or archive_transport_evidence_packages_report_corpus_attachment_and_artifacts"` => `4 passed, 41 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py -k "claim or archive_transport_evidence or verify_transport_evidence_archive or cli_aliases or certify_entrypoint"` => `12 passed, 61 deselected` (one expected Python zipfile duplicate-member warning in the tamper test)
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `109 passed` (one expected Python zipfile duplicate-member warning in the tamper test)
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py` => passed
+    - direct `python -m py_compile enc2sop\transport\certify.py` hit a Windows `__pycache__` permission error before the redirected-pycache compile passed.
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, run certification with `--require-capture-attachment-report --require-physical-print-scan`, archive with matching archive gates, then verify with matching verification gates and inspect `certification_claims`.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, run certification with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive with matching archive gates, then verify.
+    - run, archive, and verify a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+    - generic OCR fallback remains best-effort until backend-specific measured reports pass explicit thresholds.
+- Notes (2026-05-27, iteration 172):
+  - Added a product-facing transport certification status artifact:
+    - CLI command: `soenc transport certification-status`
+    - schema: `enc2sop-transport-certification-status/v1`
+    - accepted sources: a measured `transport_reliability_report.json`, a saved `transport_archive_verification.json`, or a `transport_capture_evidence_archive.zip` when `--verify-archive` is supplied.
+  - The status artifact records:
+    - source type/file/SHA256,
+    - archive verification state when applicable,
+    - profile/profile-certified state,
+    - certified/uncertified claim lists,
+    - one row each for `generated-page-sidecar`, `generated-page-synthetic-stress`, `physical-print-scan`, `real-camera-perspective-correction`, and `backend-specific-ocr-only`,
+    - each row's status, evidence level, boundary, required/passed/missing gates, and metrics,
+    - product-facing booleans for production airgap, real camera, physical print-scan, OCR-only, and generic OCR fallback readiness,
+    - recommended next evidence steps for still-uncertified media.
+  - Compatibility/API wiring:
+    - `qrcode_helper.AirgapTransportLayer.summarize_transport_certification_status(...)`
+    - `enc2sop.transport.certify.summarize_transport_certification_status(...)`
+  - Certification boundary:
+    - The status artifact is a launch-readable summary only. It does not broaden any claim beyond the underlying `certification_claims`; product copy should quote only rows with `certified=true`.
+    - `generic_ocr_fallback_ready` remains `false` because only backend-specific OCR-only evidence can be certified by the current gate.
+  - Local implementation evidence:
+    - `.tmp_transport_certification_status_20260527/transport_reliability_report.json`
+    - `.tmp_transport_certification_status_20260527/transport_certification_status.json`
+    - parameters: profile `reliable-airgap-v1`, distortion suite `generated-page-stress-v1`, payload size `64`, seed `20260527`, backend `sidecar`, redundancy copies `2`, parity group size `4`
+    - result: certification status reports `production_airgap_ready=true` for generated-page sidecar, `generated-page-synthetic-stress.certified=true`, `physical_print_scan_ready=false`, `real_camera_ready=false`, `ocr_only_ready=false`, and `generic_ocr_fallback_ready=false`
+    - note: this proves the launch-readable status artifact path only; it does not certify real camera/photo, physical print-scan, or OCR-only readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "certification_status"` => `4 passed, 45 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "certification_status"` => `1 passed, 28 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_transport_modules.py -k "certification_status or archive_transport_evidence_packages_report_corpus_attachment_and_artifacts or verify_evidence_archive_command"` => `7 passed, 71 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `114 passed, 1 warning` (expected duplicate-member warning in tamper test)
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+    - `git diff --check` clean except existing CRLF conversion warnings in docs.
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status`.
+    - run, archive, verify, and summarize a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+- Notes (2026-05-27, iteration 173):
+  - Added an operator capture-corpus validation preflight:
+    - CLI command: `soenc transport validate-capture-corpus`
+    - schema: `enc2sop-transport-capture-corpus-validation/v1`
+    - API wiring: `qrcode_helper.AirgapTransportLayer.validate_capture_corpus(...)` and `enc2sop.transport.certify.validate_capture_corpus(...)`
+  - The validation report records:
+    - source corpus file/SHA256,
+    - profile and backend intended for certification,
+    - per-case manifest/payload/capture/reference/raw image SHA256 records,
+    - reliable-airgap profile compliance,
+    - distinctness from generated reference pages,
+    - attachment-report lineage status,
+    - physical print-scan evidence status,
+    - real camera perspective-correction evidence status,
+    - readiness counts and `failures_by_reason`.
+  - Certification boundary:
+    - The validator is a preflight only. It does not run recovery, does not produce `transport_reliability_report.json`, and does not certify camera/photo, physical print-scan, OCR-only, or production airgap readiness.
+    - It is intended to catch missing physical files, raw photos, distinctness, metadata, and attachment lineage before a costly certification run.
+  - Local implementation evidence:
+    - `.tmp_transport_capture_validation_20260527/capture_kit_manifest.json`
+    - `.tmp_transport_capture_validation_20260527/capture_corpus.json`
+    - `.tmp_transport_capture_validation_20260527/transport_capture_validation_report.json`
+    - parameters: profile `reliable-airgap-v1`, classification `lab`, capture medium `print-scan`, payload size `64`, seed `20260527`, `--require-captures`, `--require-distinct-capture-images`, `--require-capture-attachment-report`, `--require-physical-print-scan`
+    - result: empty prepared kit failed closed with `capture_images_missing`, `capture_reference_not_distinct`, `capture_attachment_report_mismatch`, and `capture_print_scan_evidence_missing`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "validate_capture_corpus"` => `3 passed, 49 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "validate_capture_corpus or cli_aliases"` => `2 passed, 28 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, validate with `validate-capture-corpus --require-real-camera-perspective-correction`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status`.
+    - run, archive, verify, and summarize a real backend-specific OCR-only report when a named OCR backend/corpus is available.
+- Notes (2026-05-27, iteration 174):
+  - Added a sidecar-free OCR-only capture-kit and preflight contract:
+    - `soenc transport prepare-capture-corpus --ocr-only-backend {tesseract,easyocr,external}`
+    - non-production profile marker: `ocr-only-backend-v1`
+    - generated manifests now explicitly record `sidecar_enabled=false` for sidecar-free exports.
+    - prepared OCR-only corpora record `metadata.ocr_only_backend` and per-case `ocr_only_backend` / `ocr_only_evidence` hints.
+    - generated `instructions/NEXT_STEPS.md` tells operators to certify with the named backend and `--require-ocr-only-backend`.
+  - Extended `soenc transport validate-capture-corpus` with `--require-ocr-only-backend`:
+    - validates backend is `tesseract`, `easyocr`, or `external`,
+    - fails closed with `ocr_only_evidence_missing` when attached capture cases bind manifests with binary sidecar data,
+    - records per-case `ocr_only_evidence` and summary `ocr_only_ready_case_count`.
+  - Certification boundary:
+    - `ocr-only-backend-v1` is not a production airgap profile and must not be used for `--require-profile-certified` claims.
+    - The kit and validation report prove sidecar-free/backend-specific readiness only. They do not run OCR recovery, do not certify generic OCR fallback, and do not certify real physical print-scan/camera transfer.
+  - Local implementation evidence:
+    - unit-generated sidecar-free kit in `tests/test_transport_certify.py` records `profile=ocr-only-backend-v1`, `metadata.ocr_only_backend=tesseract`, and manifest `sidecar_enabled=false`.
+    - validation succeeds only after an attached distinct capture file and matching attachment report are present.
+    - a sidecar-present corpus validated with `--require-ocr-only-backend` fails closed with `ocr_only_evidence_missing`.
+    - manual local kit evidence:
+      - `.tmp_transport_ocr_only_kit_20260527/capture_kit_manifest.json`
+      - `.tmp_transport_ocr_only_kit_20260527/capture_corpus.json`
+      - `.tmp_transport_ocr_only_kit_20260527/transport_capture_validation_report.json`
+      - parameters: classification `lab`, capture medium `print-scan`, OCR-only backend `tesseract`, payload size `64`, seed `20260527`, profile `ocr-only-backend-v1`
+      - result: kit staging succeeded with manifest `sidecar_enabled=false`; validation exited non-zero as expected because no operator captures were attached, while `ocr_only_ready_case_count=1` proved the sidecar-free/backend gate preflight passed.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "ocr_only or validate_capture_corpus"` => `9 passed, 46 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or prepare_capture_corpus or validate_capture_corpus"` => `3 passed, 27 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `121 passed, 1 warning` (expected duplicate-member warning in archive tamper test)
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+    - `git diff --check` clean except existing CRLF conversion warnings in docs.
+  - Remaining product scope:
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, and summarize the measured report with `--require-ocr-only-backend`.
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, validate with `validate-capture-corpus --require-real-camera-perspective-correction`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status`.
+- Notes (2026-05-27, iteration 175):
+  - Added a fail-closed claim gate to the launch-readable transport status artifact:
+    - CLI flag: `soenc transport certification-status --require-certified-claim {generated-page-sidecar,generated-page-synthetic-stress,physical-print-scan,real-camera-perspective-correction,backend-specific-ocr-only}`.
+    - API option: `summarize_transport_certification_status(required_certified_claims=[...])`.
+    - compatibility wiring: `qrcode_helper.AirgapTransportLayer.summarize_transport_certification_status(..., required_certified_claims=[...])`.
+  - The status report now records:
+    - `claim_gate.required`,
+    - `claim_gate.required_certified_claims`,
+    - `claim_gate.passed`,
+    - `claim_gate.missing_required_certified_claims`,
+    - matching summary fields under `summary.required_certified_claims*`.
+  - Fail-closed behavior:
+    - status generation remains backwards-compatible when no required claim is supplied.
+    - when a required claim is not already `certified=true` in the measured report or verified archive, the JSON still writes but `success=false` and the CLI exits `2`.
+    - the gate does not create new evidence or broaden any certification boundary; it only checks existing `certification_claims` rows.
+  - Local implementation evidence:
+    - focused generated-page sidecar evidence passes `--require-certified-claim generated-page-sidecar` implicitly through the status matrix.
+    - the same generated-page-only report fails closed for `--require-certified-claim physical-print-scan`, writing `claim_gate.missing_required_certified_claims=["physical-print-scan"]`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "certification_status"` => `6 passed, 51 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "certification_status or cli_aliases"` => `3 passed, 28 deselected`
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status --require-certified-claim physical-print-scan` from the verified archive.
+    - attach actual `real` camera raw photos and perspective-corrected recovery images, run `attach-capture-corpus --require-raw-captures`, validate with `validate-capture-corpus --require-real-camera-perspective-correction`, certify with `--require-capture-attachment-report --require-real-camera-perspective-correction`, archive, verify, and generate `certification-status --require-certified-claim real-camera-perspective-correction`.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, and generate `certification-status --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-27, iteration 176):
+  - Added camera perspective-correction preparation workflow for real capture kits:
+    - CLI command: `soenc transport correct-capture-perspective`.
+    - schema: `enc2sop-transport-capture-perspective-correction-report/v1`.
+    - compatibility API: `qrcode_helper.AirgapTransportLayer.correct_capture_perspective(...)`.
+    - modes: `copy`, `normalize`, and `four-point`.
+  - Behavior:
+    - reads per-case `raw_image_paths` from a prepared `capture_corpus.json`,
+    - writes corrected recovery images under a correction output directory,
+    - updates each case `image_path` plus `perspective_correction` metadata when requested,
+    - refreshes `capture_kit_manifest.json` summary fields when available,
+    - records raw/corrected/reference image SHA256 and size bindings in the correction report,
+    - `--require-raw-captures` fails closed with `raw_capture_images_missing`,
+    - `--mode four-point` fails closed unless per-case `perspective_correction.source_corners` is present.
+  - Certification boundary:
+    - the correction report is preparation evidence only.
+    - it does not run recovery and does not certify real camera transfer.
+    - real-camera claims still require `attach-capture-corpus --require-raw-captures`, `validate-capture-corpus --require-real-camera-perspective-correction`, `certify --require-capture-attachment-report --require-real-camera-perspective-correction`, archive verification, and `certification-status --require-certified-claim real-camera-perspective-correction`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "correct_capture_perspective"` => `3 passed, 57 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "correct_capture_perspective or cli_aliases"` => `2 passed, 30 deselected`
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, and generate `certification-status --require-certified-claim physical-print-scan` from the verified archive.
+    - attach actual real camera raw photos, run `correct-capture-perspective` or provide externally corrected images, attach with `--require-raw-captures`, validate/certify/archive/status with `--require-real-camera-perspective-correction`, and do not claim camera support until the measured archive passes.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, and generate `certification-status --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-27, iteration 177):
+  - Added executable replay for archived transport evidence:
+    - CLI command: `soenc transport replay-evidence-archive`.
+    - schema: `enc2sop-transport-capture-evidence-archive-replay/v1`.
+    - compatibility API: `qrcode_helper.AirgapTransportLayer.replay_transport_evidence_archive(...)`.
+  - Behavior:
+    - runs `verify-evidence-archive` first with the same optional gate flags,
+    - extracts the archive into an isolated replay directory,
+    - rewrites archived `capture_corpus.json` and `transport_capture_attachment_report.json` path records to the extracted files,
+    - reruns `certify` against the extracted archived capture corpus with generated cases disabled,
+    - compares replayed case ids, success state, failure reason, payload digest, and restored digest evidence when both reports recorded it,
+    - writes `transport_evidence_archive_replay_report.json` with `comparison.mismatch_count` and fail-closed `success=false` when replay diverges.
+  - Certification boundary:
+    - archive replay proves executable recovery replay from archived bytes only.
+    - it does not broaden any `certification_claims` row and does not turn fixture-based evidence into real camera/photo or physical print-scan readiness.
+  - Local implementation evidence:
+    - `.tmp_transport_archive_replay_20260527/archive/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_archive_replay_20260527/archive/transport_capture_evidence_archive_manifest.json`
+    - `.tmp_transport_archive_replay_20260527/archive/transport_archive_verification.json`
+    - `.tmp_transport_archive_replay_20260527/replay/transport_evidence_archive_replay_report.json`
+    - `.tmp_transport_archive_replay_20260527/archive/transport_certification_status.json`
+    - result: fixture-based lab replay succeeded with `mismatch_count=0`; archive SHA256 `53956c032d42fa7bdf05aecd434b7f1f4362980f991ded65055a337c5328ba93`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "replay_evidence_archive or cli_aliases"` => `1 passed, 32 deselected`
+    - `python -m pytest -q tests/test_transport_certify.py -k "archive_transport_evidence_packages_report_corpus_attachment_and_artifacts or replay_evidence_archive"` => `2 passed, 60 deselected`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `131 passed, 1 warning`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+  - Remaining product scope:
+    - attach actual physical print-scan images, run `attach-capture-corpus`, validate with `validate-capture-corpus --require-physical-print-scan`, certify with `--require-capture-attachment-report --require-physical-print-scan`, archive, verify, replay with `replay-evidence-archive`, and generate `certification-status --require-certified-claim physical-print-scan`.
+    - attach actual real camera raw photos, run `correct-capture-perspective` or provide externally corrected images, attach with `--require-raw-captures`, validate/certify/archive/verify/replay/status with `--require-real-camera-perspective-correction`, and do not claim camera support until the measured archive passes.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then archive, verify, replay, and generate `certification-status --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 178):
+  - Added executable replay to the one-command operator capture evidence pipeline:
+    - `soenc transport certify-capture-evidence` now runs attach, validate, certify, archive, verify, replay, and certification-status in order.
+    - Pipeline reports still use schema `enc2sop-transport-capture-certification-pipeline/v1`.
+    - New optional pipeline output controls:
+      - `--replay-output-dir`
+      - `--replay-report-file`
+      - `--replay-summary-file`
+    - Compatibility API `qrcode_helper.AirgapTransportLayer.certify_capture_evidence_pipeline(...)` accepts `replay_output_dir`, `replay_report_file`, and `replay_summary_file`.
+  - Behavior:
+    - replay runs after `verify-evidence-archive` with the same success/profile/attachment/medium/backend gates,
+    - replay writes `transport_evidence_archive_replay_report.json` and a rerun `transport_reliability_replay_report.json`,
+    - pipeline summary records `archive_replayed` and `archive_replay_mismatch_count`,
+    - certification status is skipped if archive replay fails or diverges.
+  - Certification boundary:
+    - this makes the next manual/lab corpus handoff more replayable with one command.
+    - it does not broaden any `certification_claims` row and does not turn fixture-based evidence into real camera/photo or physical print-scan readiness.
+  - Local implementation evidence:
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/transport_capture_certification_pipeline_report.json`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_archive/transport_capture_evidence_archive.zip`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_archive/transport_evidence_archive_verification_report.json`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_replay/transport_evidence_archive_replay_report.json`
+    - `.tmp_transport_capture_pipeline_replay_20260528/capture_pipeline/evidence_archive/transport_certification_status.json`
+    - result: fixture-based lab print-scan pipeline completed `7/7` steps, archive replay reported `mismatch_count=0`, and the status gate certified `physical-print-scan` for the fixture corpus only.
+    - note: this proves replay-gated pipeline orchestration only; it is not real physical scanner/camera certification.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "certify_capture_evidence_pipeline"` => initially `2 passed, 63 deselected`; after CLI layout flag coverage, `python -m pytest -q tests/test_transport_certify.py -k "transport_cli_certify_capture_evidence_command_writes_pipeline_report"` => `1 passed, 64 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or certify_capture_evidence_pipeline"` => `2 passed, 32 deselected`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+    - `python -m pytest -q tests/test_transport_certify.py tests/test_qrcode_helper_sidecar.py tests/test_transport_modules.py` => `135 passed, 1 warning`
+    - `python -m pytest -q tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`
+    - `python -m pytest -q tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`
+  - Remaining product scope:
+    - attach actual physical print-scan images and run the now replay-gated `certify-capture-evidence --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - attach actual real camera raw/corrected images and run the replay-gated pipeline with `--require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then run the replay-gated pipeline with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 179):
+  - Added external capture-folder ingestion for the operator/lab handoff path:
+    - new CLI command: `soenc transport ingest-capture-corpus`
+    - compatibility API: `qrcode_helper.AirgapTransportLayer.ingest_capture_corpus(...)`
+    - report schema: `enc2sop-transport-capture-corpus-ingestion-report/v1`
+  - Behavior:
+    - maps one capture-root subdirectory per `capture_corpus.json` case label into the case `image_path`,
+    - optionally maps a separate raw-photo root into `raw_image_paths` for camera evidence,
+    - records per-case capture/raw image SHA256 and size records, classification, capture medium, metadata, unmatched label entries, and fail-closed missing-capture/raw-photo reasons,
+    - updates `capture_corpus.json` and `capture_kit_manifest.json` summaries unless disabled.
+  - Certification boundary:
+    - this removes JSON hand-editing for externally returned lab/real captures.
+    - it is ingestion and hash-binding evidence only; it does not run recovery and does not certify physical print-scan, real camera perspective correction, or OCR-only backend claims.
+  - Local implementation evidence:
+    - focused tests generated temporary ingestion reports under `.tmp_test_runs/*/ingest/transport_capture_corpus_ingestion_report.json`.
+    - fixture images were intentionally modified copies of generated pages; this proves ingestion plumbing only, not real scanner/camera readiness.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_certify.py -k "ingest_capture_corpus"` => `3 passed, 65 deselected`
+    - `python -m pytest -q tests/test_transport_modules.py -k "cli_aliases or ingest_capture_corpus"` => `2 passed, 33 deselected`
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py` => passed
+  - Remaining product scope:
+    - ingest or attach actual physical print-scan images and run the replay-gated `certify-capture-evidence --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - ingest or attach actual real camera raw/corrected images and run the replay-gated pipeline with `--require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real OCR backend against a sidecar-free OCR-only capture corpus, then run the replay-gated pipeline with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 180):
+  - Added optional external capture-folder ingestion directly inside the replay-gated capture evidence pipeline:
+    - `soenc transport certify-capture-evidence --capture-root <returned-captures>` runs `ingest-capture-corpus` before attachment.
+    - optional camera raw-photo ingestion uses `--raw-capture-root <returned-raw-photos>`.
+    - ingestion metadata can be supplied with `--capture-medium` and repeated `--capture-metadata KEY=VALUE`.
+    - `--allow-unmatched-labels` controls extra capture-root entries; default remains fail-closed.
+    - optional output control: `--ingestion-report-file`.
+  - Behavior:
+    - pipeline reports still use schema `enc2sop-transport-capture-certification-pipeline/v1`;
+    - when ingestion is used, the step list starts with `ingest-capture-corpus`;
+    - summary records `capture_ingested`;
+    - artifacts record `capture_ingestion_report_file`;
+    - ingestion failures stop before attachment/certification/archive/status, with skipped downstream steps pointing to the first failed step.
+  - Certification boundary:
+    - this removes the last required separate command for externally returned lab/real folder trees.
+    - it is still orchestration and hash-binding only; real physical print-scan, real camera, and OCR-only claims require measured recovery, verified archive replay, and `certification-status --require-certified-claim ...`.
+  - Verification:
+    - focused pipeline tests cover success and fail-closed missing-capture ingestion paths.
+    - CLI and `qrcode_helper` facade tests cover new parser flags and delegation.
+  - Remaining product scope:
+    - run the one-command pipeline against actual physical print-scan captures with `--capture-root` and `--require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run it against a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 181):
+  - Added a non-default operator capture provenance gate for lab/real certification evidence:
+    - CLI flags: `--require-capture-provenance` on `soenc transport certify`, `validate-capture-corpus`, and `certify-capture-evidence`.
+    - compatibility API parameters on `AirgapTransportLayer.certify_reliability(...)`, `validate_capture_corpus(...)`, and `certify_capture_evidence_pipeline(...)`.
+  - Behavior:
+    - per-case reports now include `capture_corpus.capture_provenance_evidence`.
+    - the gate fails closed with `capture_provenance_missing` unless the case declares a capture medium and records session, operator, capture timestamp, and capture-device metadata such as `capture_session_id`, `operator`, `captured_at_utc`, and scanner/camera/printer identity.
+    - validation reports, certification thresholds, summaries, and `certification_claims` expose the provenance gate state.
+  - Certification boundary:
+    - provenance binds measured captures to operator/session/device metadata only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer unless the measured recovery report, archive replay, and certification-status claim gate also pass.
+  - Verification:
+    - focused unit/CLI tests cover passing print-scan and real-camera provenance, fail-closed missing provenance, CLI flag wiring, and pipeline propagation.
+  - Remaining product scope:
+    - run the one-command pipeline against actual physical print-scan captures with `--require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 182):
+  - Added a versioned operator capture metadata manifest for lab/real capture ingestion:
+    - schema: `enc2sop-transport-capture-metadata-manifest/v1`.
+    - CLI flag: `--capture-metadata-manifest-file` on `soenc transport ingest-capture-corpus` and `soenc transport certify-capture-evidence`.
+    - compatibility API parameters on `AirgapTransportLayer.ingest_capture_corpus(...)` and `certify_capture_evidence_pipeline(...)`.
+  - Behavior:
+    - the manifest can declare `capture_metadata_defaults` and per-case `cases[].capture_metadata` keyed by prepared corpus `label`.
+    - ingestion merges existing case metadata, manifest defaults, manifest per-case metadata, then CLI `--capture-metadata` overrides.
+    - ingestion reports and kit manifests record the metadata-manifest path/SHA256, per-case match state, matched/unmatched label counts, and fail closed with `unexpected_capture_metadata_manifest_labels` unless unmatched labels are explicitly allowed.
+  - Certification boundary:
+    - this removes manual JSON edits for real/lab provenance handoff and makes `--require-capture-provenance` easier to satisfy from an operator return package.
+    - it is still ingestion/provenance binding only; it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive replay, and certification-status claim gates.
+  - Verification:
+    - focused tests cover manifest merge order, unmatched manifest labels, CLI parser/command wiring, and one-command pipeline propagation.
+  - Remaining product scope:
+    - run the one-command pipeline against actual physical print-scan captures with `--capture-metadata-manifest-file --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `--capture-root --raw-capture-root --require-raw-captures --capture-metadata-manifest-file --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 183):
+  - Added a generated operator metadata-manifest template to prepared capture kits:
+    - `soenc transport prepare-capture-corpus` now writes `instructions/operator_capture_metadata_manifest_template.json` using schema `enc2sop-transport-capture-metadata-manifest/v1`.
+    - `capture_kit_manifest.json` records `capture_metadata_manifest_template_file`, `capture_metadata_manifest_template_sha256`, and summary `capture_metadata_manifest_template_ready=true`.
+    - the template includes one row per prepared case label plus fill-in provenance fields for session, operator, timestamp, and scanner/camera/printer metadata based on the declared medium.
+  - Certification boundary:
+    - the template is handoff/provenance input only; unchanged placeholders still fail the existing `--require-capture-provenance` gate.
+    - no physical print-scan, real-camera, or OCR-only claim is certified until real captures are ingested, recovered, archived, replayed, and passed through `certification-status --require-certified-claim`.
+  - Verification:
+    - focused prepare-kit/metadata-manifest tests cover template generation, schema, case-label parity, kit-manifest SHA256 binding, and CLI-visible paths.
+  - Remaining product scope:
+    - fill the generated template during an actual lab/scanner or camera run and execute `certify-capture-evidence --capture-metadata-manifest-file ...` with the intended medium claim gate.
+    - archive/verify/replay the resulting real measured evidence before updating any optional transport launch claim.
+- Notes (2026-05-28, iteration 184):
+  - Added safe operator/lab return ZIP ingestion for the one-command capture evidence pipeline:
+    - CLI flag: `soenc transport certify-capture-evidence --capture-return-package-file`.
+    - compatibility API parameter: `AirgapTransportLayer.certify_capture_evidence_pipeline(..., capture_return_package_file=...)`.
+    - extraction report schema: `enc2sop-transport-capture-return-package-extraction/v1`.
+  - Behavior:
+    - packages may contain `captures/<case-label>/...`, optional `raw_captures/<case-label>/...`, and an optional metadata manifest such as `operator_capture_metadata_manifest.json`.
+    - extraction fails closed on unsafe ZIP member paths, traversal, absolute paths, duplicate members, or symlink entries.
+    - extraction records package SHA256, extracted file SHA256/size values, discovered capture roots, raw roots, and metadata-manifest path, then feeds the existing ingestion/attachment/validation/certification/archive/replay/status chain.
+  - Certification boundary:
+    - ZIP extraction is handoff and hash-binding evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without the measured recovery report, archive replay, and `certification-status --require-certified-claim ...` gate for that exact claim.
+  - Verification:
+    - focused API and CLI tests cover successful return-package extraction through the full pipeline and fail-closed unsafe ZIP paths.
+    - parser/delegation tests cover the new CLI options and facade parameters.
+  - Remaining product scope:
+    - run the return-package path against actual physical print-scan captures with `--capture-return-package-file --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run it against actual real-camera raw/corrected captures with `raw_captures/`, `--require-raw-captures`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 185):
+  - Added an optional return-package identity manifest contract for lab/operator ZIP handoff:
+    - schema: `enc2sop-transport-capture-return-manifest/v1`.
+    - `soenc transport prepare-capture-corpus` now writes `instructions/operator_return_manifest_template.json` alongside the metadata template.
+    - `capture_kit_manifest.json` records `capture_return_manifest_template_file`, `capture_return_manifest_template_sha256`, and summary `capture_return_manifest_template_ready=true`.
+  - Behavior:
+    - operator/lab ZIP packages may include `operator_return_manifest.json`, `capture_return_manifest.json`, or `metadata/operator_return_manifest.json`.
+    - return-package extraction validates the manifest schema, required prepared `capture_corpus_sha256`, optional `capture_kit_manifest_sha256`, and unique known corpus case labels when present.
+    - `certify-capture-evidence` records `capture_return_manifest_file` and summary `capture_return_manifest_validated`; extraction fails closed before ingestion on corpus/kit digest mismatch.
+  - Certification boundary:
+    - return-manifest validation is package identity evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive replay, and `certification-status --require-certified-claim ...`.
+  - Local fixture evidence:
+    - `.tmp_transport_return_manifest_20260528_b\operator_return.zip` includes fixture captures, `operator_capture_metadata_manifest.json`, and `operator_return_manifest.json`.
+    - `.tmp_transport_return_manifest_20260528_b\pipeline\return_package\transport_capture_return_package_extraction_report.json` records `capture_return_manifest_validated=true`.
+    - `.tmp_transport_return_manifest_20260528_b\pipeline\transport_capture_certification_pipeline_report.json` completed `9/9` fixture steps, archive replay mismatch count `0`, and status claim gate passed for fixture `physical-print-scan`.
+    - this is fixture plumbing/identity evidence only, not real scanner/camera certification.
+  - Verification:
+    - focused tests cover return-template generation, successful return-package manifest validation, fail-closed corpus digest mismatch, and CLI-visible template paths.
+  - Remaining product scope:
+    - run the return-package path against actual physical print-scan captures with a filled `operator_return_manifest.json`, `--require-capture-provenance`, `--require-physical-print-scan`, and `--require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with `operator_return_manifest.json`, `raw_captures/`, `--require-raw-captures`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 186):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`).
+  - Goal: tighten lab/operator ZIP handoff evidence so a return package can prove exact capture-file inventory before ingestion, without broadening any transport certification claim.
+  - Added required per-file inventory support to `enc2sop-transport-capture-return-manifest/v1`:
+    - `soenc transport prepare-capture-corpus` now writes `capture_file_inventory.required=true` plus per-case `capture_files[]` placeholders in `instructions/operator_return_manifest_template.json`.
+    - raw-photo `raw_capture_files[]` placeholders are included only for cases that staged raw capture paths.
+    - return-package extraction validates listed capture/raw image package paths, expected case directories, supported image suffixes, SHA256, and byte size.
+    - when inventory is declared or required, extraction fails closed if the ZIP contains unlisted capture/raw image files.
+    - when inventory is required, extraction also fails closed if any listed image omits SHA256 or byte size.
+    - extraction reports now expose `capture_return_manifest_file_inventory_*` summary fields and a normalized `capture_return_manifest.file_inventory.files[]` record set.
+  - Certification boundary:
+    - file-inventory validation is handoff integrity evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive replay, and `certification-status --require-certified-claim ...`.
+  - Verification:
+    - focused return-package/prepare-kit tests cover successful SHA/size-bound inventory validation, fail-closed unlisted capture images, generated template inventory placeholders, and existing unsafe ZIP/corpus mismatch paths.
+    - syntax validation passed with `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py enc2sop\transport\cli.py qrcode_helper.py`.
+  - Remaining product scope:
+    - run the return-package path against actual physical print-scan captures with a filled `operator_return_manifest.json` containing exact file inventory, `--require-capture-provenance`, `--require-physical-print-scan`, and `--require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with exact `capture_files[]` and `raw_capture_files[]`, `--require-raw-captures`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-28, iteration 187):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` still reports an invalid keyring token for github.com account `saksim`).
+  - Goal: remove manual return-package inventory editing from the real/lab capture handoff while preserving strict extraction and certification boundaries.
+  - Added `soenc transport package-capture-return`:
+    - schema: `enc2sop-transport-capture-return-package/v1`.
+    - assembles `operator_return.zip` from a populated capture folder tree using the prepared corpus case labels.
+    - writes `operator_return_manifest.json` with schema `enc2sop-transport-capture-return-manifest/v1`.
+    - computes exact per-file SHA256 and byte size for `capture_files[]` and optional `raw_capture_files[]`.
+    - includes `operator_capture_metadata_manifest.json`, either from `--capture-metadata-manifest-file` or generated from repeated `--capture-metadata` values.
+    - supports optional raw-photo roots, kit-manifest SHA256 binding, return session/operator metadata, fail-closed missing-capture checks, and unmatched-label detection.
+  - Certification boundary:
+    - package assembly is handoff integrity evidence only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without the existing `certify-capture-evidence` measurement, archive verification/replay, and `certification-status --require-certified-claim ...` gates.
+  - Local fixture evidence:
+    - `.tmp_transport_package_return_20260528\return_package\operator_return.zip`
+    - `.tmp_transport_package_return_20260528\return_package\operator_return_manifest.json`
+    - `.tmp_transport_package_return_20260528\return_package\transport_capture_return_package_report.json`
+    - `.tmp_transport_package_return_20260528\pipeline\transport_capture_certification_pipeline_report.json`
+    - fixture pipeline completed with return-package extraction, inventory validation, archive replay, and status claim gate for fixture `physical-print-scan`; this proves package/pipeline plumbing only, not real scanner/camera readiness.
+  - Verification:
+    - focused package-return tests cover API success through the pipeline, fail-closed missing captures, CLI ZIP creation, CLI parser visibility, facade delegation, and syntax compilation.
+  - Remaining product scope:
+    - run `package-capture-return` against actual physical print-scan captures and feed the ZIP into `certify-capture-evidence --require-capture-provenance --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with `--raw-capture-root --require-raw-captures --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 188):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: catch incomplete lab/operator provenance at return-package assembly time, before ZIP handoff and before the longer certification pipeline starts.
+  - Added `--require-capture-provenance` to `soenc transport package-capture-return`:
+    - the API/CLI now evaluates the packaged `operator_capture_metadata_manifest.json` per prepared case.
+    - when required, package assembly fails before writing `operator_return.zip` unless each lab/real case has capture session, operator, timestamp, and scanner/camera/printer identity metadata.
+    - the `enc2sop-transport-capture-return-package/v1` report records `capture_provenance_evidence[]`, `summary.capture_provenance_required`, `summary.capture_provenance_passed`, and `summary.capture_provenance_evidence_count`.
+  - Certification boundary:
+    - this is earlier handoff/provenance validation only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without the existing measured recovery report, verified/replayed archive, and `certification-status --require-certified-claim ...` gate.
+  - Local fixture evidence:
+    - `.tmp_transport_package_provenance_20260529\return_package\transport_capture_return_package_report.json`
+    - `.tmp_transport_package_provenance_20260529\return_package\operator_return.zip`
+    - `.tmp_transport_package_provenance_20260529\pipeline\transport_capture_certification_pipeline_report.json`
+    - fixture package assembly passed with `capture_provenance_passed=true`; fixture pipeline completed with archive replay `mismatch_count=0`.
+    - this proves package-time provenance gating and replay plumbing only, not real scanner/camera readiness.
+  - Verification:
+    - focused package-return tests cover passing provenance, fail-closed missing provenance, CLI parser visibility, facade delegation, and CLI package creation with `--require-capture-provenance`.
+    - syntax validation passed for `enc2sop/transport/certify.py`, `enc2sop/transport/cli.py`, and `qrcode_helper.py`.
+    - full transport suite passed: `158 passed, 1 expected duplicate-ZIP-member warning`.
+    - promotion suite passed: `95 passed, 1 skipped`.
+    - mainline suite passed: `85 passed, 6 skipped`.
+  - Remaining product scope:
+    - run `package-capture-return --require-capture-provenance` against actual physical print-scan captures and feed the ZIP into `certify-capture-evidence --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with `--raw-capture-root --require-raw-captures --require-capture-provenance --require-real-camera-perspective-correction --require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 189):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make launch/lab ZIP handoff evidence fail closed before ingestion unless the package proves validated return identity, exact file inventory, and package-assembly provenance.
+  - Added strict non-default return-package extraction gates to `soenc transport certify-capture-evidence`:
+    - `--require-capture-return-manifest` requires a validated `enc2sop-transport-capture-return-manifest/v1` in the ZIP.
+    - `--require-capture-return-file-inventory` requires the return manifest to declare and validate exact capture/raw image SHA256 and byte-size inventory.
+    - `--require-capture-return-package-report` requires `--capture-return-package-report-file` and validates it against the ZIP, prepared corpus, kit manifest, metadata manifest, and return manifest.
+    - pipeline reports now expose the required/validated states for those gates in `parameters` and `summary`.
+  - Certification boundary:
+    - this is ZIP handoff integrity/provenance validation only.
+    - it does not certify physical print-scan, real camera perspective correction, or OCR-only transfer without measured recovery, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Local fixture evidence:
+    - focused tests require all three strict gates on a fixture package and verify the pipeline succeeds only when manifest, inventory, and package report all validate.
+    - negative tests prove ingestion is skipped when the package report is required but missing, or when the return manifest/inventory gates are required but missing.
+  - Verification:
+    - focused parser/API tests cover strict gate flags, success propagation, fail-closed missing report, and fail-closed missing return manifest/inventory.
+  - Remaining product scope:
+    - run `package-capture-return --require-capture-provenance` against actual physical print-scan captures and feed the ZIP into `certify-capture-evidence --capture-return-package-report-file ... --require-capture-return-manifest --require-capture-return-file-inventory --require-capture-return-package-report --require-physical-print-scan --require-certified-claim physical-print-scan`.
+    - run actual real-camera raw/corrected captures with strict return-package gates, `--require-raw-captures`, `--require-capture-provenance`, `--require-real-camera-perspective-correction`, and `--require-certified-claim real-camera-perspective-correction`.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 190):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: implement and harden the `ocr-safe-human-correctable-v1` path so OCR/text recovery can move forward without waiting for real scans.
+  - Added restricted payload alphabet/profile support across generation, manifests, rendering, sidecar decode, parity, recovery, analysis, and CLI wiring:
+    - profile: `ocr-safe-human-correctable-v1`.
+    - canonical alphabet: `12356789OAEFHJKMNPRUVWXY`.
+    - manifests/reports record `payload_alphabet_profile` and `alphabet`.
+    - `export`, `estimate`, `certify`, and `prepare-capture-corpus` expose `--payload-alphabet-profile`.
+  - Added OCR-safe decode repair:
+    - hard-safe mappings include `0/o/O/Q/D -> O`, `I/i/l/L/|/! -> 1`, `S/s/$ -> 5`, `B/b -> 8`, `G -> 6`, and `4 -> A`.
+    - ambiguous mappings `g -> {6,9}`, `q -> {O,9}`, and `Z/z -> {2,7}` become candidates.
+    - parser accepts only the unique candidate whose reconstructed line passes line CRC.
+    - unexpected glyphs, missing line CRC, unresolved candidates, and multi-pass candidates emit correction records instead of being silently dropped.
+  - Added replayable correction artifact support:
+    - `analyze --emit-corrections-template` and `recover-images --emit-corrections-template` can write `corrections_template.csv`.
+    - CSV columns: `page,line,raw_text,normalized_text,candidates,status,expected_crc,actual_crc,corrected_text`.
+  - Hardened OCR-safe structured-line parsing so separator-like payload confusions such as `|` and `!` are handled through CRC candidate resolution instead of being rejected by separator regexes.
+  - Synthetic/local evidence:
+    - `.tmp_transport_ocr_safe_20260529/transport_reliability_report.json` passed generated-page sidecar certification with `payload_alphabet_profile=ocr-safe-human-correctable-v1`, profile `reliable-airgap-v1`, `1/1` cases passed, and `profile_certified=true`.
+    - `.tmp_transport_ocr_safe_confusion_20260529/synthetic_confusion_summary.json` passed synthetic OCR text repair with hard/ambiguous substitutions, whitespace/dash insertion, separator-like `|`/`!` substitutions, line-break drift, `correction_required_count=0`, and restored payload SHA256 parity.
+  - Verification:
+    - focused OCR-safe tests cover restricted alphabet roundtrip, high-risk confusion families, line-CRC resolution, separator-like `1` confusions, correction-template output, CLI visibility, facade delegation, and syntax compilation.
+    - split transport suite passed after the line-break drift parser hardening: `tests/test_transport_certify.py` => `88 passed, 1 expected duplicate-ZIP-member warning`; `tests/test_qrcode_helper_sidecar.py` => `36 passed`; `tests/test_transport_modules.py` => `41 passed, 13 subtests passed`.
+    - promotion suite passed: `95 passed, 1 skipped`.
+    - mainline suite passed: `85 passed, 6 skipped`.
+  - Certification boundary:
+    - this makes the OCR-safe profile usable/testable and gives synthetic repair evidence.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - harden operator UX around invalid/mismatched correction rows and extend persisted synthetic confusion/replay evidence where useful.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 191):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` still reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: close the operator replay gap for `ocr-safe-human-correctable-v1` by turning filled correction templates into replayable SHA-verified evidence.
+  - Added `soenc transport replay-corrections` and compatibility API `AirgapTransportLayer.replay_ocr_corrections(...)`:
+    - consumes a filled `corrections_template.csv` via `--apply-corrections-file`.
+    - requires `payload_alphabet_profile=ocr-safe-human-correctable-v1`.
+    - applies corrected rows through existing line-CRC candidate resolution.
+    - writes optional recovered output only after compressed/raw SHA256 and raw-size checks pass.
+    - writes report schema `enc2sop-transport-ocr-correction-replay/v1`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_correction_replay_20260529/transport_ocr_correction_replay_report.json`.
+    - result: filled correction replay applied `1` correction row, restored the payload, and set `final_payload_sha256_verified=true`.
+  - Verification:
+    - focused tests cover CLI visibility, direct API replay report/output, CLI report/output, compatibility facade delegation, and the existing correction-template/analyze path.
+  - Certification boundary:
+    - this makes filled correction templates replayable and auditable for synthetic/operator text correction.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - harden operator UX for invalid/mismatched correction rows and persist broader synthetic replay/confusion evidence where useful.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-29, iteration 192):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so stale generated correction templates cannot be silently applied to changed OCR text.
+  - Added stricter filled-row validation for generated `corrections_template.csv` rows:
+    - `_load_operator_corrections` now preserves optional `raw_text`, `normalized_text`, `status`, and `actual_crc` fields from the template.
+    - replay application fails closed with explicit invalid-row reasons when those fields no longer match the current unresolved OCR line.
+    - minimal hand-authored CSVs remain compatible because these fields are enforced only when present.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_stale_correction_replay_20260529/transport_ocr_stale_correction_replay_report.json`.
+    - result: a filled generated-template row with drifted `normalized_text` was rejected with `correction_normalized_text_mismatch`; recovery success remained false.
+  - Verification:
+    - focused OCR-safe correction tests passed, including stale `raw_text`, `normalized_text`, `status`, and `actual_crc` mismatch cases.
+  - Certification boundary:
+    - this improves correction-template replay integrity and operator error detection only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, iteration 193):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so extra filled operator CSV rows cannot be counted silently or leave operators without row-level diagnostics.
+  - Added unused filled-row provenance to correction replay:
+    - `_load_operator_corrections` now records SHA256 for every filled `corrected_text` value and preserves filled-row row/page/line/expected-CRC identity.
+    - `_correction_replay_summary` reports `unused_count` and `unused_sample` for filled CSV rows that were neither applied nor invalidated.
+    - `soenc transport replay-corrections` reports top-level `unused_filled_correction_rows_sample` and continues to keep replay `success=false` when unused filled rows remain, even if final payload SHA256 verification succeeds.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_unused_correction_replay_20260530_iter193/transport_ocr_unused_correction_replay_report.json`.
+    - result: payload bytes were restored and `final_payload_sha256_verified=true`, but replay stayed `success=false` because one filled correction row was unused; report included `unused_count=1` and row number/page/line/expected-CRC/corrected-text-SHA256 provenance.
+  - Verification:
+    - focused OCR-safe correction replay tests passed, including unused-row sample assertions.
+    - syntax validation passed for `enc2sop/transport/parser.py`, `enc2sop/transport/recover.py`, `enc2sop/transport/cli.py`, and `qrcode_helper.py`.
+  - Certification boundary:
+    - this improves operator correction replay auditability and fail-closed behavior only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, output materialization hardening):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so `-o/--output-file` cannot materialize recovered bytes from an unaccepted filled correction CSV, even when final payload SHA256 verification happens to pass.
+  - Added fail-closed replay output materialization:
+    - `soenc transport replay-corrections` now writes the recovered artifact only when overall replay `success=true`.
+    - If final payload SHA256 verifies but correction replay has invalid, unused, or still-required rows, the report keeps `success=false`, records `requested_output_file`, sets `output_file=null`, and records `output_suppressed_reason=correction_replay_not_accepted`.
+    - If final payload SHA256 does not verify and an output path was requested, the report records `output_suppressed_reason=final_payload_sha256_not_verified`.
+  - Verification scope:
+    - added focused regression coverage proving unused filled rows suppress output despite `final_payload_sha256_verified=true`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_output_suppression_20260530/transport_ocr_output_suppression_report.json`.
+    - result: final payload SHA256 verified, replay stayed `success=false` because one filled CSV correction row was unused, `output_file=null`, `output_suppressed_reason=correction_replay_not_accepted`, and the requested output artifact was not written.
+  - Certification boundary:
+    - this improves correction-replay integrity and operator handoff safety only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, malformed correction file hardening):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay so structurally malformed operator CSVs leave replayable failure evidence and cannot materialize recovered bytes.
+  - Added schema-valid malformed correction-file failure reports:
+    - `soenc transport replay-corrections` catches `CorrectionFileError` before parsing recovery lines.
+    - failed reports still use schema `enc2sop-transport-ocr-correction-replay/v1`.
+    - reports include correction-file SHA256/size, `correction_file_valid=false`, structured `correction_file_error`, `correction_replay.invalid_sample`, `final_payload_sha256_verified=false`, and `output_suppressed_reason=correction_file_invalid` when `-o/--output-file` was requested.
+    - successful replay reports now explicitly include `correction_file_valid=true` and `correction_file_error=null`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_malformed_correction_replay_20260530/transport_ocr_malformed_correction_replay_report.json`.
+    - result: replay rejected a malformed correction CSV missing `corrected_text`, wrote the failed replay report, and did not create the requested output artifact.
+  - Verification:
+    - focused OCR-safe correction replay tests passed, including malformed CSV report/output suppression assertions.
+    - syntax validation passed for `enc2sop/transport/recover.py`, `enc2sop/transport/parser.py`, `enc2sop/transport/cli.py`, and `qrcode_helper.py` with redirected pycache.
+    - split transport module suite passed: `tests/test_transport_modules.py` => `49 passed, 17 subtests passed`.
+    - broader transport verification passed in split form: `tests/test_transport_certify.py` => `88 passed, 1 expected duplicate-ZIP-member warning`; `tests/test_qrcode_helper_sidecar.py` => `36 passed`.
+    - promotion suite passed: `95 passed, 1 skipped`.
+    - mainline suite passed: `85 passed, 6 skipped`.
+  - Certification boundary:
+    - this improves correction-file handoff replayability and fail-closed output behavior only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - persist broader synthetic confusion/replay evidence where useful and keep hardening operator UX around correction reports.
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+- Notes (2026-05-30, synthetic OCR confusion certification report):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: turn the required `ocr-safe-human-correctable-v1` synthetic OCR confusion coverage into a first-class replayable report instead of relying only on unit-test behavior or ad hoc local JSON.
+  - Added `soenc transport certify-ocr-confusion`:
+    - writes schema `enc2sop-transport-ocr-safe-confusion-report/v1`.
+    - generates a deterministic OCR-safe payload with alphabet `12356789OAEFHJKMNPRUVWXY`.
+    - exports sidecar-free text pages by default, injects synthetic OCR confusions, runs `analyze` plus recovery for each case, and verifies final payload SHA256 for every passing case.
+    - covers `6/G/g`, `9/g/q`, `2/7/Z/z`, `O/0/o/Q/D`, `1/I/i/l/L`, `5/S/s`, `8/B/b`, whitespace insertion, dash/noise insertion, and line-break drift.
+    - records per-case mutation provenance, OCR input path, analyze report path, recovered output path, warning reasons, and final SHA verification state.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_cert_20260530/synthetic_ocr_confusion_report.json`.
+    - result: `24/24` synthetic confusion cases passed, `missing_confusion_families=[]`, final payload SHA256 verified for every case, payload SHA256 `587f36636a80662fac4ea439d8369fe1a1fd59a7e5e70a99a98162d6d5eed547`.
+  - Verification:
+    - focused command/report tests passed for parser surface, direct API report generation, CLI report generation, and qrcode_helper delegation.
+    - manual CLI evidence generation passed with `python .\soenc.py transport certify-ocr-confusion -o .tmp_transport_ocr_confusion_cert_20260530 --payload-size 256 --seed 20260530`.
+  - Certification boundary:
+    - this is synthetic text-confusion certification for the OCR-safe profile only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep any additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, synthetic OCR confusion report verification):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make the first-class `ocr-safe-human-correctable-v1` synthetic confusion report independently replay-verifiable before launch/audit handoff.
+  - Added `soenc transport verify-ocr-confusion`:
+    - writes schema `enc2sop-transport-ocr-safe-confusion-report-verification/v1`.
+    - verifies the saved synthetic confusion report schema, suite, payload alphabet profile, alphabet, and required confusion-family coverage.
+    - verifies payload file SHA256/size, manifest SHA256 and selected manifest/report field parity, per-case OCR text/analyze/recovered artifact SHA256/size values, analyze report success/count parity, and recovered payload SHA256 parity for every successful case.
+    - fails closed on tampered recovered output, missing artifacts, schema/profile drift, missing required confusion families, or failed source report state unless `--allow-failed-report` is explicitly used.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_verify_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_confusion_verify_20260530/synthetic_ocr_confusion_verification_report.json`.
+    - result: verification succeeded with `payload_verified=true`, `manifest_verified=true`, `verified_case_output_count=24`, `failure_count=0`, and all required confusion families covered.
+  - Verification:
+    - focused verifier tests passed for parser surface, direct report verification, CLI verification, qrcode_helper delegation, and tamper failure detection.
+    - manual CLI evidence generation passed with `python .\soenc.py transport certify-ocr-confusion -o .tmp_transport_ocr_confusion_verify_20260530 --report-file .tmp_transport_ocr_confusion_verify_20260530\synthetic_ocr_confusion_report.json --payload-size 256 --seed 20260530`.
+    - manual CLI verification passed with `python .\soenc.py transport verify-ocr-confusion --report-file .tmp_transport_ocr_confusion_verify_20260530\synthetic_ocr_confusion_report.json --output-file .tmp_transport_ocr_confusion_verify_20260530\synthetic_ocr_confusion_verification_report.json`.
+  - Certification boundary:
+    - this proves replayable integrity for synthetic OCR-safe text-confusion evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, synthetic OCR confusion mutation provenance replay):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` synthetic confusion evidence so verification proves each reported confusion was mechanically injected from the generated source-page text, not only that the final recovered payload matches.
+  - Updated `soenc transport certify-ocr-confusion`:
+    - records source generated page-text inventory in the report (`source_page_text_count`, `source_page_texts[]`) with path, SHA256, byte size, and line count.
+    - writes synthetic OCR input bytes with deterministic LF newlines so saved OCR input digests are stable across Windows/Linux verification.
+  - Updated `soenc transport verify-ocr-confusion`:
+    - verifies source page-text SHA256/size/line-count records before case replay.
+    - mechanically replays the declared synthetic mutation for every case from the verified source lines.
+    - fails closed on mutation metadata drift, OCR input drift, missing source text, or source text digest drift.
+    - reports `source_page_texts_verified` and `mutation_replay_verified_count`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_mutation_verify_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_confusion_mutation_verify_20260530/synthetic_ocr_confusion_verification_report.json`.
+    - result: verification succeeded with `payload_verified=true`, `manifest_verified=true`, `source_page_texts_verified=true`, `mutation_replay_verified_count=24`, `verified_case_output_count=24`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_confusion"` => `7 passed, 51 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py tests/test_transport_certify.py -k "ocr_safe_confusion or replay_corrections or ocr_safe"` => `20 passed, 126 deselected, 17 subtests passed`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI evidence generation and verification passed with the `.tmp_transport_ocr_confusion_mutation_verify_20260530` artifacts above.
+  - Certification boundary:
+    - this proves replayable mutation provenance for synthetic OCR-safe text-confusion evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, synthetic OCR confusion exact-suite replay):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` synthetic confusion evidence so family-level coverage cannot hide an omitted or drifted required substitution case.
+  - Updated `soenc transport certify-ocr-confusion`:
+    - records canonical `required_confusion_cases[]` entries with case name, family, mutation kind, and target/replacement or insertion metadata.
+  - Updated `soenc transport verify-ocr-confusion`:
+    - verifies the exact required case-suite contract before accepting a report.
+    - fails closed when a required case is missing, duplicated, unknown, or assigned to the wrong family.
+    - still verifies payload/manifest/source text digests, mechanical mutation replay, per-case artifacts, and recovered payload SHA256 parity.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_confusion_case_suite_verify_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_confusion_case_suite_verify_20260530/synthetic_ocr_confusion_verification_report.json`.
+    - result: verification succeeded with `payload_verified=true`, `manifest_verified=true`, `source_page_texts_verified=true`, `mutation_replay_verified_count=24`, `verified_case_output_count=24`, `failure_count=0`, and `24` required cases.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_confusion"` => `8 passed, 51 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "requires_exact_case_suite or verification_checks_artifacts"` => `2 passed, 57 deselected`.
+    - manual CLI evidence generation and verification passed with the `.tmp_transport_ocr_confusion_case_suite_verify_20260530` artifacts above.
+  - Certification boundary:
+    - this proves exact synthetic case-suite replayability for OCR-safe text-confusion evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, correction replay report verification):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: harden `ocr-safe-human-correctable-v1` correction replay evidence so a saved `enc2sop-transport-ocr-correction-replay/v1` report can be independently rechecked before launch/audit handoff.
+  - Added `soenc transport verify-correction-replay`:
+    - writes schema `enc2sop-transport-ocr-correction-replay-verification/v1`.
+    - verifies the saved replay report schema/profile/alphabet, referenced manifest/OCR/correction files, correction CSV SHA256/size, re-executed correction replay summary, final payload SHA256 state, and recovered-output or suppressed-output state.
+    - supports `--allow-failed-report` for replayable failure reports while failing closed by default when the source replay report is not successful.
+  - Added compatibility API `AirgapTransportLayer.verify_ocr_correction_replay_report(...)` and focused CLI/parser/delegation/report/tamper tests.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_correction_verify_20260530/transport_ocr_correction_replay_report.json`.
+    - `.tmp_transport_ocr_correction_verify_20260530/transport_ocr_correction_replay_verification_report.json`.
+    - result: verification succeeded with `manifest_verified=true`, `ocr_input_verified=true`, `corrections_file_verified=true`, `correction_replay_reexecuted=true`, `final_payload_sha256_verified=true`, `output_file_verified=true`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_replay_corrections or verify_correction_replay or replay_corrections"` => `12 passed, 51 deselected, 4 subtests passed`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe"` => `23 passed, 40 deselected, 17 subtests passed`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI replay and verification passed with the `.tmp_transport_ocr_correction_verify_20260530` artifacts above.
+    - `python -m pytest -q tests/test_transport_certify.py -k "ocr_safe or certification_status"` printed `6 passed, 82 deselected` after `494.84s`, but the shell wrapper timed out after output completion, so it is recorded as non-clean wrapper evidence.
+  - Certification boundary:
+    - this proves correction-replay report integrity for OCR-safe synthetic/operator text correction only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-30, OCR-safe evidence archive verification):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: package `ocr-safe-human-correctable-v1` synthetic confusion and correction replay evidence into a replayable handoff archive that can be independently verified before launch/audit review.
+  - Added `soenc transport archive-ocr-safe-evidence`:
+    - writes schema `enc2sop-transport-ocr-safe-evidence-archive/v1`.
+    - includes a required embedded `ocr_safe_evidence_archive_manifest.json` and optional external manifest.
+    - supports `--confusion-report-file`, `--correction-replay-report-file`, `--require-confusion-report`, and `--require-correction-replay-report`.
+    - rewrites included report paths to archive-relative paths and packages referenced payload, manifest, OCR text, correction CSV, output, source-page text, and case artifact files with SHA256/size inventory.
+  - Added `soenc transport verify-ocr-safe-evidence-archive`:
+    - writes schema `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - verifies ZIP member safety, duplicate/extra/missing members, embedded/external manifest parity, archive SHA256, per-file SHA256/size inventory, and required report presence.
+    - extracts archived bytes to a temporary replay root and reruns `verify-ocr-confusion` and/or `verify-correction-replay` against the embedded, archive-relative reports.
+  - Added compatibility APIs `AirgapTransportLayer.archive_ocr_safe_evidence(...)` and `AirgapTransportLayer.verify_ocr_safe_evidence_archive(...)`, plus focused CLI/parser/delegation/archive/tamper tests.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_archive_20260530/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_archive_20260530/ocr_safe_evidence_archive_verification.json`.
+    - result: `soenc transport certify-ocr-confusion` passed `24/24` deterministic synthetic confusion cases; `archive-ocr-safe-evidence --require-confusion-report` produced a `90`-file archive with SHA256 `9d16a121deff171f9060a66d2042dab741c5e07d73fc727a2724a9a7746509d3`; `verify-ocr-safe-evidence-archive --require-confusion-report` succeeded with `confusion_report_verified=true`, `verified_file_count=90`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive or qrcode_helper_ocr_safe_archive or cli_aliases"` => `5 passed, 62 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe"` printed `27 passed, 40 deselected, 17 subtests passed` after `241.78s`, but the shell wrapper timed out after output completion, so it is recorded as non-clean wrapper evidence.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI certification, archive creation, and archive verification passed with the `.tmp_transport_ocr_safe_archive_20260530` artifacts above.
+  - Certification boundary:
+    - this proves replayable archive integrity for synthetic OCR-safe text-confusion and correction-replay evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe source-report archive gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no usable token-backed execution is available).
+  - Goal: make OCR-safe evidence archives fail closed before packaging when an included synthetic confusion or correction replay source report is stale/non-replayable.
+  - Added `--require-source-report-verification` to `soenc transport archive-ocr-safe-evidence`:
+    - reruns `verify-ocr-confusion` for included synthetic confusion reports and `verify-correction-replay` for included correction replay reports before ZIP creation.
+    - fails before writing the archive if any source report verification fails.
+    - records `source_verification_required=true` plus verifier schema, source report SHA256, success, and failure count in the archive manifest for each included report.
+  - Added `--require-source-report-verification` to `soenc transport verify-ocr-safe-evidence-archive`:
+    - fails closed unless the archive manifest records successful pre-archive source-report verification metadata.
+    - checks the recorded source-verification report SHA256 against the source report SHA256 recorded in the archive manifest.
+  - Updated compatibility APIs, CLI wiring, parser/delegation/archive tests, QRCODE_AIRGAP_MANUAL.md, USAGE_MANUAL.md, the product roadmap, platform assessment, and the next-iteration handoff.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verify_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verify_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verify_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verify_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: source-report verification was required before archive creation, the manifest recorded `source_verification.success=true` and `failure_count=0`, and archive verification succeeded with `source_report_verification_required_by_manifest=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `verified_file_count=90`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive or cli_aliases"` => `9 passed, 62 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_source_verify_20260531` artifacts above.
+  - Certification boundary:
+    - this proves pre-archive replay binding and archive replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archived source-verifier binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make `--require-source-report-verification` evidence replayable from the OCR-safe archive itself, not only summarized in archive manifest metadata.
+  - Hardened `soenc transport archive-ocr-safe-evidence --require-source-report-verification`:
+    - includes the full `verify-ocr-confusion` or `verify-correction-replay` JSON result as an archive member.
+    - records source-verification archive path, SHA256, and byte size in each archive manifest report entry.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive --require-source-report-verification`:
+    - fails closed unless the source-verification archive member exists.
+    - checks source-verification member SHA256/size against both manifest report metadata and manifest file inventory.
+    - parses the archived verifier JSON and checks schema, success, failure count, and source report SHA256 parity.
+  - Added focused regression coverage:
+    - source-verification report is archived and digest-bound.
+    - archive verification fails when the source-verification member is missing.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verify_archive_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive manifest includes `synthetic_ocr_confusion_source_verification.json` as role `ocr_safe_confusion_source_verification_report`; archive verification succeeded with `verified_file_count=91`, `source_report_verification_required_by_manifest=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, and `failure_count=0`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `10 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_source_verify_archive_20260531` artifacts above.
+  - Certification boundary:
+    - this proves archived source-verifier replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive summary-role parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive summary metadata replayable by binding `summary.roles` to the actual manifest file inventory.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - recomputes file-role counts from `manifest.files[]`.
+    - fails closed with `summary_roles_missing_or_invalid`, `summary_role_count_invalid`, or `summary_roles_mismatch` when `summary.roles` is absent, malformed, or drifts from the file inventory.
+    - emits `summary_roles_verified` and `verified_roles` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only the embedded manifest `summary.roles` count changed fails verification while the embedded report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_summary_roles_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `verified_file_count=91`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `66ebb112523d6cb937ec8f424c44585c753396df20ad3d579331f16013b623dc`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `11 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - `python -m pytest -q tests/test_transport_modules.py` => `74 passed, 17 subtests passed`.
+    - `python -m pytest -q tests/test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `python -m pytest -q tests/test_transport_certify.py` => `88 passed, 1 expected duplicate-ZIP-member warning`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_summary_roles_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive summary-role replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive report-inventory parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive report summary metadata replayable by binding `summary.report_count` and `summary.report_roles` to the actual `reports[]` inventory.
+  - Hardened `soenc transport archive-ocr-safe-evidence`:
+    - writes `summary.report_roles` beside existing `summary.report_count`.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - recomputes report counts from `manifest.reports[]`.
+    - fails closed with `summary_report_count_missing_or_invalid`, `summary_report_count_mismatch`, `summary_report_roles_missing_or_invalid`, `summary_report_role_count_invalid`, or `summary_report_roles_mismatch` when summary report metadata is absent, malformed, or drifted.
+    - emits `report_count`, `verified_report_count`, `summary_report_count_verified`, `summary_report_roles_verified`, and `verified_report_roles` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only embedded manifest `summary.report_count` and `summary.report_roles` changed fails verification while the embedded synthetic report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_roles_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `report_count=1`, `verified_report_count=1`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `verified_file_count=91`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `d3b01b7218a3e885ddb9294ba7e82a3649553a907eaa4b469903718f606ab987`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `12 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - `python -m pytest -q tests/test_transport_modules.py` => `75 passed, 17 subtests passed`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_report_roles_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive report-inventory summary replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive file-inventory parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive file summary metadata replayable by binding `summary.file_count` and `summary.total_size_bytes` to the actual `files[]` inventory and archived bytes.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires `summary.file_count` to be integer-typed, non-negative, and equal `len(manifest.files)`.
+    - requires `summary.total_size_bytes` to be integer-typed, non-negative, and equal the sum of verified archived member byte sizes.
+    - fails closed with `summary_file_count_missing_or_invalid`, `summary_file_count_mismatch`, `summary_total_size_missing_or_invalid`, or `summary_total_size_mismatch` when summary file metadata is absent, malformed, or drifted.
+    - emits `verified_total_size_bytes`, `summary_file_count_verified`, and `summary_total_size_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only embedded manifest `summary.file_count` and `summary.total_size_bytes` changed fails verification while the embedded synthetic report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_file_inventory_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `file_count=91`, `verified_file_count=91`, `verified_total_size_bytes=330676`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_roles_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `e09197f85ae58ac068ee8d33ed53804ca2b6dccf7c18f83d9be9d0ce51822935`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `13 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_file_inventory_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive file-inventory summary replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archive manifest-contract parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive manifest success and parameter gates replayable so a verifier-required confusion, correction-replay, or source-verification gate cannot be silently weakened in the archived manifest while embedded reports still replay.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires `manifest.success=true`.
+    - requires `parameters.require_confusion_report`, `parameters.require_correction_replay_report`, and `parameters.require_source_report_verification` to be typed booleans.
+    - fails closed with `confusion_report_not_required_by_archive`, `correction_replay_report_not_required_by_archive`, or `source_report_verification_not_required_by_archive` when the verifier CLI requires a gate that the archived manifest did not require at packaging time.
+    - emits `archive_success_verified`, `archive_parameters_verified`, and `archive_parameter_gates` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive whose embedded manifest changes `success`, weakens a required report gate into a non-boolean value, or removes source-verification requirement fails verification even though the embedded synthetic report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_manifest_contract_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_success_verified=true`, `archive_parameters_verified=true`, `archive_parameter_gates={"require_confusion_report": true, "require_correction_replay_report": false, "require_source_report_verification": true}`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `f7f03ae4c847f242fc2d25186734e58edeb3530eadce63e1b3d778098a090911`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `14 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_manifest_contract_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive manifest success/parameter replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe external-manifest envelope parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive external manifest handoffs fail closed on envelope drift, so an out-of-ZIP manifest cannot point at the wrong archive/manifest pair while embedded OCR-safe reports still replay.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive --manifest-file ...`:
+    - requires canonical external `archive_sha256` and parity with the verified ZIP bytes.
+    - requires integer/non-negative external `archive_size_bytes` and parity with the verified ZIP byte size.
+    - requires external `archive_file` basename parity with the supplied archive path.
+    - requires external `manifest_file` basename parity with the supplied manifest path.
+    - requires canonical external `embedded_manifest_sha256` and parity with the embedded manifest member bytes.
+    - marks `external_manifest_verified=false` on any external envelope or embedded/external body-parity drift, while still reporting embedded report replay results separately.
+    - emits `external_manifest_supplied`, `external_manifest_verified`, `archive_size_bytes`, `manifest_file`, and `embedded_manifest_sha256` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving a tampered external manifest with drifted archive SHA, archive size, archive filename, manifest filename, and missing embedded-manifest SHA fails verification while the embedded synthetic confusion report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_external_manifest_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `external_manifest_supplied=true`, `external_manifest_verified=true`, `archive_size_bytes=80729`, `embedded_manifest_sha256=e1fca8f2c05000c838bd6b2f173fff1254b10ecf370746b07d486047f267928b`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `bf8c1f93c533f415c54a9d34279287f6e8985a04033b5a3c37156337f19ac9b9`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "external_manifest_envelope_drift or ocr_safe_archive"` => `15 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_external_manifest_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe external-manifest envelope replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe archived-report path binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive replay fail closed when an embedded report still points at operator-local absolute paths or unsafe paths instead of declared archive members.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - checks replay-critical paths inside archived `synthetic_ocr_confusion_report.json` and `transport_ocr_correction_replay_report.json` before embedded report replay.
+    - requires archived report paths for payload, manifest, OCR input, analyze report, recovered output, source-page text, correction CSV, and recovered correction output to be safe archive-relative members when those artifacts are replay-critical.
+    - fails closed with `archived_report_path_not_archive_relative`, `archived_report_path_missing`, or `archived_report_path_member_missing` instead of letting report verification fall back to the local filesystem.
+    - emits `archived_report_paths_verified` and `archived_report_path_binding_count` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving a tampered archive whose embedded report paths are changed back to absolute local paths fails verification even after the archive manifest digests are updated to match the tampered report bytes.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_archive_paths_20260531/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archived_report_paths_verified=true`, `archived_report_path_binding_count=89`, `verified_file_count=91`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `b0fe04b90136c8fd3ca0b1b3872e8dce3d668079e68d7a14d0562cb327a2d1c2`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `16 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_archive_paths_20260531` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archived-report path replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-05-31, OCR-safe report-state parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive report-state metadata fail closed on truthy-string or malformed state drift while embedded report replay remains separately visible.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires `manifest.reports[].success` to be JSON boolean, not a truthy string or other coerced value.
+    - requires `manifest.reports[].source_verification_required` to be JSON boolean when source verification is required by CLI or archive manifest.
+    - requires manifest source-verification `success` to be JSON boolean and `failure_count` to be an integer.
+    - requires archived source-verifier JSON `success` to be JSON boolean and `failure_count` to be an integer before comparing it to manifest metadata.
+    - emits `archive_report_states_verified` and `source_report_verification_states_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving:
+    - a manifest whose report/source-verification state fields are changed to `"true"`/`"0"` fails with typed state diagnostics while the embedded synthetic confusion report still replays.
+    - an archived source-verifier JSON whose `success`/`failure_count` are changed to strings fails with typed state diagnostics while the embedded synthetic confusion report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_state_20260531a/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_state_20260531a/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_state_20260531a/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_state_20260531a/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `verified_file_count=92`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_roles_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `failure_count=0`, and archive SHA256 `7e525fab83f4a43b66209c3f8ac098005a34946923cd28fb8d2bc94f3f6fa02d`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "report_state_type_drift or source_verifier_state_type_drift or ocr_safe_archive"` => `19 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_report_state_20260531a` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive report-state replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-01, OCR-safe archive timestamp provenance):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive generation-time metadata fail closed on malformed or drifted timestamps while embedded report replay remains separately visible.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires archive manifest `generated_at_utc` to be a canonical UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` form.
+    - includes `generated_at_utc` in external-vs-embedded manifest parity checks when `--manifest-file` is supplied.
+    - emits `archive_generated_at_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive with only the embedded manifest timestamp changed to a non-canonical value fails with `archive_generated_at_utc_missing_or_invalid` and external manifest parity drift while the embedded synthetic confusion report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_timestamp_20260601/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_timestamp_20260601/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_timestamp_20260601/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_timestamp_20260601/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_generated_at_verified=true`, `external_manifest_verified=true`, `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=383318`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `5d9dd9d4f0c7a6a10e0617e5436ec330695d8028530a4377ef5a6b424af743fb`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "generated_timestamp_drift or certification_boundary_drift or ocr_safe_archive_confusion_evidence_verifies_replayably"` => `3 passed, 82 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `22 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_timestamp_20260601` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive timestamp replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-01, OCR-safe archive file metadata provenance):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive per-file manifest metadata fail closed on malformed SHA256 or byte-size fields while embedded report replay remains separately visible.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires every `manifest.files[]` record to carry a canonical lowercase 64-hex `sha256`.
+    - requires every `manifest.files[]` record to carry integer, non-negative `size_bytes`.
+    - emits `manifest_file_metadata_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving an archive whose embedded manifest changes a file record to `sha256="SHA256:<digest>"` and string `size_bytes` fails with `archive_file_record_sha256_missing_or_invalid` and `archive_file_record_size_missing_or_invalid` while the embedded synthetic confusion report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_file_metadata_20260601/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_file_metadata_20260601/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_file_metadata_20260601/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_file_metadata_20260601/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `manifest_file_metadata_verified=true`, `archive_generated_at_verified=true`, `external_manifest_verified=true`, `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=383690`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `3b3c92996520ddb68d6a94fc73697d326df616dc45bbd48c23539cab06f8c83d`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "file_metadata_type_drift or ocr_safe_archive_confusion_evidence_verifies_replayably"` => `2 passed, 84 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `23 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_file_metadata_20260601` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive per-file metadata replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-01, OCR-safe archive report-entry metadata provenance):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive report-entry metadata fail closed on malformed SHA256/path/byte-size fields while embedded report replay remains separately visible.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires every `manifest.reports[]` record to carry canonical source and archived-report SHA256 fields.
+    - requires source-report archive metadata and source-verifier archive metadata to use safe archive-relative paths, canonical lowercase 64-hex SHA256 values, and integer non-negative byte sizes.
+    - emits `archive_report_metadata_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added focused regression coverage proving a manifest whose report-entry and source-verification archive metadata are changed to prefixed SHA strings or string byte sizes fails with typed metadata diagnostics while the embedded synthetic confusion report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_metadata_20260601/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_metadata_20260601/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_metadata_20260601/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_metadata_20260601/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `manifest_file_metadata_verified=true`, `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `verified_file_count=92`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `9fe1632d7e09d09035a91621869064c5ea3f5126441d7d8109ca341d43e63972`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `24 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_report_metadata_20260601` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive report-entry metadata replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-01, OCR-safe archive package-time state typing):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable (`gh auth status` reports an invalid keyring token for github.com account `saksim`; no `GH_TOKEN`/`GITHUB_TOKEN` is set).
+  - Goal: make OCR-safe evidence archive creation fail closed before ZIP creation when source report or source-verifier state is malformed, rather than coercing truthy strings into clean manifest state.
+  - Hardened `soenc transport archive-ocr-safe-evidence`:
+    - requires included source report `success` to be a JSON boolean.
+    - requires pre-archive source-verifier `success` to be a JSON boolean.
+    - requires pre-archive source-verifier `failure_count` to be a non-negative JSON integer.
+    - rejects malformed state before archive/manifest files are written.
+  - Added focused regression coverage proving:
+    - a synthetic OCR confusion report with `success="true"` raises before ZIP creation.
+    - a mocked source-verifier report with `success="true"` and `failure_count="0"` raises before ZIP creation.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_packaging_state_20260601/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_packaging_state_20260601/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_packaging_state_20260601/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_packaging_state_20260601/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_states_verified=true`, `source_report_verification_states_verified=true`, `archive_report_metadata_verified=true`, `manifest_file_metadata_verified=true`, `external_manifest_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=383876`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `6157e65a58cb812fe53245f85ab3d09eace4d125ed2bc92dbc6c84f913d919c8`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "packaging_rejects_report_state_type_drift or packaging_rejects_source_verifier_state_type_drift"` => `2 passed, 87 deselected`.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `26 passed, 63 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_packaging_state_20260601` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive package-time state typing for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-01, encrypted-text real-capture harness and multi-image archive replay):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment, and the next launch-critical gap is optional transport evidence/capture usability.
+  - Goal: provide the concrete operator workflow requested for text -> platform encryption -> generated transport pages -> operator photo/scan drop folder -> recovery/certification replay -> plaintext SHA256 verification, without converting generated-page smoke evidence into a production camera/photo or print-scan claim.
+  - Added `scripts/real_capture_text_transport.py`:
+    - `prepare` encrypts operator text with the platform encryption helper, writes an encrypted artifact, exports transport pages with `ocr-safe-human-correctable-v1` by default, stages `capture_corpus.json`, `capture_kit_manifest.json`, capture folders, raw-camera folders, metadata templates, and operator instructions.
+    - `certify` reads supplied images from the prepared capture directory, runs `certify-capture-evidence`, verifies and replays the evidence archive, decrypts the recovered encrypted artifact, and writes `text_roundtrip_verification.json` with encrypted artifact SHA256, plaintext SHA256, and final success state.
+    - `--claim none` is a measured round-trip harness only. `--claim physical-print-scan` and `--claim real-camera-perspective-correction` require the corresponding strict gate and certified claim.
+  - Hardened archive replay for capture corpora:
+    - archived multi-image capture corpora whose extracted `image_path` is rewritten as a list now replay successfully instead of treating the list as one path string.
+    - replay removes stale `raw_image_paths` / `raw_image_path` fields when the archive contains no raw-camera image digest records, so no operator-local raw path is reused accidentally.
+  - Added focused tests:
+    - `tests/test_real_capture_text_transport.py` covers encrypted text artifact round-trip, prepare-flow corpus/kit staging, OCR-safe profile selection, and claim-mode gate selection for real-camera evidence.
+    - `tests/test_transport_certify.py::ArchiveEvidenceReplayTests::test_replay_transport_evidence_archive_accepts_multi_image_rewritten_corpus` covers multi-page capture archive replay from archived bytes.
+  - Local smoke evidence:
+    - `.tmp_real_capture_text_flow_20260601_smoke2/` was prepared with a sample text payload, generated `17` transport page images, copied generated pages into the capture folder for smoke only, then ran `certify --claim none --allow-reference-identical-captures`.
+    - result: `pipeline_success=true`, `roundtrip_success=true`, `transport_reliability_report.json`, replayed evidence archive/status artifacts, and `text_roundtrip_verification.json` were produced.
+  - Verification:
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\certify.py scripts\real_capture_text_transport.py` => passed.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_real_capture_text_transport.py` => `3 passed`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_real_capture_text_transport.py tests\test_transport_certify.py -k "real_capture_text or multi_image_rewritten_corpus or archive_packaging_and_verification_replay"` => `4 passed, 88 deselected`.
+  - Certification boundary:
+    - the smoke run copied generated PNGs into the capture folder and used `--allow-reference-identical-captures`, so it proves harness/evidence-chain replay only.
+    - it does not certify real camera/photo, physical print-scan, real camera perspective-correction, or backend-specific OCR transfer; those still require actual photos/scans/backend output, byte-distinct evidence, strict claim gates, archive replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run `scripts/real_capture_text_transport.py prepare`, place actual operator photos/scans in the printed capture directory, and run `certify --claim none` for measured operator round-trip evidence.
+    - rerun with `--claim physical-print-scan` or `--claim real-camera-perspective-correction` only when the exact medium evidence and provenance are present.
+    - keep backend-specific OCR-only blocked until a named OCR backend/corpus is available and measured under `--require-ocr-only-backend`.
+- Notes (2026-06-01, OCR-safe archive file-role binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive file-role semantics fail closed so manifest role labels cannot be relabeled and made self-consistent through summary edits while embedded synthetic reports still replay.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added an allowlist for OCR-safe archive file roles.
+    - requires fixed report/source-verifier roles to use canonical archive member paths such as `synthetic_ocr_confusion_report.json` and `synthetic_ocr_confusion_source_verification.json`.
+    - requires artifact roles such as `confusion_ocr_input`, `confusion_analyze_report`, and `source_page_text` to live under matching archive path prefixes.
+    - emits `archive_file_roles_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added regression coverage proving a tampered archive whose embedded manifest relabels a `confusion_ocr_input` file as `source_page_text` and updates `summary.roles` accordingly still fails with `archive_file_record_role_path_mismatch`, while the embedded synthetic confusion report continues to replay.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_file_roles_20260601/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_file_roles_20260601/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_file_roles_20260601/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_file_roles_20260601/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_file_roles_verified=true`, `verified_file_count=92`, `summary_roles_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `ea1ea8e9fab3f7f30a49ca15d23cdb966920641c48502ac19467df139c8f3ee8`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "file_role_semantic_drift or ocr_safe_archive_confusion_evidence_verifies_replayably"` => `2 passed, 88 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py enc2sop\transport\cli.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_file_roles_20260601` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe archive file-role semantic replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-01, OCR-safe source-report archive metadata parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archives fail closed when the duplicated archived source-report path/SHA256/size fields drift between `manifest.reports[].source_report_archive` and `manifest.reports[].source_verification.source_report_archive_*`, while embedded synthetic report replay remains separately visible.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - requires report-level `source_report_archive.archive_path`, `sha256`, and `size_bytes` to remain canonical.
+    - requires source-verification `source_report_archive_path`, `source_report_archive_sha256`, and `source_report_archive_size_bytes` to remain canonical.
+    - fails closed when either side is missing/malformed or when the two copies do not match.
+    - emits `source_report_archive_metadata_parity_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+  - Added regression coverage proving a tampered archive whose embedded manifest changes only `source_verification.source_report_archive_*` fails with `source_report_archive_metadata_{path,sha256,size}_mismatch`, while the embedded synthetic confusion report continues to replay.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_parity_20260601/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_parity_20260601/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_parity_20260601/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_parity_20260601/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_metadata_parity_verified=true`, `archive_report_metadata_verified=true`, `archive_file_roles_verified=true`, `manifest_file_metadata_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384341`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `86447dfdc907fffb1b106b1527b8faeda99713bedd2f54156a422685b78a0429`.
+  - Verification:
+    - `python -m pytest -q tests/test_transport_modules.py -k "source_report_metadata_parity_drift"` => `1 passed, 90 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py` => passed.
+    - `python -m pytest -q tests/test_transport_modules.py -k "ocr_safe_archive"` => `28 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with the `.tmp_transport_ocr_safe_source_report_parity_20260601` artifacts above.
+  - Certification boundary:
+    - this proves OCR-safe source-report archive metadata parity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-02, OCR-safe archived source-verifier metadata parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archives fail closed when the archived source-verification JSON member itself carries stale or misleading archive/source-report metadata, while embedded synthetic report replay remains separately visible.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archived source-verification JSON now includes archive-relative `archive_path`, `source_report_archive_path`, `source_report_archive_sha256`, and `source_report_archive_size_bytes`.
+    - archive verification requires those fields to be safe archive members where appropriate and to match the manifest and archived source-report bytes.
+    - verification emits `source_report_verification_archive_metadata_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - malformed archived source-verification JSON now marks `source_report_verification_states_verified=false` and `source_report_verification_archive_metadata_verified=false` even when the ZIP member hash/size metadata is self-consistent.
+    - tampered archives now fail with structured reasons such as `source_report_verification_member_archive_path_mismatch`, `source_report_verification_member_source_report_path_mismatch`, `source_report_verification_member_source_report_sha256_mismatch`, and `source_report_verification_member_source_report_size_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_metadata_20260602/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_metadata_20260602/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_metadata_20260602/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_metadata_20260602/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_archive_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `archive_report_metadata_verified=true`, `archived_report_paths_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=385017`, `confusion_report_verified=true`, `source_report_verification_count=1`, `failure_count=0`, and archive SHA256 `118f259a863a9318437e72d020af1b5f7ec068b48bc4925204c65274f4af4e16`.
+  - Verification:
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "source_verifier_archive_metadata or source_verification_report_is_archived or ocr_safe_archive_confusion_evidence_verifies_replayably"` => `3 passed, 89 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "invalid_source_verifier_json_member or source_verifier_archive_metadata or correction_replay_source_verifier_metadata or source_verification_member_missing or source_verification_report_is_archived or combined_evidence"` => `6 passed, 88 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `31 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_metadata_20260602`.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier metadata replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-02, OCR-safe correction-replay source-verifier archive-entry parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make correction-replay OCR-safe evidence archives expose and enforce the same source-verifier archive-entry metadata contract as synthetic confusion archives.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - emits `source_report_verification_archive_entry_metadata_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - marks that flag false when manifest-level source-verification archive path, SHA256, size, file-record, member, or role metadata is missing or drifts from archived ZIP bytes.
+    - correction-replay archives now have explicit regression coverage proving archived source-verifier JSON `archive_path` and `source_report_archive_*` drift fails closed while the embedded correction-replay report still replays.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_correction_verifier_metadata_20260602/transport_ocr_correction_replay_report.json`.
+    - `.tmp_transport_ocr_safe_correction_verifier_metadata_20260602/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_correction_verifier_metadata_20260602/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_correction_verifier_metadata_20260602/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `correction_replay_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=7`, `verified_total_size_bytes=104738`, `failure_count=0`, and archive SHA256 `de9d3f3f2acd3e73822447c712ffde2668d8b080486746424f089776e6e2b441`.
+  - Verification:
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "correction_replay_source_verifier_metadata_drift or combined_evidence_cli_verifies_replayably or source_verification_member_missing"` => `3 passed, 90 deselected`.
+    - manual synthetic correction-replay archive + `verify-ocr-safe-evidence-archive --require-correction-replay-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_correction_verifier_metadata_20260602`.
+  - Certification boundary:
+    - this proves OCR-safe correction-replay source-verifier archive metadata replayability for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-02, OCR-safe source-verification manifest entry-set parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archives fail closed when `manifest.files[]` declares source-verifier or source-report archive records that are not referenced by any report-level `source_verification` or `source_report_archive` entry.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - emits `source_report_verification_manifest_entry_set_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - tracks the exact source-verification and source-report archive members referenced by `manifest.reports[]`.
+    - fails closed with `source_report_verification_file_record_unreferenced` or `source_report_archive_file_record_unreferenced` when the archive manifest carries extra self-consistent source-verifier/source-report records that no report uses.
+    - preserves embedded report replay visibility, so a tampered archive can still show `confusion_report_verified=true` while the archive-level provenance check fails.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_entry_set_20260602/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_entry_set_20260602/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_entry_set_20260602/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_entry_set_20260602/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_manifest_entry_set_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=383622`, `failure_count=0`, and archive SHA256 `38f9f9fa108c51ee51b94d30400f45bca703fc73be4ae277b0e28da1f01874c8`.
+  - Verification:
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "unreferenced_source_verification_records"` => `1 passed, 94 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "unreferenced_source_verification_records or source_verification_member_missing"` => `2 passed, 93 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "combined_evidence_cli_verifies_replayably or correction_replay_source_verifier_metadata_drift or source_verification_member_missing or unreferenced_source_verification_records"` => `4 passed, 91 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `32 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_entry_set_20260602`.
+  - Certification boundary:
+    - this proves OCR-safe source-verification manifest entry-set replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-02, OCR-safe rewritten report manifest entry-set parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archives fail closed when `manifest.files[]` declares rewritten report archive records that are not referenced by any `manifest.reports[]` entry.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - emits `archive_report_manifest_entry_set_verified` in `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - tracks exact rewritten report archive members referenced by `manifest.reports[]`.
+    - fails closed with `archive_report_file_record_unreferenced` when the archive manifest carries an extra self-consistent rewritten report record and ZIP member that no report uses.
+    - preserves embedded report replay visibility, so a tampered archive can still show `confusion_report_verified=true` while the archive-level provenance check fails.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_entry_set_20260602/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_entry_set_20260602/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_entry_set_20260602/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_entry_set_20260602/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_manifest_entry_set_verified=true`, `archive_report_metadata_verified=true`, `archive_file_roles_verified=true`, `manifest_file_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `source_report_verification_manifest_entry_set_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384273`, `failure_count=0`, and archive SHA256 `a5df0f2feaef779cc60dd607e6a5fd0ffe126e5ebe511b17552633ee9c11cfa2`.
+  - Verification:
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "unreferenced_rewritten_report_records or unreferenced_source_verification_records"` => `2 passed, 94 deselected`.
+    - `PYTHONPYCACHEPREFIX=C:\tmp\enc2sop_pycache python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `33 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_entry_set_20260602`.
+  - Certification boundary:
+    - this proves OCR-safe rewritten report manifest entry-set replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-02, OCR-safe rewritten report file metadata parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification report `archive_report_metadata_verified=false` when rewritten report file-entry role/SHA256/byte-size metadata drifts from `manifest.reports[]` or ZIP member bytes, while preserving embedded report replay visibility.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - rewritten report file-record missing, role mismatch, SHA256 mismatch, and byte-size mismatch now fail the archive-level `archive_report_metadata_verified` gate.
+    - embedded report replay can still succeed, so audit handoff can distinguish replayable source report bytes from failed archive provenance.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_rewritten_report_metadata_20260602/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_rewritten_report_metadata_20260602/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_rewritten_report_metadata_20260602/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_rewritten_report_metadata_20260602/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `archive_report_manifest_entry_set_verified=true`, `archive_file_roles_verified=true`, `manifest_file_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `source_report_verification_manifest_entry_set_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=385110`, `failure_count=0`, and archive SHA256 `7667a626f26d07937b30b21ccb5ff42515660546e9a56cbb48ad553dc9518143`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "rewritten_report_file_metadata_drift or report_metadata_drift or unreferenced_rewritten_report_records"` => `3 passed, 94 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `34 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_rewritten_report_metadata_20260602`.
+  - Certification boundary:
+    - this proves OCR-safe rewritten report file metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe file payload metadata parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification report `manifest_file_metadata_verified=false` when archived member bytes drift from `manifest.files[]` SHA256/byte-size metadata, even if the external manifest envelope is regenerated for the tampered ZIP.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - generic file SHA256 mismatches now fail the stable `manifest_file_metadata_verified` gate.
+    - generic file byte-size mismatches now fail the same gate.
+    - this keeps downstream audit tooling from relying only on generic `file_sha256_mismatch` / `file_size_mismatch` reasons.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers a `confusion_ocr_input` ZIP member while leaving the embedded manifest unchanged.
+    - updates the supplied external manifest envelope to match the tampered ZIP.
+    - verifies `external_manifest_verified=true`, `manifest_file_metadata_verified=false`, and fail-closed reasons `file_sha256_mismatch`, `file_size_mismatch`, and `summary_total_size_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_file_payload_metadata_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_file_payload_metadata_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_file_payload_metadata_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_file_payload_metadata_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `manifest_file_metadata_verified=true`, `external_manifest_verified=true`, `archive_report_metadata_verified=true`, `archive_report_manifest_entry_set_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384740`, `failure_count=0`, and archive SHA256 `96d6e082417c315a14b544510440c75ceb113ea4858d3ce7db9a363ff5ec7f2d`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "file_payload_metadata_drift or file_metadata_type_drift or tampered_member"` => `3 passed, 95 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `35 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_file_payload_metadata_20260603`.
+  - Certification boundary:
+    - this proves OCR-safe manifest file-member payload metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe source-report archive-entry metadata parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification expose a stable `source_report_archive_entry_metadata_verified` gate so archived source-report file-record role/SHA256/byte-size drift is visible separately from source-report metadata parity and source-verifier archive-entry checks.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - source-report archive file-record missing, role mismatch, SHA256 mismatch, byte-size mismatch, archive member missing, and unreferenced source-report records now fail `source_report_archive_entry_metadata_verified`.
+    - existing `source_report_archive_metadata_parity_verified` remains focused on report-level `source_report_archive` versus `source_verification.source_report_archive_*` parity.
+    - existing `source_report_verification_archive_entry_metadata_verified` remains focused on the archived verifier JSON file-record and member bytes.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers the `ocr_safe_confusion_source_report` `manifest.files[]` record SHA256 and byte-size while leaving the source-report ZIP member bytes unchanged.
+    - verifies `source_report_archive_metadata_parity_verified=true`, `source_report_archive_entry_metadata_verified=false`, and fail-closed reasons `source_report_archive_file_sha256_mismatch` and `source_report_archive_file_size_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_entry_metadata_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_entry_metadata_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_entry_metadata_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_entry_metadata_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `manifest_file_metadata_verified=true`, `archive_report_metadata_verified=true`, `archive_report_manifest_entry_set_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385391`, `failure_count=0`, and archive SHA256 `5d8ebf010df9d6ec6fa0596f381b7656cd75c5f2f7cef6bac03d0eae0498a653`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_file_metadata_drift"` => `1 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `36 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_entry_metadata_20260603`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_archive"` selected no tests (`99 deselected`); this was a filter mismatch, not a product failure.
+  - Certification boundary:
+    - this proves OCR-safe source-report archive-entry metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe archive inventory gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification expose a stable `archive_inventory_verified` gate so ZIP/member inventory drift is visible separately from embedded report replay and per-file SHA256/byte-size metadata checks.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - duplicate ZIP members, unsafe ZIP member paths, symlink archive members, unreadable archives, missing embedded manifests, unsafe `manifest.files[]` archive paths, duplicate manifest archive paths, missing archive members, and unexpected archive members now fail `archive_inventory_verified`.
+    - `manifest_file_metadata_verified`, `archive_file_roles_verified`, report replay flags, and source-verifier/source-report metadata gates remain scoped to their existing contracts.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - appends an undeclared `unreferenced/extra.txt` ZIP member while leaving the embedded manifest and reports unchanged.
+    - verifies `confusion_report_verified=true`, `archive_inventory_verified=false`, and fail-closed reason `archive_member_unexpected`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_archive_inventory_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_archive_inventory_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_archive_inventory_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_archive_inventory_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_manifest_entry_set_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384368`, `failure_count=0`, and archive SHA256 `512bf2b7cb0f725bdd586fc1beabf8723000ed9aed365a06b718c14a8faf5216`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "archive_inventory_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `37 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_archive_inventory_20260603`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py` => `100 passed, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+  - Certification boundary:
+    - this proves OCR-safe archive ZIP/member inventory replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe fixed archive-member package guard):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe archive creation fail closed before ZIP creation if a fixed rewritten-report or source-verifier member path collides with an already reserved archive member.
+  - Hardened `soenc transport archive-ocr-safe-evidence`:
+    - added package-time fixed-member reservation for `synthetic_ocr_confusion_report.json`, `transport_ocr_correction_replay_report.json`, `synthetic_ocr_confusion_source_verification.json`, and `transport_ocr_correction_replay_source_verification.json`.
+    - duplicate fixed-member collisions now raise before the ZIP is written instead of relying on later archive verification to detect duplicate members.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - simulates a source-artifact allocator bug that pre-reserves `synthetic_ocr_confusion_report.json`.
+    - verifies `archive_ocr_safe_evidence` raises `duplicate OCR-safe archive member` and leaves no archive file behind.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_fixed_member_collision_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_fixed_member_collision_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_fixed_member_collision_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_fixed_member_collision_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_manifest_entry_set_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384833`, `failure_count=0`, and archive SHA256 `23aa6786d0b03cc21ca52fea60a0963152c5261611f1302b244bf531ed124972`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "fixed_member_collision or archive_inventory_drift or ocr_safe_archive_confusion_evidence"` => `3 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `38 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_fixed_member_collision_20260603`.
+  - Certification boundary:
+    - this proves OCR-safe fixed archive-member package-time collision hygiene for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe source-report rewrite parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification fail closed when an archived rewritten report is no longer the deterministic archive-path rewrite of the archived source report, even if the rewritten report metadata and embedded report replay still pass.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_source_rewrite_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - builds the archive source-path map from `manifest.files[]` and replays the same path-rewrite semantics used by archive packaging.
+    - fails closed with `archive_report_source_rewrite_mismatch` when the rewritten report member drifts from the archived source report.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers the archived `synthetic_ocr_confusion_report.json` rewritten report by changing a non-replay field.
+    - updates manifest report/file SHA256 and byte-size metadata so `archive_report_metadata_verified=true` and the embedded report still replays.
+    - verifies only the new source-rewrite parity gate fails with `archive_report_source_rewrite_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_rewrite_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_rewrite_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_rewrite_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_rewrite_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_source_rewrite_verified=true`, `archive_report_metadata_verified=true`, `archive_report_manifest_entry_set_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384089`, `failure_count=0`, and archive SHA256 `7fb930916a7b3a91d24f9bab8c38835329f55e1b594623973a13de08f1ae7d0c`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_rewrite_drift or ocr_safe_archive_confusion_evidence or fixed_member_collision"` => `3 passed, 99 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `39 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py` => `102 passed, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py` => `89 passed, 1 expected duplicate-ZIP-member warning`.
+    - promotion suite `tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - mainline suite `tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_rewrite_20260603`.
+  - Certification boundary:
+    - this proves OCR-safe source-report to rewritten-report archive parity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe archived-report path role binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification fail closed when replay-critical paths inside archived reports point at a valid ZIP member with the wrong manifest role, instead of accepting any existing archive-relative path.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - builds a `manifest.files[].archive_path` inventory for embedded report path checks.
+    - validates expected roles for confusion report paths: `payload`, `manifest`, `encoded_payload`, `source_page_text`, `confusion_ocr_input`, `confusion_analyze_report`, and `confusion_recovered_output`.
+    - validates expected roles for correction replay report paths: `manifest`, `correction_ocr_input`, `corrections_file`, `correction_recovered_output`, and `refreshed_corrections_template`.
+    - fails closed with `archived_report_path_manifest_record_missing` or `archived_report_path_role_mismatch`; `archived_report_paths_verified=false` prevents replay-critical path checks from passing on role drift.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers the archived rewritten `synthetic_ocr_confusion_report.json` so a case `ocr_input_path` points at an existing `source_page_text` archive member.
+    - updates manifest report/file SHA256 and byte-size metadata so the new failure is specifically role binding, not generic file metadata drift.
+    - updates the existing file-role semantic drift test so `confusion_report_verified=false` when a manifest role drift makes an embedded report path unsafe to replay.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_path_roles_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_path_roles_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_path_roles_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_path_roles_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archived_report_paths_verified=true`, `archived_report_path_binding_count=89`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384368`, `failure_count=0`, and archive SHA256 `61f3e949c83915a1c8de24255937aacae9c44f32333e1dc2b79f9b87cccf0748`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "archived_report_path_role_drift or absolute_archived_report_path or ocr_safe_archive_confusion_evidence"` => `3 passed, 100 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `40 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py` => `103 passed, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py` => `89 passed, 1 expected duplicate-ZIP-member warning`.
+    - promotion suite `tests/test_promotion_artifacts.py tests/test_soenc_cli.py tests/test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - mainline suite `tests/test_encryption_helper.py tests/test_toolchain_profile.py tests/test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_path_roles_20260603`.
+  - Certification boundary:
+    - this proves OCR-safe archived-report path role binding for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe source-report member byte binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification fail the source-report metadata parity gate when archived source-report bytes drift from `manifest.reports[].source_sha256`, even if manifest file-entry metadata and duplicated source-verification metadata are updated to match the tampered bytes.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - `source_report_archive_sha256_mismatch` now marks `archive_report_metadata_verified=false` and `source_report_archive_metadata_parity_verified=false`.
+    - `source_report_archive_metadata_sha256_mismatch` and `source_report_archive_metadata_size_mismatch` now also fail those same gates when archived source-report bytes disagree with report/source-verification metadata.
+    - `source_report_archive_entry_metadata_verified` remains scoped to the manifest file-entry role/SHA256/byte-size record for the source-report archive member.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers the archived `ocr_safe_confusion_source_report/synthetic_ocr_confusion_report.json` member.
+    - updates `manifest.files[]`, `source_report_archive`, and `source_verification.source_report_archive_*` SHA256/byte-size fields to match the tampered member.
+    - verifies `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=false`, `archive_report_metadata_verified=false`, and fail-closed reason `source_report_archive_sha256_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_member_bytes_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_member_bytes_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_member_bytes_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_member_bytes_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_metadata_parity_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385205`, `failure_count=0`, and archive SHA256 `6f3a96562b89660b2578b211ab719beab1f8fe5b8b0e77d409e97c9eaa4efbde`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_member_byte_drift"` => `1 passed, 103 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_member_bytes_20260603`.
+  - Certification boundary:
+    - this proves OCR-safe source-report archive member byte binding for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-03, OCR-safe fixed archive-member path parity):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archive verification fail closed when a report-level rewritten report or archived source-verifier JSON is relocated away from its canonical fixed ZIP member, even if the manifest file records and ZIP inventory are updated self-consistently.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_fixed_paths_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - added `source_report_verification_fixed_paths_verified` to the same verifier schema.
+    - rewritten reports must stay at `synthetic_ocr_confusion_report.json` or `transport_ocr_correction_replay_report.json`.
+    - archived source-verifier JSON members must stay at `synthetic_ocr_confusion_source_verification.json` or `transport_ocr_correction_replay_source_verification.json`.
+    - same-role alternate member relocation now fails with `archive_report_fixed_path_mismatch` or `source_report_verification_fixed_path_mismatch`.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - relocates the archived rewritten synthetic confusion report to `ocr_safe_confusion_report_rewritten/drifted.json` and updates manifest metadata so inventory and file metadata remain self-consistent.
+    - relocates the archived source-verification JSON to `ocr_safe_confusion_source_verification_report/drifted.json` and updates manifest metadata plus the verifier member's own `archive_path`.
+    - both tampered archives fail the new fixed-path gates without relying on missing/unexpected ZIP-member diagnostics.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_fixed_paths_20260603/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_fixed_paths_20260603/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_fixed_paths_20260603/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_fixed_paths_20260603/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_fixed_paths_verified=true`, `source_report_verification_fixed_paths_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=383810`, `failure_count=0`, and archive SHA256 `1344340241a41dda1bddda013c951fe40dead4bee0e31afc08459a737d8074b8`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "fixed_path_drift or ocr_safe_archive_confusion_evidence"` => `3 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `43 passed, 63 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_fixed_paths_20260603`.
+  - Certification boundary:
+    - this proves fixed archive-member path replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe requested-output path binding):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: make OCR-safe evidence archives avoid carrying operator-local `requested_output_file` paths from failed/suppressed correction replay reports, and fail closed if a tampered archive reintroduces such a path.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archived correction replay reports now clear `requested_output_file` when no correction output artifact was packaged.
+    - if an archived correction replay report does contain `requested_output_file`, verifier path binding now requires it to be a safe archive-relative member with role `correction_recovered_output`.
+    - tampered archives that reintroduce an absolute or operator-local requested-output path fail with `archived_report_path_not_archive_relative` before embedded correction replay is accepted.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - proves failed/suppressed correction replay archives clear unpackaged requested-output paths and still verify with `require_success=false`.
+    - proves tampered archives fail when a local requested-output path is injected into the archived correction replay report.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_requested_output_path_20260604/transport_ocr_correction_replay_report.json`.
+    - `.tmp_transport_ocr_safe_requested_output_path_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_requested_output_path_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_requested_output_path_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: correction replay stayed `success=false`, `output_file=null`, and `output_suppressed_reason=correction_replay_not_accepted`; archive verification with `require_success=false` succeeded with `archived_report_paths_verified=true`, `correction_replay_report_verified=true`, `verified_file_count=4`, `verified_total_size_bytes=99965`, `failure_count=0`, and archive SHA256 `56e480bfe68a9e8c37860dd85d342a678fc88510e25cc3cda4a074f60bdd7269`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "requested_output_path or drops_unpackaged_requested_output_path"` => `2 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "requested_output_path or drops_unpackaged_requested_output_path or archived_report_path"` => `4 passed, 104 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive_confusion_evidence or combined_evidence_cli or requested_output_path or drops_unpackaged_requested_output_path or archived_report_path or report_metadata_drift or source_rewrite"` => `8 passed, 100 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "not ocr_safe_archive"` => `63 passed, 45 deselected, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - full `tests\test_transport_modules.py -k "ocr_safe_archive"` and full `tests\test_transport_modules.py` exceeded the local wrapper timeout without failure output; split/focused runs above provide clean exit-code coverage for this slice.
+  - Certification boundary:
+    - this proves OCR-safe requested-output path hygiene for synthetic correction replay archives only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe archive source-path identity gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so duplicate or malformed `manifest.files[].source_path` identities cannot make deterministic source-report rewrites silently choose the wrong source-backed archive record.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_source_paths_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - source-backed prefix-role file records now require string, non-empty, unique source paths.
+    - fixed generated archive members such as rewritten reports and archived source-verifier JSON must not carry a source path.
+    - duplicate source-path identities fail closed with `archive_file_record_source_path_duplicate`; missing, unexpected, or non-string source paths have dedicated failure reasons.
+    - deterministic archive source-path map construction now preserves the first record for an identity rather than overwriting it if a tampered manifest duplicates source paths.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers an OCR-safe evidence archive manifest so two source-backed file records share the same `source_path`.
+    - leaves ZIP member bytes and file SHA256/byte-size metadata intact, proving the failure is source-path identity provenance rather than generic payload drift.
+    - asserts `archive_source_paths_verified=false`, `manifest_file_metadata_verified=true`, and failure reason `archive_file_record_source_path_duplicate`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_paths_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_paths_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_paths_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_paths_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_source_paths_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=383912`, `failure_count=0`, and archive SHA256 `920e67229d8c319abae93d6e9ab51dc0e6ab07d5f9450b949f29ab54b7852274`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "duplicate_source_path_identity or ocr_safe_archive_confusion_evidence"` => `2 passed, 107 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_paths_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe archive source-path identity provenance for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe report source-path provenance gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level `manifest.reports[].source_path` cannot drift away from the corresponding archived source-report file record while ZIP bytes and verifier metadata remain self-consistent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_source_paths_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - report records now require non-empty string `source_path` provenance.
+    - when source verification is required, report-level source path identity must match the archived source-report file record identity.
+    - mismatches fail closed with `archive_report_source_path_mismatch` and set `archive_report_metadata_verified=false`.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - tampers an OCR-safe evidence archive manifest so `manifest.reports[0].source_path` points at a different operator-local JSON path.
+    - leaves ZIP member bytes, manifest file records, source-verifier metadata, and embedded report replay otherwise coherent.
+    - asserts `archive_report_source_paths_verified=false`, `archive_report_metadata_verified=false`, `manifest_file_metadata_verified=true`, `archive_source_paths_verified=true`, and failure reason `archive_report_source_path_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_source_paths_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_source_paths_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_source_paths_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_source_paths_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_source_paths_verified=true`, `archive_report_metadata_verified=true`, `archive_source_paths_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384563`, `failure_count=0`, and archive SHA256 `ad63df5326afa222c5459a02a49a46b8441b51974040df84feeed93e058d7720`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "report_source_path_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 108 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive_combined_evidence_cli_verifies_replayably or report_source_path_drift"` => `2 passed, 108 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` => `47 passed, 63 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "not ocr_safe_archive"` => `63 passed, 47 deselected, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "archive_transport_evidence or replay_transport_evidence_archive or certify_capture_evidence_pipeline"` => `19 passed, 70 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "distortion or generated_page or reliable_airgap or profile"` => `7 passed, 82 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "capture_corpus or capture_kit or attach_capture or validate_capture or provenance or physical or perspective or ocr_only"` => `44 passed, 45 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "certify_entrypoint or certification_status or claims"` => `6 passed, 83 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "return_package"` => `6 passed, 83 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ingest_capture"` => `5 passed, 84 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - `git diff --check` => clean except existing CRLF conversion warnings in docs/manual files.
+    - Full unsplit `tests\test_transport_modules.py` and `tests\test_transport_certify.py` exceeded the local wrapper timeout, so the split runs above provide clean exit-code coverage.
+  - Certification boundary:
+    - this proves OCR-safe report source-path provenance binding for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe report-role uniqueness gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so duplicate or unknown `manifest.reports[]` roles cannot preserve replayability by editing summary report counters to match a tampered report inventory.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_roles_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - malformed `manifest.reports` inventories now fail `archive_report_roles_verified=false` and `archive_report_metadata_verified=false`.
+    - duplicate report roles now fail closed with `duplicate_archive_report_role`.
+    - unknown report roles now fail closed with `unknown_report_role`.
+    - duplicate/unknown role failures now fail the report metadata gate even when `summary.report_count` and `summary.report_roles` are self-consistent with the tampered manifest.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `archive_report_roles_verified=true`.
+    - tamper test appends a duplicate `ocr_safe_confusion_report` entry and updates summary report/source-verification counters to match.
+    - the verifier still fails with `archive_report_roles_verified=false` and `archive_report_metadata_verified=false`, while `summary_report_count_verified=true` and `summary_report_roles_verified=true` prove the failure comes from report-role uniqueness, not summary parity.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_roles_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_roles_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_roles_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384913`, `failure_count=0`, and archive SHA256 `d3c1cbd8afc019913b73f3b97f988e35ab081e80791d13403b47ae37210990e7`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "duplicate_report_role or ocr_safe_archive_confusion_evidence"` => `2 passed, 109 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (duplicate_report_role or summary_report or summary_role or report_source_path or source_path_identity or source_paths)"` => `5 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (report_metadata or report_state or fixed_path or source_report_member or source_report_metadata or source_verifier)"` => `14 passed, 97 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or file_role or certification_boundary or generated_timestamp or manifest_parameter)"` => `13 passed, 98 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_roles_20260604`.
+    - one unsplit `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` wrapper timed out before returning output, so the split runs above provide clean exit-code coverage for the affected archive groups.
+  - Certification boundary:
+    - this proves OCR-safe report-role uniqueness replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe report-schema binding gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so a report entry cannot keep a valid role while drifting to the wrong schema and still leave report metadata looking clean.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `archive_report_schemas_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - report-entry schema mismatch now fails `archive_report_schemas_verified=false` and `archive_report_metadata_verified=false`.
+    - embedded rewritten-report schema mismatch, unreadable report JSON, and non-object report JSON now also fail the schema/metadata gate.
+    - malformed report inventories and unknown report roles also fail the schema gate so auditors do not see a green schema result when schema binding could not be established.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `archive_report_schemas_verified=true`.
+    - tamper test changes `manifest.reports[0].schema` to the wrong known schema while leaving role and summary counters unchanged.
+    - the verifier fails with `archive_report_schemas_verified=false` and `archive_report_metadata_verified=false`, while `archive_report_roles_verified=true`, `summary_report_count_verified=true`, and `summary_report_roles_verified=true` prove the failure comes from schema binding, not report-role or summary parity.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_schemas_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `archive_file_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384098`, `failure_count=0`, and archive SHA256 `e67b0432a5d657c3e7b82c94362ac56ab1125a4bc5ee1f618e27a9663a1e7c06`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "report_schema_drift or duplicate_report_role or ocr_safe_archive_confusion_evidence"` => `3 passed, 109 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (report_schema_drift or duplicate_report_role or summary_report or summary_role or report_source_path or source_path_identity or source_paths or report_metadata or report_state or fixed_path or source_report_member or source_report_metadata or source_verifier)"` => `20 passed, 92 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or file_role or certification_boundary or generated_timestamp or manifest_parameter)"` => `13 passed, 99 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_schemas_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe report schema/role binding replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe source-verifier schema binding gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level and archived source-verifier JSON cannot drift to the wrong verifier schema while source-verifier archive digest metadata remains self-consistent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_schemas_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - report-level `manifest.reports[].source_verification.schema` now fails the source-verification schema/state gates when it does not match the expected verifier schema for the report role.
+    - archived source-verification JSON member schema drift now fails `source_report_verification_schemas_verified=false`, `source_report_verification_states_verified=false`, and `source_report_verification_archive_metadata_verified=false`, even when archive member SHA256/size metadata is updated to match the tampered member.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `source_report_verification_schemas_verified=true`.
+    - manifest-level source-verifier schema drift fails with `source_report_verification_schema_mismatch` while archive metadata remains otherwise coherent.
+    - archived source-verifier JSON member schema drift fails with `source_report_verification_member_schema_mismatch` while file digest/size and archive-entry metadata stay coherent, proving the failure comes from schema binding rather than payload drift.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_schema_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384842`, `failure_count=0`, and archive SHA256 `6f859baa51d3f131b01f126a385f44c645a23245039ddfcd4fd3842178e30454`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_schema or source_verifier_member_schema or ocr_safe_archive_confusion_evidence"` => `3 passed, 111 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_schema_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier schema binding replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe source-verifier role ownership gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived source-verification JSON file records must be owned by the expected verifier role for the report they attest.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_roles_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - source-verifier file records now fail the role gate when the expected source-verifier record is missing or the archive member is declared under a wrong source-verifier role, even when ZIP bytes and manifest summary role counters are updated self-consistently.
+    - the verifier still keeps schema/state/archive metadata gates separate, so wrong-role ownership is distinguishable from source-verifier schema drift, digest drift, or malformed state.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `source_report_verification_roles_verified=true`.
+    - a tampered manifest that changes only the archived source-verifier file record role, while updating summary role counters and leaving ZIP bytes intact, fails with `source_report_verification_file_record_missing` and `source_report_verification_file_role_mismatch` while `summary_roles_verified=true`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_roles_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_roles_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_manifest_entry_set_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384749`, `failure_count=0`, and archive SHA256 `a112dafff1ab4054b39deaa3a64247c011af005b939710a15e2d635e0c813685`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_file_role or source_verifier_schema or source_verifier_member_schema or ocr_safe_archive_confusion_evidence"` => `4 passed, 111 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_verification or report_schema_drift or duplicate_report_role or source_path_identity or report_source_path or confusion_evidence)"` => `17 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_roles_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier role ownership replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-04, OCR-safe source-report role ownership gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived original source-report file records must be owned by the expected source-report role for the report they attest.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_archive_roles_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - source-report archive file records now fail the role gate when the expected source-report record is missing or the archive member is declared under a wrong source-report role, even when ZIP bytes and manifest summary role counters are updated self-consistently.
+    - the verifier still keeps role ownership, source-report entry metadata, source-report metadata parity, source-verifier role ownership, and embedded report replay separate for audit diagnosis.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification now asserts `source_report_archive_roles_verified=true`.
+    - a tampered manifest that changes only the archived source-report file record role, while updating summary role counters and leaving ZIP bytes intact, fails with `source_report_archive_file_record_missing` and `source_report_archive_file_role_mismatch`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_roles_20260604/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_roles_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_verification_roles_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384563`, `failure_count=0`, and archive SHA256 `05c17f4438c23b9d02ed847aa617024528abda16de173ec42794020f4f4a1f67`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_file_role or source_report_file_metadata or source_verifier_file_role or ocr_safe_archive_confusion_evidence"` => `4 passed, 112 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verifier or source_report_verification or report_schema_drift or duplicate_report_role or confusion_evidence)"` => `19 passed, 97 deselected`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_roles_20260604`.
+  - Certification boundary:
+    - this proves OCR-safe source-report role ownership replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier report binding gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level and archived source-verifier JSON must remain bound to the archived source report they verify.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_report_binding_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - manifest-level `source_verification.report_sha256`, archived source-verifier `report_sha256`, and archived source-verifier `report_file` now fail the binding gate when they drift from the owning archived source-report member, even if ZIP inventory, manifest file records, source-verifier archive-entry metadata, and embedded report replay remain otherwise coherent.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive verification asserts `source_report_verification_report_binding_verified=true`.
+    - a tampered archive that rewrites the source-verifier to point at a different self-consistent archive member fails with `source_report_verification_sha256_mismatch`, `source_report_verification_member_report_sha256_mismatch`, and `source_report_verification_report_path_mismatch` while inventory and file metadata gates stay true.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_report_binding_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_report_binding_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385568`, `failure_count=0`, and archive SHA256 `4f849c04fb6118bf76ed9c01124c3516ebf12b6620cae592fc7d2783ecede577`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_report_binding_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 115 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_verification or report_binding or report_schema_drift or duplicate_report_role or source_report or source_path_identity or report_source_path or confusion_evidence)"` => `22 passed, 95 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `git diff --check` => passed with existing CRLF conversion warnings in docs/manual files.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier report binding replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-report nested role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level `source_report_archive.role` metadata cannot drift from the expected archived source-report role while ZIP bytes and manifest file records remain otherwise coherent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - `source_report_archive_roles_verified` now also fails on wrong nested `manifest.reports[].source_report_archive.role`, not only wrong `manifest.files[]` source-report file-record ownership.
+    - nested source-report role drift now emits `source_report_archive_metadata_role_mismatch`, marks `source_report_archive_metadata_parity_verified=false`, and preserves separate `source_report_archive_entry_metadata_verified=true` when the archive file record itself remains correct.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - a tampered archive that changes only `source_report_archive.role` fails `source_report_archive_roles_verified` and `source_report_archive_metadata_parity_verified` while `archive_inventory_verified`, `manifest_file_metadata_verified`, `summary_roles_verified`, and `source_report_archive_entry_metadata_verified` remain true.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_nested_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_roles_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385103`, `failure_count=0`, and archive SHA256 `c74d2b10b79b0e5eeee1cb2fe47dfa8373db35a89cef57e65c6ada2e2c1348a5`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_nested_role_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 116 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verifier or source_report_verification or report_binding or report_schema_drift or duplicate_report_role or confusion_evidence)"` => `21 passed, 97 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_nested_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-report nested role metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier archive-entry aggregate metadata gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so source-verifier archive-entry file-record/member drift also fails the aggregate archive report metadata gate, not only the dedicated source-verifier entry gate.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - source-verifier file-record missing, member missing, archive SHA256 mismatch, archive byte-size mismatch, file-record role drift, file-record SHA256 drift, file-record byte-size drift, and unreferenced source-verifier records now mark `archive_report_metadata_verified=false` as well as `source_report_verification_archive_entry_metadata_verified=false`.
+    - this keeps `archive_report_metadata_verified` aligned with all replay-critical report/source-verifier manifest metadata, while preserving the more specific source-verifier entry and role gates for diagnosis.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - existing missing source-verifier member, unreferenced source-verifier record, source-verifier wrong-role record, and source-verifier fixed-path drift tests now assert `archive_report_metadata_verified=false`.
+    - added a source-verifier member digest drift test that changes only the archived source-verifier JSON member bytes while leaving manifest metadata unchanged; verification fails with `source_report_verification_archive_sha256_mismatch`, `source_report_verification_file_sha256_mismatch`, `source_report_verification_archive_entry_metadata_verified=false`, and `archive_report_metadata_verified=false`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385196`, `failure_count=0`, and archive SHA256 `5d5b3fd5409794c4d4b716e6601cc062817f15d2911735024836c37eccc797ce`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_member_digest_drift or source_verifier_file_role_drift or source_verification_member_missing or unreferenced_source_verification_records or source_verifier_fixed_path_drift or ocr_safe_archive_confusion_evidence"` => `6 passed, 113 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_verification or report_binding or source_report or member_digest or file_role or fixed_path)"` => `21 passed, 98 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or certification_boundary or generated_timestamp or manifest_parameter or summary)"` => `16 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - one unsplit `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive"` wrapper timed out, so the split runs above provide clean exit-code coverage for the affected archive groups.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_entry_gate_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier archive-entry aggregate metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-report archive-entry aggregate metadata gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived original source-report file-record/member drift also fails the aggregate archive report metadata gate, not only the dedicated source-report entry/role gates.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - source-report file-record missing, wrong source-report file role, source-report ZIP member missing, source-report file-record SHA256 drift, source-report file-record byte-size drift, and unreferenced source-report records now mark `archive_report_metadata_verified=false`.
+    - this keeps `archive_report_metadata_verified` aligned with all replay-critical report/source-report/source-verifier manifest metadata, while preserving `source_report_archive_entry_metadata_verified` and `source_report_archive_roles_verified` as specific diagnostic gates.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - existing source-report file-record metadata drift and wrong-role tests now assert `archive_report_metadata_verified=false`.
+    - added a source-report member missing test that removes the archived original source-report ZIP member while leaving manifest metadata intact; verification fails with `archive_inventory_verified=false`, `archive_report_metadata_verified=false`, `source_report_archive_entry_metadata_verified=false`, and `source_report_archive_member_missing`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_entry_gate_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_archive_roles_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385010`, `failure_count=0`, and archive SHA256 `6e8467e7acac5fcf2158ddeb6d539517119eead32852b57b5337ab69dda1c6bd`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_member_missing or source_report_file_metadata or source_report_file_role_drift or unreferenced_source_verification_records or source_report_member_byte_drift"` => `5 passed, 115 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verification or archive_report or member_missing or file_metadata or file_role or report_binding)"` => `17 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_entry_gate_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-report archive-entry aggregate metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier nested role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level `source_verification.role` metadata cannot drift from the expected archived source-verifier role while ZIP bytes, manifest file records, and summary role counters remain otherwise coherent.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archive manifests now write `manifest.reports[].source_verification.role` with the expected source-verifier archive role, such as `ocr_safe_confusion_source_verification_report`.
+    - verification now fails `source_report_verification_roles_verified=false`, `source_report_verification_archive_entry_metadata_verified=false`, and aggregate `archive_report_metadata_verified=false` with `source_report_verification_metadata_role_mismatch` when nested source-verifier role metadata drifts, while preserving separate file-record role checks.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive evidence now asserts `source_verification.role` is written.
+    - a tampered archive that changes only `manifest.reports[].source_verification.role` fails the source-verifier role gate while `archive_inventory_verified`, `manifest_file_metadata_verified`, `summary_roles_verified`, and archived verifier JSON metadata remain true.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_roles_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `summary_roles_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385289`, `failure_count=0`, and archive SHA256 `a513fe06ec17d976150d7d625a91ed19de294e75fed827f35b01aeb62488604f`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_nested_role_drift or source_verification_report_is_archived or ocr_safe_archive_confusion_evidence"` => `3 passed, 118 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_verification or source_report or archive_report or report_binding or role or schema)"` => `31 passed, 90 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (confusion_evidence or combined_evidence or requested_output or archive_inventory or file_metadata or file_payload or certification_boundary or generated_timestamp or manifest_parameter or summary)"` => `16 passed, 105 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ingest_capture_corpus or attach_capture_corpus or validate_capture_corpus or certify_capture_evidence_pipeline or capture_return_package"` => `25 passed, 64 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "not archive_transport_evidence and not verify_transport_evidence_archive and not replay_evidence_archive and not certification_status and not ingest_capture_corpus and not attach_capture_corpus and not validate_capture_corpus and not certify_capture_evidence_pipeline and not capture_return_package"` => `49 passed, 40 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "archive_transport_evidence"` => `6 passed, 83 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "verify_transport_evidence_archive or replay_transport_evidence_archive or cli_archive_evidence or cli_verify_evidence_archive or cli_replay_evidence_archive"` => `7 passed, 82 deselected`, with one expected duplicate-ZIP-member warning in the tamper test.
+    - Individual certification-status tests: `requires_exactly_one_source` and `rejects_archive_without_verification` passed; CLI certification-status command tests passed `2 passed`.
+    - Promotion suite passed: `95 passed, 1 skipped`.
+    - Mainline suite passed: `85 passed, 6 skipped`.
+    - The full unsplit `tests/test_transport_certify.py` and two heavier certification-status individual tests timed out under the local wrapper and were stopped; split runs above provide clean exit-code coverage for affected groups except those two heavier status tests.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_nested_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe source-verifier nested role metadata replay integrity for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-verifier member role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived source-verification JSON member itself cannot lose or drift its expected source-verifier role while manifest role/SHA/size bindings remain self-consistent.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archived source-verification JSON members now include their expected archive role, such as `ocr_safe_confusion_source_verification_report`.
+    - verification now fails `source_report_verification_roles_verified=false`, `source_report_verification_archive_metadata_verified=false`, and aggregate `archive_report_metadata_verified=false` with `source_report_verification_member_role_mismatch` when the archived verifier JSON member role drifts, even if manifest file metadata, report-level source-verification metadata, and ZIP bytes are otherwise hash-coherent.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive evidence now asserts the archived source-verification JSON carries `role`.
+    - a tampered archive that changes only the archived verifier JSON member role, then updates the manifest file record and report-level verifier archive SHA/size, fails the member-role gate without falling back to generic SHA mismatch failures.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_roles_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `archive_report_metadata_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385348`, `failure_count=0`, and archive SHA256 `b9acd61f2491f2e9246749ce870da28a452d5bf6b7b2e46cca39a9e3426f0e55`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_member_role_drift or source_verification_report_is_archived or ocr_safe_archive_confusion_evidence"` => `3 passed, 119 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_verification or source_report or archive_report or report_binding or role or schema or confusion_evidence)"` => `33 passed, 89 deselected`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_member_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier member role provenance for synthetic OCR-safe evidence only.
+    - it intentionally requires regenerated OCR-safe archives to include the archived source-verifier `role`; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe rewritten report member role gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived rewritten report JSON member itself cannot drift from the expected archive-member role while manifest report metadata, file records, ZIP bytes, and summary counters remain otherwise coherent.
+  - Hardened `soenc transport archive-ocr-safe-evidence` and `verify-ocr-safe-evidence-archive`:
+    - archived rewritten report JSON members now include their expected fixed archive role, such as `ocr_safe_confusion_report_rewritten`.
+    - source-report-to-rewritten-report replay parity now includes that deterministic role stamp.
+    - verification now fails `archive_report_roles_verified=false` and aggregate `archive_report_metadata_verified=false` with `archive_report_member_role_mismatch` when the archived rewritten report member role drifts, even if report-level SHA256/size metadata and manifest file metadata are updated to match the tampered member.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive archive evidence asserts the archived rewritten report JSON carries `role`.
+    - a tampered archive that changes only the archived rewritten report JSON member role, then updates manifest report/file SHA256 and byte-size metadata, fails the member-role gate without generic SHA mismatch failures.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_member_role_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_roles_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `archive_inventory_verified=true`, `manifest_file_metadata_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=384560`, `failure_count=0`, and archive SHA256 `20a554ffbcdbd7f1a242dfa3fe6460919d2630789c3635b3c6580edc5e84788a`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verification_report_is_archived or report_member_role_drift"` => `2 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_verification or source_report or archive_report or report_binding or role or schema or confusion_evidence or source_rewrite)"` => `35 passed, 88 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_member_role_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe archived rewritten report member role provenance for synthetic OCR-safe evidence only.
+    - it intentionally requires regenerated OCR-safe archives to include the archived rewritten report `role`; it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-05, OCR-safe source-report member state gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived original source-report JSON member cannot drift to the wrong source-report schema or success state while source-report file metadata, source-verifier metadata, ZIP bytes, and summary counters remain otherwise coherent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_archive_member_state_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - archived original source-report members must parse as JSON objects.
+    - archived original source-report members must use the expected schema for the owning report role.
+    - archived original source-report members must carry a boolean `success` field that matches `manifest.reports[].success`.
+    - schema/state drift now fails aggregate `archive_report_metadata_verified=false` in addition to the specific source-report member-state gate.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive OCR-safe archive evidence now asserts `source_report_archive_member_state_verified=true`.
+    - a tampered archive changes the archived original source-report member schema to the wrong known report schema, then recomputes source-report SHA256/size metadata, source-verifier `report_sha256` and source-report archive metadata, verifier archive SHA256/size metadata, file records, and summary total size.
+    - verification still fails with `source_report_archive_member_state_verified=false` and `source_report_archive_member_schema_mismatch`, while source-report entry metadata, source-report metadata parity, source-verifier archive metadata, source-verifier entry metadata, and source-verifier report binding stay true.
+  - Updated docs/handoff:
+    - `docs/IMPLEMENTATION_TASK_CARDS.md`.
+    - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`.
+    - `docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md`.
+    - `docs/NEXT_ITERATION_UNIVERSAL_PROMPT.md`.
+    - `QRCODE_AIRGAP_MANUAL.md`.
+    - `USAGE_MANUAL.md`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_report_member_state_20260605/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_archive_member_state_verified=true`, `archive_report_metadata_verified=true`, `archive_report_source_rewrite_verified=true`, `source_report_archive_entry_metadata_verified=true`, `source_report_archive_metadata_parity_verified=true`, `source_report_archive_roles_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385304`, `failure_count=0`, and archive SHA256 `1a9a7ead043212afffa52fea0b0e01f94077210518e8ad4d98102c7b1deebbfd`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_report_member_schema_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 122 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report or source_verification or archive_report or report_binding or source_rewrite or schema)"` => `18 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_report_member_schema_drift or source_report_member_byte_drift or source_report_member_missing or source_report_file_metadata or source_report_metadata_parity or source_report_nested_role)"` => `6 passed, 118 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verification or archive_report or report_binding or source_rewrite or schema or role)"` => `21 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint"` => `15 passed, 74 deselected`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_report_member_state_20260605`.
+  - Certification boundary:
+    - this proves OCR-safe archived original source-report member schema/state provenance for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verifier member state gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so the archived source-verification JSON member cannot drift to a different success/failure state while source-verifier file metadata, ZIP bytes, and summary counters remain otherwise coherent.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - added `source_report_verification_member_state_verified` to `enc2sop-transport-ocr-safe-evidence-archive-verification/v1`.
+    - archived source-verification JSON members must parse as JSON objects.
+    - archived source-verification JSON members must use the expected verifier schema for the owning source report.
+    - archived source-verification JSON members must keep `success` and `failure_count` parity with `manifest.reports[].source_verification`.
+    - verifier-member schema/state drift now fails aggregate `archive_report_metadata_verified=false` in addition to the specific member-state/schema gates, even when archive entry SHA256/byte-size metadata is recomputed.
+  - Added regression coverage in `tests/test_transport_modules.py`:
+    - positive OCR-safe archive evidence now asserts `source_report_verification_member_state_verified=true`.
+    - a tampered archive rewrites the archived source-verifier JSON member to `success=false` and `failure_count=1`, then recomputes the source-verifier archive SHA256/byte-size metadata, file record, and summary total size.
+    - verification still fails with `source_report_verification_member_state_verified=false`, `source_report_verification_member_success_mismatch`, and `source_report_verification_member_failure_count_mismatch`, while source-verifier archive-entry metadata, archive inventory, manifest file metadata, and summary total-size checks stay true.
+  - Updated docs/handoff:
+    - `docs/IMPLEMENTATION_TASK_CARDS.md`.
+    - `docs/PRODUCT_LAUNCH_ROADMAP_2026-05-25.md`.
+    - `docs/PLATFORM_LAUNCH_ASSESSMENT_2026-05-06.md`.
+    - `docs/NEXT_ITERATION_UNIVERSAL_PROMPT.md`.
+    - `QRCODE_AIRGAP_MANUAL.md`.
+    - `USAGE_MANUAL.md`.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_member_state_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `source_report_verification_member_state_verified=true`, `archive_report_metadata_verified=true`, `source_report_verification_archive_entry_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_member_state_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385490`, `failure_count=0`, and archive SHA256 `006fba179a232af4a915641a1459a76f48a083fb3ac7217f0d6e6043705552eb`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_member_state_drift or ocr_safe_archive_confusion_evidence"` => `2 passed, 123 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier_member or source_verifier_state or source_verifier_schema or source_verifier_nested_role or source_verifier_file_role or source_report_member)"` => `12 passed, 113 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (archive_report or report_binding or source_rewrite or duplicate_report_role or summary_report_role)"` => `4 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (inventory or file_metadata or file_payload_metadata or external_manifest or absolute_archived_report_path or local_requested_output_path or summary_file or summary_source_verification or manifest_parameter or file_role_semantic or certification_boundary or generated_timestamp)"` => `14 passed, 111 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (correction_replay or combined or local_requested_output_path)"` => `3 passed, 122 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_member_state_20260606`.
+    - Full `tests/test_transport_modules.py` and `tests/test_transport_certify.py` wrapper-level runs timed out locally; the split runs above provide clean exit-code coverage for the touched transport archive/certification surface.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier member schema/state provenance for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verifier binding aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so archived source-verifier JSON report/path/SHA/size binding drift fails the aggregate archive report metadata gate, not only the narrower source-verifier binding gates.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - archived source-verifier JSON `report_sha256`, `report_file`, `archive_path`, and `source_report_archive_*` drift now marks `archive_report_metadata_verified=false`.
+    - dedicated diagnostic fields remain separate: `source_report_verification_report_binding_verified` for report SHA/path binding and `source_report_verification_archive_metadata_verified` for archived verifier metadata.
+    - this preserves existing replay diagnostics while making the aggregate archive-report metadata gate fail closed for replay-critical verifier-member binding drift.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - source-verifier report-binding drift now asserts `archive_report_metadata_verified=false`.
+    - correction-replay source-verifier archive metadata drift now asserts `archive_report_metadata_verified=false` while archive-entry metadata can still stay true when file-record metadata is coherent.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_binding_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_member_state_verified=true`, `source_report_archive_member_state_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385025`, `failure_count=0`, and archive SHA256 `fd236b46a7802fcc763280703e66c675ade7700d38f4946f4bb12e54f578c4cb`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_report_binding_drift or correction_replay_source_verifier_metadata_drift"` => `2 passed, 123 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_member or report_binding or source_rewrite)"` => `19 passed, 106 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (archive_report or duplicate_report_role or summary_report_role or report_schema or report_member_role)"` => `4 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py` => `125 passed, 17 subtests passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_binding_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe archived source-verifier binding aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verifier manifest-state aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: no `GH_TOKEN`/`GITHUB_TOKEN` is set and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so manifest-level `source_verification` schema/state/report binding drift also fails the aggregate archive report metadata gate, matching the already hardened archived source-verifier JSON member behavior.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - report-level `source_verification_required`, `source_verification.schema`, `source_verification.success`, `source_verification.failure_count`, and `source_verification.report_sha256` drift now marks `archive_report_metadata_verified=false`.
+    - dedicated diagnostics remain separate: `source_report_verification_schemas_verified`, `source_report_verification_states_verified`, and `source_report_verification_report_binding_verified`.
+    - this preserves narrow verifier diagnostics while making aggregate archive-report metadata fail closed for replay-critical manifest source-verifier envelope drift.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - `test_ocr_safe_archive_verification_fails_on_source_verifier_schema_drift` now asserts `archive_report_metadata_verified=false` for report-level verifier schema drift.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_archive_metadata_verified=true`, `source_report_verification_member_state_verified=true`, `source_report_archive_member_state_verified=true`, `source_report_archive_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `source_report_verification_count=1`, `verified_file_count=92`, `verified_total_size_bytes=385769`, `failure_count=0`, and archive SHA256 `7ba606e9eb5ebd5c361caae61e9f946b7df047d0cbaa6f3d9580899fcfdbecff`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "source_verifier_schema_drift or source_verification_required_flag or source_report_verification_missing or source_verification_sha256_mismatch"` => `1 passed, 124 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (source_verifier or source_report_member or report_binding or source_rewrite or archive_report or duplicate_report_role or summary_report_role or report_schema or report_member_role)"` => `23 passed, 102 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verifier_manifest_rollup_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe manifest-level source-verifier schema/state/report-binding aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe manifest summary aggregate rollup):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: `GH_TOKEN`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are unset, and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so all replay-critical manifest summary inventory drift fails the aggregate archive report metadata gate, not only dedicated summary diagnostics.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - malformed or mismatched `summary.report_count` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.report_roles` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.file_count` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.total_size_bytes` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.roles` now marks `archive_report_metadata_verified=false`.
+    - dedicated diagnostics remain available through `summary_report_count_verified`, `summary_report_roles_verified`, `summary_file_count_verified`, `summary_total_size_verified`, and `summary_roles_verified`.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - `test_ocr_safe_archive_verification_fails_on_summary_role_drift` now asserts aggregate metadata failure while archive inventory and file metadata stay clean.
+    - `test_ocr_safe_archive_verification_fails_on_summary_file_inventory_drift` now asserts aggregate metadata failure while archive inventory and file metadata stay clean.
+    - `test_ocr_safe_archive_verification_fails_on_summary_report_role_drift` now asserts aggregate metadata failure while archive inventory and file metadata stay clean.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_summary_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `summary_file_count_verified=true`, `summary_total_size_verified=true`, `summary_roles_verified=true`, `summary_report_count_verified=true`, `summary_report_roles_verified=true`, `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `archive_report_states_verified=true`, `archive_report_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_source_rewrite_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384188`, `failure_count=0`, and archive SHA256 `994285b91a8269fa13a1774b45bb7e4e12a0884320a831b2fa2a81e3df043879`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_summary'; python -m pytest -q tests\test_transport_modules.py -k "summary_role_drift or summary_file_inventory_drift or summary_report_role_drift or summary_source_verification_drift"` => `4 passed, 123 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_ocr_archive'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (summary or archive_report or source_verifier or source_report_member)"` => `22 passed, 105 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_sidecar'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_certify_focus'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_summary_rollup_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe manifest summary aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe source-verification summary aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: `GH_TOKEN`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are unset.
+  - Goal: harden OCR-safe evidence archive verification so manifest summary source-verification inventory drift fails the aggregate archive report metadata gate, not only the dedicated summary diagnostics.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - malformed or mismatched `summary.source_report_verification_count` now marks `archive_report_metadata_verified=false`.
+    - malformed or mismatched `summary.source_report_verification_roles` now marks `archive_report_metadata_verified=false`.
+    - dedicated gates remain available: `summary_source_report_verification_count_verified` and `summary_source_report_verification_roles_verified`.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - `test_ocr_safe_archive_verification_fails_on_summary_source_verification_drift` now asserts the aggregate metadata gate fails while role/schema/inventory/file metadata gates stay clean.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `summary_source_report_verification_count_verified=true`, `summary_source_report_verification_roles_verified=true`, `source_report_verification_count=1`, `source_report_verification_member_state_verified=true`, `source_report_verification_schemas_verified=true`, `source_report_verification_states_verified=true`, `source_report_verification_report_binding_verified=true`, `source_report_verification_roles_verified=true`, `source_report_archive_member_state_verified=true`, `archive_report_schemas_verified=true`, `archive_report_roles_verified=true`, `archive_report_source_rewrite_verified=true`, `confusion_report_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=386048`, `failure_count=0`, and archive SHA256 `f0b256beb2ffdc501cf86341e3bb89bf71cc67d1ea8c8673da50cf1bb0cfc724`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "summary_source_verification_drift or source_verifier_schema_drift or source_verifier_file_role_drift or source_verifier_nested_role_drift or source_verifier_member_state or source_verifier_binding or source_verifier_manifest"` => `5 passed, 120 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "ocr_safe_archive and (summary_source_verification_drift or source_verifier or source_report_member or report_binding or archive_report or duplicate_report_role or summary_report_role or report_schema or report_member_role)"` => `23 passed, 102 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - `git diff --check` => clean except existing CRLF conversion warnings in docs/manual files.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_source_verification_summary_rollup_20260606`.
+  - Certification boundary:
+    - this proves OCR-safe source-verification summary aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+- Notes (2026-06-06, OCR-safe rewritten-report state aggregate gate):
+  - Selected card: `ENC-P0-019` because live GitHub protected-branch/environment execution for `ENC-P0-016` remains unavailable in the current environment: `GH_TOKEN`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are unset, and `gh auth status` reports an invalid keyring token for github.com account `saksim`.
+  - Goal: harden OCR-safe evidence archive verification so report-level or embedded rewritten-report success-state drift fails the aggregate archive report metadata gate, not only the dedicated report-state diagnostic.
+  - Hardened `soenc transport verify-ocr-safe-evidence-archive`:
+    - malformed `manifest.reports[].success` now marks `archive_report_metadata_verified=false` in addition to `archive_report_states_verified=false`.
+    - malformed or mismatched archived rewritten-report JSON `success` now marks `archive_report_metadata_verified=false` in addition to `archive_report_states_verified=false`.
+    - dedicated state diagnostics remain available through `archive_report_states_verified`.
+  - Updated regression coverage in `tests/test_transport_modules.py`:
+    - added a manifest-only report-success type drift regression that keeps source-verifier state clean while requiring `archive_report_metadata_verified=false`.
+    - added a self-consistent embedded rewritten-report success type drift regression where SHA256/size metadata is recomputed but aggregate report metadata still fails.
+  - Local synthetic evidence:
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/synthetic_ocr_confusion_report.json`.
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/ocr_safe_evidence_archive.zip`.
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/ocr_safe_evidence_archive_manifest.json`.
+    - `.tmp_transport_ocr_safe_report_state_rollup_20260606/ocr_safe_evidence_archive_verification.json`.
+    - result: archive verification succeeded with `archive_report_metadata_verified=true`, `archive_report_states_verified=true`, `archive_report_roles_verified=true`, `archive_report_schemas_verified=true`, `archive_report_source_rewrite_verified=true`, `source_report_verification_count=1`, `confusion_report_verified=true`, `verified_file_count=92`, `verified_total_size_bytes=384653`, `failure_count=0`, and archive SHA256 `06d7a64e0be1af6eb05a16519bbc0e699fb1760e91bbdc381a04c6cc5fe2145d`.
+  - Verification:
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m py_compile enc2sop\transport\recover.py tests\test_transport_modules.py qrcode_helper.py` => passed.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache'; python -m pytest -q tests\test_transport_modules.py -k "report_success_type_only or report_member_success_type or report_state_type_drift or source_verifier_state_type_drift"` => `6 passed, 121 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_modules'; python -m pytest -q tests\test_transport_modules.py -k "report_success_type_only or report_member_success_type or report_state_type_drift or source_verifier_state_type_drift or ocr_safe_archive and (source_verifier or source_report_member or archive_report or report_member or summary_source_verification)"` => `24 passed, 103 deselected`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_sidecar'; python -m pytest -q tests\test_qrcode_helper_sidecar.py` => `36 passed`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_certify_focus'; python -m pytest -q tests\test_transport_certify.py -k "ocr_safe or capture_evidence or certify_entrypoint or archive_transport_evidence or verify_transport_evidence_archive"` => `23 passed, 66 deselected, 1 expected duplicate-ZIP-member warning`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_promotion'; python -m pytest -q tests\test_promotion_artifacts.py tests\test_soenc_cli.py tests\test_release_promotion_workflow.py` => `95 passed, 1 skipped`.
+    - `$env:PYTHONPYCACHEPREFIX='C:\tmp\enc2sop_pycache_mainline'; python -m pytest -q tests\test_encryption_helper.py tests\test_toolchain_profile.py tests\test_soenc_cli.py` => `85 passed, 6 skipped`.
+    - Manual CLI `certify-ocr-confusion`, `archive-ocr-safe-evidence --require-confusion-report --require-source-report-verification`, and `verify-ocr-safe-evidence-archive --manifest-file ... --require-confusion-report --require-source-report-verification` passed with `.tmp_transport_ocr_safe_report_state_rollup_20260606`.
+    - The unsplit transport suite timed out under the local tool wrapper after completing for too long, so transport verification is represented by the focused changed slices plus the sidecar suite.
+  - Certification boundary:
+    - this proves OCR-safe rewritten-report success-state aggregate metadata behavior for synthetic OCR-safe evidence only.
+    - it does not certify real camera/photo, physical print-scan, or backend-specific OCR transfer; those still require actual capture/backend reports, archive verification/replay, and `certification-status --require-certified-claim ...`.
+  - Remaining product scope:
+    - run strict return-package/capture evidence pipelines against actual physical print-scan and real-camera raw/corrected captures when available.
+    - run a real sidecar-free OCR-only corpus/backend with `--require-ocr-only-backend --require-certified-claim backend-specific-ocr-only`.
+    - keep additional OCR-safe hardening clearly labeled synthetic/testable unless real capture/backend evidence is measured.
+
+### CARD `ENC-P0-013`
+
+- Status: `done`
+- Goal: make protected-branch/environment rollout validation executable and fail-closed in repository automation flows
+- Type: launch governance + operational hardening
+- Depends on: `ENC-P0-012`
+- Main files:
+  - `enc2sop/cli.py`
+  - new `enc2sop/promotion_audit.py`
+  - new `docs/PROMOTION_ROLLOUT_POLICY.json`
+  - release governance tests and runbook docs
+- Deliverables:
+  - first-class `soenc audit-promotion` command
+  - versioned promotion rollout policy contract for required branch checks, environment reviewers, and CI approval-key secret evidence
+  - fail-closed audit report artifact for promotion readiness checks
+  - focused tests for pass/fail audit behavior
+- Acceptance:
+  - audit exits non-zero when branch/environment/secret evidence does not satisfy policy
+  - audit reports include actionable failure reasons and summary counts
+  - policy defaults validate current `release_promotion.yml` enforcement fragments
+- Notes (2026-05-10, iteration 15):
+  - Added promotion-audit module `enc2sop/promotion_audit.py`:
+    - versioned policy/evidence/report schemas:
+      - `enc2sop-promotion-policy/v1`
+      - `enc2sop-promotion-evidence/v1`
+      - `enc2sop-promotion-audit-report/v1`
+    - validates required branch status checks, protected environment reviewer thresholds, required secret evidence, and workflow fragment invariants.
+    - emits `promotion_audit_report.json` with pass/fail summary and categorized failures.
+  - Added new unified CLI command in `enc2sop/cli.py`:
+    - `soenc audit-promotion --evidence-file ... [--policy-file ...] [--workflow-file ...] [--report-file ...]`
+    - default policy path: `docs/PROMOTION_ROLLOUT_POLICY.json`.
+    - returns exit code `1` on policy violations (fail closed), `0` on pass.
+  - Added baseline policy file `docs/PROMOTION_ROLLOUT_POLICY.json` capturing:
+    - required branch checks for `main` and `release/**`.
+    - required environment reviewer floor for `production-promotion`.
+    - required approval-key secret evidence (`SOENC_RELEASE_APPROVAL_KEY_B64`).
+    - required workflow fragments in `.github/workflows/release_promotion.yml`.
+  - Added focused CLI regression tests in `tests/test_soenc_cli.py`:
+    - pass case with fully compliant evidence payload.
+    - fail case with missing gates/secrets and non-zero command exit.
+- Verification:
+  - `python -m pytest -q tests/test_soenc_cli.py -k "audit_promotion or release or approve_release"` => `9 passed`
+  - `python -m pytest -q tests/test_release_promotion_workflow.py` => `1 passed`
+
+### CARD `ENC-P0-014`
+
+- Status: `done`
+- Goal: automate promotion evidence collection from GitHub APIs so `soenc audit-promotion` can run without manual JSON assembly
+- Type: launch governance + operational automation
+- Depends on: `ENC-P0-013`
+- Main files:
+  - `enc2sop/cli.py`
+  - new collector module under `enc2sop/`
+  - operator docs under `USAGE_MANUAL.md`
+- Deliverables:
+  - `soenc collect-promotion-evidence` command that emits `enc2sop-promotion-evidence/v1` JSON
+  - branch protection required-status-check extraction for `main` and `release/**`
+  - protected environment reviewer-count extraction for `production-promotion`
+  - required-secret presence evidence extraction for `SOENC_RELEASE_APPROVAL_KEY_B64` (without exposing secret values)
+- Acceptance:
+  - collected evidence file is directly consumable by `soenc audit-promotion`
+  - command fails closed on API permission gaps or missing required rollout objects
+- Notes (2026-05-10, iteration 16):
+  - Added new collector module `enc2sop/promotion_evidence.py`:
+    - versioned evidence output schema: `enc2sop-promotion-evidence/v1`.
+    - policy-driven target extraction from `enc2sop-promotion-policy/v1` contract.
+    - GitHub API collector for:
+      - branch status-check evidence via branch-rules API probes for policy branch targets.
+      - environment reviewer evidence via environment protection rules.
+      - required secret presence evidence (name-only) via repository/org/environment secret listings.
+    - fail-closed behavior on missing required rollout objects, missing required secret evidence, and API access/permission errors.
+  - Added new unified CLI command in `enc2sop/cli.py`:
+    - `soenc collect-promotion-evidence --github-repo ... --github-token ... [--github-api-url ...] [--policy-file ...] [--evidence-file ...]`
+    - supports env fallbacks:
+      - `GITHUB_REPOSITORY`
+      - `GITHUB_TOKEN`
+      - `GITHUB_API_URL`
+    - writes audit-ready evidence JSON and summary output for downstream `soenc audit-promotion`.
+  - Added focused tests:
+    - `tests/test_promotion_evidence.py`:
+      - success payload generation (branch checks + environment reviewers + required secret evidence).
+      - fail-closed missing required secret evidence.
+      - fail-closed missing branch-rules/status-check evidence.
+    - `tests/test_soenc_cli.py`:
+      - CLI success wiring for `collect-promotion-evidence`.
+      - fail-closed argument validation when repo/token inputs are missing.
+  - Updated operator docs (`USAGE_MANUAL.md`) with:
+    - command surface entry for `soenc collect-promotion-evidence`.
+    - usage, env fallback contract, and fail-closed behavior notes.
+- Verification:
+  - `python -m pytest -q tests/test_promotion_evidence.py tests/test_soenc_cli.py -k "collect_promotion_evidence or audit_promotion"`
+
+### CARD `ENC-P0-010`
+
+- Status: `done`
+- Goal: add a fail-closed signed-approval gate to `soenc release` for CI promotion/signoff control
+- Type: launch governance + integrity
+- Depends on: `ENC-P0-009`
+- Main files:
+  - `enc2sop/cli.py`
+  - `encryption_helper.py`
+  - `soenc_config.py`
+  - release tests and docs
+- Deliverables:
+  - `[release]` config contract for signed approval policy
+  - `soenc release` options for approval file/key policy
+  - fail-closed approval validation bound to `release_bundle.json` digest and signature
+  - `release_receipt.json` fields recording approval verification status
+- Acceptance:
+  - release command fails when approval is required but missing/invalid
+  - release command verifies approval signature + bundle digest before receipt write
+  - receipt explicitly records approval gate state for audit
+- Notes (2026-05-09, iteration 12):
+  - Added `[release]` config section to `soenc.toml` contract in `soenc_config.py`:
+    - `require_approval`
+    - `approval_file`
+    - `approval_key_file`
+    - `approval_key_id`
+  - Extended `soenc release` command in `enc2sop/cli.py`:
+    - new flags:
+      - `--require-release-approval`
+      - `--no-require-release-approval`
+      - `--release-approval-file`
+      - `--release-approval-key-file`
+      - `--release-approval-key-b64`
+      - `--release-approval-key-id`
+    - fail-closed guard when approval is required but no approval verification key is provided.
+  - Hardened release governance in `encryption_helper.py`:
+    - added release approval schema constant: `enc2sop-release-approval/v1`
+    - `write_release_receipt(...)` now validates signed approval metadata when required:
+      - approval file exists and schema is valid
+      - approval bundle target is `release_bundle.json`
+      - declared `release_bundle_sha256` matches current bundle digest
+      - non-empty `approvers` list
+      - HMAC-SHA256 signature verification with provided approval key
+      - optional key-id pin check when expected key id is configured
+    - release receipt now records:
+      - `release_approval_required`
+      - `release_approval_verified`
+      - `release_approval_file`
+      - `release_approval_key_id`
+  - Added focused tests:
+    - `tests/test_soenc_config.py`:
+      - release section parsing and path resolution
+      - unknown key rejection in `[release]`
+    - `tests/test_soenc_cli.py`:
+      - release command success with required signed approval via config
+      - fail-closed path when approval is required but approval key is missing
+    - `tests/test_encryption_helper.py`:
+      - release receipt success with required signed approval
+      - release receipt rejects approval bundle digest mismatch
+- Verification:
+  - `python -m pytest -q tests/test_soenc_config.py tests/test_soenc_cli.py tests/test_encryption_helper.py -k "release or approval or receipt or release_dir"` => `15 passed`
+
+### CARD `ENC-P0-011`
+
+- Status: `done`
+- Goal: add first-class release-approval artifact generation command for CI promotion/signoff workflows
+- Type: launch governance + integrity
+- Depends on: `ENC-P0-010`
+- Main files:
+  - `enc2sop/cli.py`
+  - `encryption_helper.py`
+  - tests and operator docs
+- Deliverables:
+  - `soenc approve-release` command to emit signed `release_approval.json`
+  - fail-closed key + approver requirements for approval artifact generation
+  - deterministic approval payload bound to current `release_bundle.json` digest
+  - docs updated to position approval generation before `soenc release` in operator flow
+- Acceptance:
+  - approval command fails when signing key or approvers are missing
+  - generated approval signature validates against payload digest and key-id policy
+  - release gate can consume generated artifact unchanged under `--require-release-approval`
+- Notes (2026-05-10, iteration 13):
+  - Added `encryption_helper.write_release_approval(...)`:
+    - verifies `release_bundle.json` exists in target release dir.
+    - computes `release_bundle_sha256`.
+    - requires non-empty approver set + approval signing key.
+    - emits `enc2sop-release-approval/v1` JSON with HMAC-SHA256 signature metadata.
+  - Added unified CLI command `soenc approve-release` in `enc2sop/cli.py`:
+    - supports config fallback for dist/approval key/file defaults.
+    - supports repeated `--approver` flags and optional `--notes` / `--approved-at-utc`.
+    - supports key-id policy metadata via `--release-approval-key-id`.
+  - Added focused regression tests:
+    - `tests/test_soenc_cli.py`:
+      - approve-release success path writes deterministic signed approval payload.
+      - approve-release fails closed when approval signing key is missing.
+    - `tests/test_encryption_helper.py`:
+      - `write_release_approval(...)` emits valid signed payload bound to bundle digest.
+      - `write_release_approval(...)` rejects empty approver list.
+  - Updated operator docs (`README.md`, `USAGE_MANUAL.md`) to include:
+    - explicit `approve-release` command in primary command surface.
+    - recommended sequence: `package -> approve-release -> release`.
+  - Verification:
+    - `python -m pytest -q tests/test_soenc_cli.py tests/test_encryption_helper.py -k "approve_release or approval or release"`
+
+### CARD `ENC-P0-012`
+
+- Status: `done`
+- Goal: enforce signed approval release gate in CI promotion pipeline for protected branches/environments
+- Type: launch governance + CI hardening
+- Depends on: `ENC-P0-011`
+- Main files:
+  - CI workflow files under `.github/workflows/` (or equivalent pipeline config)
+  - operator launch docs under `docs/` and `USAGE_MANUAL.md`
+- Deliverables:
+  - pipeline step that runs `soenc approve-release` with CI-managed approval key and approver identity inputs
+  - mandatory promotion gate step running `soenc release --require-release-approval`
+  - fail-closed pipeline behavior on missing/invalid approval artifact
+  - operator dry-run checklist for approval-key custody and rotation in CI secrets
+- Acceptance:
+  - protected branch promotion fails when approval artifact is missing/invalid
+  - successful promotion emits `release_approval.json` + `release_receipt.json` artifacts
+  - docs include operational rollout and rollback instructions
+- Notes (2026-05-10, iteration 14):
+  - Added CI promotion workflow `.github/workflows/release_promotion.yml` with fail-closed signed-approval enforcement:
+    - trigger scope: `push` on `main` and `release/**` plus `workflow_dispatch` dry-run.
+    - builds a deterministic protected release fixture through mainline commands:
+      - `soenc protect` -> `soenc build` -> `soenc verify` -> `soenc package`.
+    - generates signed approval artifact in CI:
+      - `soenc approve-release --release-approval-key-b64 $SOENC_RELEASE_APPROVAL_KEY_B64`.
+    - enforces promotion gate:
+      - `soenc release --require-release-approval` with explicit approval file/key/key-id inputs.
+    - uploads required audit artifacts with fail-closed artifact policy:
+      - `release_bundle.json`, `release_approval.json`, `release_receipt.json`.
+  - Added focused regression test `tests/test_release_promotion_workflow.py` asserting workflow contract includes:
+    - approval generation command,
+    - required release gate flag,
+    - required CI key secret reference,
+    - fail-closed artifact upload behavior.
+  - Updated `USAGE_MANUAL.md` with CI rollout guidance:
+    - required GitHub environment/secret configuration,
+    - dry-run checklist,
+    - rollback and key-rotation safety procedure.
+- Verification:
+  - `python -m pytest -q tests/test_release_promotion_workflow.py tests/test_soenc_cli.py -k "promotion or approve_release or release"`
+  - `python -m pytest -q`

@@ -6,20 +6,83 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 from typing import Optional
 from typing import Sequence
 
-import encryption_helper
 from enc2sop import plugin_registry
-from enc2sop import promotion_artifacts
-from enc2sop import promotion_audit
-from enc2sop import promotion_bundle
-from enc2sop import promotion_evidence
-from soenc_config import SoencProjectConfig
-from soenc_config import load_project_config
-from toolchain_profile import DEFAULT_BUILD_PROFILE
-from toolchain_profile import SUPPORTED_BUILD_PROFILES
-from toolchain_profile import resolve_python_executable
+
+
+# P0-B1 lazy-import boundary:
+# - `cm` and legacy `transport` help must not import the Code Protection Layer.
+# - Keep encryption_helper / decryption_helper / py2_linux_rec_opera / Cython /
+#   native build helpers behind protect/build/package/verify/release handlers.
+# - Keep build-profile choices as a tiny local CLI constant so parser creation
+#   for `transport --help` does not import toolchain_profile.
+BUILD_PROFILE_CHOICES = (
+    "auto",
+    "windows-msvc",
+    "native",
+)
+HARDENING_PROFILE_CHOICES = (
+    "off",
+    "balanced",
+)
+
+
+_LAZY_COMPAT_MODULES = {
+    "promotion_artifacts": "enc2sop.promotion_artifacts",
+    "promotion_audit": "enc2sop.promotion_audit",
+    "promotion_bundle": "enc2sop.promotion_bundle",
+    "promotion_evidence": "enc2sop.promotion_evidence",
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_COMPAT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    import importlib
+
+    module = importlib.import_module(module_name)
+    globals()[name] = module
+    return module
+
+
+def _load_encryption_helper():
+    import encryption_helper
+
+    return encryption_helper
+
+
+def _load_project_config(path: Optional[str]) -> Optional[Any]:
+    from soenc_config import load_project_config
+
+    return load_project_config(config_path=path, base_dir=Path.cwd())
+
+
+def _resolve_python_executable(value: Optional[str]) -> Path:
+    from toolchain_profile import resolve_python_executable
+
+    return resolve_python_executable(value)
+
+
+def _default_build_profile() -> str:
+    from toolchain_profile import DEFAULT_BUILD_PROFILE
+
+    return DEFAULT_BUILD_PROFILE
+
+
+def _add_tristate_flag(parser, name: str, enable_help: str, disable_help: str) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--{0}".format(name), dest=name.replace("-", "_"), action="store_true", help=enable_help)
+    group.add_argument(
+        "--no-{0}".format(name),
+        dest=name.replace("-", "_"),
+        action="store_false",
+        help=disable_help,
+    )
+    parser.set_defaults(**{name.replace("-", "_"): None})
 
 
 def _option_present(argv: Sequence[str], option_name: str) -> bool:
@@ -29,17 +92,14 @@ def _option_present(argv: Sequence[str], option_name: str) -> bool:
     return False
 
 
-def _load_project_config(path: Optional[str]) -> Optional[SoencProjectConfig]:
-    return load_project_config(config_path=path, base_dir=Path.cwd())
-
-
-def _project_default(project_config: Optional[SoencProjectConfig], field: str):
+def _project_default(project_config: Optional[Any], field: str):
     if project_config is None:
         return None
     return project_config.cli_defaults.get(field)
 
 
-def _resolve_staging_dir(args, project_config: Optional[SoencProjectConfig]) -> Path:
+def _resolve_staging_dir(args, project_config: Optional[Any]) -> Path:
+    encryption_helper = _load_encryption_helper()
     staging_value = args.staging_dir or _project_default(project_config, "output_dir")
     if not staging_value:
         raise ValueError("--staging-dir is required (or configure [build].output_dir in soenc.toml)")
@@ -50,6 +110,7 @@ def _resolve_staging_dir(args, project_config: Optional[SoencProjectConfig]) -> 
 
 
 def _resolve_build_dir(args, staging_dir: Path) -> Path:
+    encryption_helper = _load_encryption_helper()
     build_value = args.build_dir if getattr(args, "build_dir", None) else str(staging_dir / "build")
     build_dir = encryption_helper.normalize_path(build_value)
     if not build_dir.exists():
@@ -57,21 +118,22 @@ def _resolve_build_dir(args, staging_dir: Path) -> Path:
     return build_dir
 
 
-def _resolve_manifest_sign_key(args, project_config: Optional[SoencProjectConfig]):
+def _resolve_manifest_sign_key(args, project_config: Optional[Any]):
+    encryption_helper = _load_encryption_helper()
     key_file_text = args.manifest_sign_key_file or _project_default(project_config, "manifest_sign_key_file")
     key_file = encryption_helper.normalize_path(key_file_text) if key_file_text else None
     key_b64 = args.manifest_sign_key_b64
     return encryption_helper._load_manifest_sign_key(key_file=key_file, key_b64=key_b64)
 
 
-def _resolve_require_manifest_signature(args, project_config: Optional[SoencProjectConfig]) -> bool:
+def _resolve_require_manifest_signature(args, project_config: Optional[Any]) -> bool:
     if args.require_manifest_signature is not None:
         return bool(args.require_manifest_signature)
     config_value = _project_default(project_config, "require_manifest_signature")
     return bool(config_value) if config_value is not None else False
 
 
-def _resolve_require_release_approval(args, project_config: Optional[SoencProjectConfig]) -> bool:
+def _resolve_require_release_approval(args, project_config: Optional[Any]) -> bool:
     if args.require_release_approval is not None:
         return bool(args.require_release_approval)
     config_value = _project_default(project_config, "require_release_approval")
@@ -79,6 +141,7 @@ def _resolve_require_release_approval(args, project_config: Optional[SoencProjec
 
 
 def _run_protect(args) -> int:
+    encryption_helper = _load_encryption_helper()
     forwarded = list(args.forwarded or [])
     if _option_present(forwarded, "--compile") or _option_present(forwarded, "--dist-dir"):
         raise ValueError("soenc protect only supports staging protection; use 'soenc build' and 'soenc package'")
@@ -93,14 +156,20 @@ def _run_protect(args) -> int:
 
 
 def _run_build(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
-    build_profile = args.build_profile or _project_default(project_config, "build_profile") or DEFAULT_BUILD_PROFILE
+    build_profile = args.build_profile or _project_default(project_config, "build_profile") or _default_build_profile()
+    hardening_profile = (
+        args.hardening_profile
+        or _project_default(project_config, "hardening_profile")
+        or encryption_helper.HARDENING_PROFILE_OFF
+    )
     vcvars_text = args.vcvars_path or _project_default(project_config, "vcvars_path")
     vcvars_path = encryption_helper.normalize_path(vcvars_text) if vcvars_text else None
     # Explicit CLI override must win over config defaults to avoid venv/system interpreter drift.
     python_exe_text = args.python_exe if args.python_exe is not None else _project_default(project_config, "python_exe")
-    python_exe = resolve_python_executable(python_exe_text)
+    python_exe = _resolve_python_executable(python_exe_text)
     if not python_exe.exists():
         raise FileNotFoundError("python executable not found: {0}".format(python_exe))
     manifest_sign_key = _resolve_manifest_sign_key(args, project_config)
@@ -115,14 +184,17 @@ def _run_build(args) -> int:
         vcvars_path=vcvars_path,
         manifest_sign_key=manifest_sign_key,
         require_manifest_signature=require_manifest_signature,
+        hardening_profile=hardening_profile,
     )
     print("staging_dir={0}".format(staging_dir))
     print("build_dir={0}".format(build_dir))
     print("build_profile={0}".format(build_profile))
+    print("hardening_profile={0}".format(hardening_profile))
     return 0
 
 
 def _run_package(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
     build_dir = _resolve_build_dir(args, staging_dir)
@@ -132,6 +204,9 @@ def _run_package(args) -> int:
     dist_dir = encryption_helper.normalize_path(dist_value)
     require_manifest_signature = _resolve_require_manifest_signature(args, project_config)
     package_metadata = project_config.package_metadata if project_config is not None else None
+    bundle_license = args.bundle_license
+    if bundle_license is None:
+        bundle_license = bool(_project_default(project_config, "bundle_license"))
 
     actual_dist_dir, copied_files = encryption_helper.copy_release(
         build_dir=build_dir,
@@ -139,6 +214,7 @@ def _run_package(args) -> int:
         staging_dir=staging_dir,
         package_metadata=package_metadata,
         require_manifest_signature=require_manifest_signature,
+        bundle_license=bool(bundle_license),
     )
     print("staging_dir={0}".format(staging_dir))
     print("build_dir={0}".format(build_dir))
@@ -148,6 +224,7 @@ def _run_package(args) -> int:
 
 
 def _run_verify(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
     build_dir = _resolve_build_dir(args, staging_dir)
@@ -171,6 +248,7 @@ def _run_verify(args) -> int:
 
 
 def _run_release(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     dist_value = args.dist_dir or _project_default(project_config, "dist_dir")
     if not dist_value:
@@ -193,19 +271,32 @@ def _run_release(args) -> int:
     package_metadata = project_config.package_metadata if project_config is not None else None
     key_mode = project_config.key_mode if project_config is not None else None
 
-    receipt_path, receipt = encryption_helper.write_release_receipt(
-        dist_dir=dist_dir,
-        required_manifest_signature=require_manifest_signature,
-        key_mode=key_mode,
-        package_metadata=package_metadata,
-        require_approval=require_release_approval,
-        approval_file=approval_file_value,
-        approval_key=approval_key,
-        approval_key_id=approval_key_id,
-    )
+    try:
+        receipt_path, receipt = encryption_helper.write_release_receipt(
+            dist_dir=dist_dir,
+            required_manifest_signature=require_manifest_signature,
+            key_mode=key_mode,
+            package_metadata=package_metadata,
+            require_approval=require_release_approval,
+            approval_file=approval_file_value,
+            approval_key=approval_key,
+            approval_key_id=approval_key_id,
+        )
+    except Exception as exc:
+        try:
+            encryption_helper.write_release_failure_report(
+                dist_dir=dist_dir,
+                error=exc,
+                required_manifest_signature=require_manifest_signature,
+                require_approval=require_release_approval,
+            )
+        except Exception:
+            pass
+        raise
     print("dist_dir={0}".format(dist_dir))
     print("release_bundle={0}".format(encryption_helper.release_bundle_path(dist_dir)))
     print("release_receipt={0}".format(receipt_path))
+    print("release_tamper_report={0}".format(encryption_helper.release_tamper_report_path(dist_dir)))
     print("manifest_signature_present={0}".format(receipt.get("manifest_signature_present")))
     print("runtime_artifacts_verified={0}".format(receipt.get("runtime_artifacts_verified")))
     print("release_approval_verified={0}".format(receipt.get("release_approval_verified")))
@@ -213,6 +304,7 @@ def _run_release(args) -> int:
 
 
 def _run_approve_release(args) -> int:
+    encryption_helper = _load_encryption_helper()
     project_config = _load_project_config(args.config)
     dist_value = args.dist_dir or _project_default(project_config, "dist_dir")
     if not dist_value:
@@ -256,6 +348,12 @@ def _run_transport(args) -> int:
             print("  {0}".format(row))
         print("usage: soenc transport <plugin-subcommand> [args]")
         print("example: soenc transport export -i artifact.bin -o ./pkg")
+        print("example: soenc transport prepare-capture-corpus -o ./capture_kit --classification lab")
+        print(
+            "note: certify/archive/status transport evidence commands are experimental "
+            "legacy tooling; use `soenc cm send` and `soenc cm receive` for the "
+            "current cross-media encrypted user path."
+        )
         return 0
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
@@ -264,7 +362,18 @@ def _run_transport(args) -> int:
     return plugin_registry.invoke_plugin_command("transport", forwarded)
 
 
+def _run_cross_media(args) -> int:
+    from enc2sop.crossmedia import cli as crossmedia_cli
+
+    forwarded = list(args.forwarded or [])
+    if forwarded and forwarded[0] == "--":
+        forwarded = forwarded[1:]
+    return int(crossmedia_cli.main(forwarded))
+
+
 def _run_audit_promotion(args) -> int:
+    from enc2sop import promotion_audit
+
     report_path, report = promotion_audit.run_promotion_audit(
         evidence_file=args.evidence_file,
         policy_file=args.policy_file,
@@ -284,6 +393,9 @@ def _run_audit_promotion(args) -> int:
 
 
 def _run_collect_promotion_evidence(args) -> int:
+    from enc2sop import promotion_audit
+    from enc2sop import promotion_evidence
+
     token = args.github_token or os.environ.get("GITHUB_TOKEN")
     if not token:
         raise ValueError(
@@ -312,6 +424,10 @@ def _run_collect_promotion_evidence(args) -> int:
 
 
 def _run_promotion_dry_run(args) -> int:
+    encryption_helper = _load_encryption_helper()
+    from enc2sop import promotion_audit
+    from enc2sop import promotion_evidence
+
     evidence_file = args.evidence_file
     if args.skip_collect:
         if not evidence_file:
@@ -362,6 +478,8 @@ def _run_promotion_dry_run(args) -> int:
 
 
 def _run_verify_promotion_artifacts(args) -> int:
+    from enc2sop import promotion_artifacts
+
     report_path, report = promotion_artifacts.run_promotion_artifact_audit(
         dist_dir=args.dist_dir,
         promotion_evidence_file=args.promotion_evidence_file,
@@ -391,6 +509,8 @@ def _run_verify_promotion_artifacts(args) -> int:
 
 
 def _run_bundle_promotion_artifacts(args) -> int:
+    from enc2sop import promotion_bundle
+
     bundle_path, manifest = promotion_bundle.create_promotion_artifact_bundle(
         dist_dir=args.dist_dir,
         promotion_evidence_file=args.promotion_evidence_file,
@@ -436,8 +556,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--python-exe", help="Python interpreter used for batch compile.")
     build_parser.add_argument(
         "--build-profile",
-        choices=SUPPORTED_BUILD_PROFILES,
+        choices=BUILD_PROFILE_CHOICES,
         help="Build profile used for native compile.",
+    )
+    build_parser.add_argument(
+        "--hardening-profile",
+        choices=HARDENING_PROFILE_CHOICES,
+        help="Hardening profile used for native compile flags and manifest metadata.",
     )
     build_parser.add_argument("--vcvars-path", help="Optional explicit vcvars64.bat path for windows-msvc profile.")
     build_parser.add_argument(
@@ -448,7 +573,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-sign-key-b64",
         help="Base64-encoded manifest signing key bytes. Alternative to --manifest-sign-key-file.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         build_parser,
         "require-manifest-signature",
         "Require a valid build_manifest.json signature during runtime delivery validation.",
@@ -464,11 +589,17 @@ def build_parser() -> argparse.ArgumentParser:
     package_parser.add_argument("--staging-dir", "-s", help="Staging directory containing build_manifest.json.")
     package_parser.add_argument("--build-dir", help="Compiled build directory. Defaults to <staging-dir>/build.")
     package_parser.add_argument("--dist-dir", "-d", help="Release output directory.")
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         package_parser,
         "require-manifest-signature",
         "Require build_manifest.json to be signed before release packaging.",
         "Allow release packaging from unsigned manifest.",
+    )
+    _add_tristate_flag(
+        package_parser,
+        "bundle-license",
+        "Bundle license-file sidecar into dist output (insecure; emits warning).",
+        "Keep license-file sidecar external to dist output and require runtime SOENC_LICENSE_FILE.",
     )
     package_parser.set_defaults(handler=_run_package)
 
@@ -487,7 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-sign-key-b64",
         help="Base64-encoded manifest signing key bytes. Alternative to --manifest-sign-key-file.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         verify_parser,
         "require-manifest-signature",
         "Require a valid build_manifest.json signature before runtime validation succeeds.",
@@ -517,13 +648,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--release-approval-key-id",
         help="Expected key_id in release approval signature metadata.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         release_parser,
         "require-manifest-signature",
         "Require build_manifest.json to be signed before release receipt generation.",
         "Allow release receipt generation from unsigned manifest.",
     )
-    encryption_helper.add_tristate_flag(
+    _add_tristate_flag(
         release_parser,
         "require-release-approval",
         "Require signed release approval metadata before release receipt generation.",
@@ -571,7 +702,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     transport_parser = subparsers.add_parser(
         "transport",
-        help="Optional airgap transport plugin commands (export/recover/verify/analyze/ocr).",
+        description=(
+            "Optional legacy airgap transport plugin commands. The current "
+            "cross-media encrypted product path is `soenc cm send` and "
+            "`soenc cm receive`; transport certify/archive/status evidence tools "
+            "are retained as experimental legacy tooling only."
+        ),
+        epilog=(
+            "P1-S5 scope: legacy evidence commands such as certify, archive-evidence, "
+            "verify-evidence-archive, replay-evidence-archive, and "
+            "certification-status are experimental and do not enter the normal "
+            "cross-media user path."
+        ),
+        help=(
+            "Optional legacy airgap transport plugin commands; certify/archive/status "
+            "evidence tools are experimental and outside cm send/receive."
+        ),
     )
     transport_parser.add_argument(
         "forwarded",
@@ -579,6 +725,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to the transport plugin command surface.",
     )
     transport_parser.set_defaults(handler=_run_transport)
+
+    cross_media_parser = subparsers.add_parser(
+        "cm",
+        add_help=False,
+        help="Cross-media encrypted transport commands (SOX1 envelope, QR render/scan, send/receive).",
+    )
+    cross_media_parser.add_argument(
+        "forwarded",
+        nargs=argparse.REMAINDER,
+        help="Arguments forwarded to the cross-media command surface.",
+    )
+    cross_media_parser.set_defaults(handler=_run_cross_media)
 
     audit_promotion_parser = subparsers.add_parser(
         "audit-promotion",
@@ -810,6 +968,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if argv and argv[0] == "protect":
         protect_args = argparse.Namespace(forwarded=list(argv[1:]))
         return _run_protect(protect_args)
+    if argv and argv[0] == "cm":
+        cross_media_args = argparse.Namespace(forwarded=list(argv[1:]))
+        return _run_cross_media(cross_media_args)
     parser = build_parser()
     args = parser.parse_args(argv)
     handler = getattr(args, "handler", None)

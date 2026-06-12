@@ -121,6 +121,8 @@
       "enc2sop-rotation-rehearsal/v1",
       "if: ${{ always() }}",
       "SOENC_RELEASE_APPROVAL_KEY_B64",
+      "GITHUB_REF_PROTECTED:-",
+      "Promotion workflow requires protected ref context (GITHUB_REF_PROTECTED=true)",
       "if-no-files-found: error",
       "python ./soenc.py bundle-promotion-artifacts"
     ]

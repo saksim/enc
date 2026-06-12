@@ -344,17 +344,29 @@ def parse_cfg_line_candidate(raw_texts: List[str]) -> Optional[Dict[str, object]
         cfg = protocol.parse_cfg_line(line)
         if not cfg:
             continue
+        canonical = "@CFG|AT1|CC={}|LP={}|RC={}|IL={}|PG={}|CS={}|RS={}".format(
+            int(cfg["CC"]),
+            int(cfg["LP"]),
+            int(cfg["RC"]),
+            int(cfg["IL"]),
+            int(cfg["PG"]),
+            int(cfg["CS"]),
+            int(cfg["RS"]),
+        )
+        if "PF" in cfg:
+            canonical += "|PF={}".format(protocol.payload_profile_code(str(cfg["PF"])))
+        if "PM" in cfg:
+            canonical += "|PM={}".format(
+                protocol.canonical_parity_symbol_mode(
+                    str(cfg["PM"]),
+                    str(cfg.get("PF") or "safe-base32-v1"),
+                )
+            )
+        if "EL" in cfg:
+            canonical += "|EL={}".format(int(cfg["EL"]))
         return {
             "values": cfg,
-            "canonical": "@CFG|AT1|CC={}|LP={}|RC={}|IL={}|PG={}|CS={}|RS={}".format(
-                int(cfg["CC"]),
-                int(cfg["LP"]),
-                int(cfg["RC"]),
-                int(cfg["IL"]),
-                int(cfg["PG"]),
-                int(cfg["CS"]),
-                int(cfg["RS"]),
-            ),
+            "canonical": canonical,
         }
     return None
 

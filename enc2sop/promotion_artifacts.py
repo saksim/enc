@@ -33,6 +33,8 @@ RUN_RECEIPT_REQUIRED_ARTIFACTS = (
     "promotion_evidence",
     "promotion_audit_report",
     "rotation_rehearsal_report",
+    "promotion_policy",
+    "promotion_workflow",
     RUN_RECEIPT_VOLATILE_ARTIFACT,
 )
 STRICT_CONTEXT_REQUIRED_IDENTITY_KEYS = (
@@ -77,6 +79,7 @@ STRICT_CONTEXT_BOOLEAN_BINDING_KEYS = (
 STRICT_CONTEXT_CI_TRUE_BOOLEAN_KEYS = (
     "GITHUB_ACTIONS",
     "CI",
+    "GITHUB_REF_PROTECTED",
 )
 STRICT_CONTEXT_POSITIVE_INTEGER_KEYS = (
     "GITHUB_RUN_ID",
@@ -1451,6 +1454,8 @@ def _expected_run_receipt_artifact_paths(
     evidence_path: Path,
     promotion_report_path: Path,
     rotation_path: Path,
+    policy_path: Path,
+    workflow_path: Path,
 ) -> List[Tuple[str, Path]]:
     return [
         ("release_bundle", release_dir / encryption_helper.RELEASE_BUNDLE_FILENAME),
@@ -1459,6 +1464,8 @@ def _expected_run_receipt_artifact_paths(
         ("promotion_evidence", evidence_path),
         ("promotion_audit_report", promotion_report_path),
         ("rotation_rehearsal_report", rotation_path),
+        ("promotion_policy", policy_path),
+        ("promotion_workflow", workflow_path),
         (RUN_RECEIPT_VOLATILE_ARTIFACT, report_path),
     ]
 
@@ -1471,6 +1478,8 @@ def _validate_existing_run_receipt_binding(
     evidence_path: Path,
     promotion_report_path: Path,
     rotation_path: Path,
+    policy_path: Path,
+    workflow_path: Path,
     require_rotation_pass: bool,
     require_ci_context_match: bool,
     runtime_context: Optional[Mapping[str, str]],
@@ -1560,6 +1569,8 @@ def _validate_existing_run_receipt_binding(
         evidence_path=evidence_path,
         promotion_report_path=promotion_report_path,
         rotation_path=rotation_path,
+        policy_path=policy_path,
+        workflow_path=workflow_path,
     )
     for required_name in RUN_RECEIPT_REQUIRED_ARTIFACTS:
         if required_name not in rows_by_name:
@@ -1779,6 +1790,8 @@ def _write_promotion_run_receipt(
     evidence_path: Path,
     promotion_report_path: Path,
     rotation_path: Path,
+    policy_path: Path,
+    workflow_path: Path,
     signature_key: Optional[bytes],
     signature_key_id: Optional[str],
 ) -> Path:
@@ -1789,6 +1802,8 @@ def _write_promotion_run_receipt(
             evidence_path=evidence_path,
             promotion_report_path=promotion_report_path,
             rotation_path=rotation_path,
+            policy_path=policy_path,
+            workflow_path=workflow_path,
         )
     )
     receipt = {
@@ -1914,6 +1929,8 @@ def run_promotion_artifact_audit(
         evidence_path=evidence_path,
         promotion_report_path=promotion_report_path,
         rotation_path=rotation_path,
+        policy_path=policy_path,
+        workflow_path=workflow_path,
         require_rotation_pass=require_rotation_pass,
         require_ci_context_match=require_ci_context_match,
         runtime_context=runtime_context,
@@ -1963,6 +1980,8 @@ def run_promotion_artifact_audit(
         evidence_path=evidence_path,
         promotion_report_path=promotion_report_path,
         rotation_path=rotation_path,
+        policy_path=policy_path,
+        workflow_path=workflow_path,
         signature_key=release_approval_key,
         signature_key_id=release_approval_key_id,
     )

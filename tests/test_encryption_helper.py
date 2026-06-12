@@ -1,3 +1,4 @@
+import base64
 import json
 import importlib
 import hashlib
@@ -100,6 +101,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "--compile",
             "--python-exe",
             sys.executable,
+            "--dev-insecure-ok",
         ]
         if require_native_runtime_loader:
             argv.append("--runtime-native-loader")
@@ -527,6 +529,8 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "key_management": {
                 "mode": "license-file",
                 "license_file": "licenses/customer.license.json",
+                "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY,
+                "runtime_env": encryption_helper.LICENSE_FILE_ENV,
             },
             "config": {
                 "source": str((root / "soenc.toml").resolve()),
@@ -560,7 +564,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(out_dir, dist_dir.resolve())
         copied_rel = {str(path.relative_to(out_dir)).replace("\\", "/") for path in copied}
         self.assertIn("build_manifest.json", copied_rel)
-        self.assertIn("licenses/customer.license.json", copied_rel)
+        self.assertNotIn("licenses/customer.license.json", copied_rel)
         self.assertIn(encryption_helper.RELEASE_BUNDLE_FILENAME, copied_rel)
         self.assertIn("pkg/__init__.py", copied_rel)
         self.assertIn("pkg/mod.pyd", copied_rel)
@@ -575,10 +579,11 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertIn("pkg/mod.pyd", bundle.get("bundle_contents", {}).get("native_extension_files", []))
         self.assertIn("pkg/enc_rt_pkg_1234.pyd", bundle.get("bundle_contents", {}).get("runtime_compiled_files", []))
         self.assertIn("pkg/__init__.py", bundle.get("bundle_contents", {}).get("package_init_files", []))
-        self.assertEqual(
-            (bundle.get("bundle_contents", {}).get("license_file") or {}).get("relative_path"),
-            "licenses/customer.license.json",
-        )
+        license_payload = bundle.get("bundle_contents", {}).get("license_file") or {}
+        self.assertTrue(license_payload.get("externalized"))
+        self.assertFalse(license_payload.get("bundled"))
+        self.assertEqual(license_payload.get("source_relative_path"), "licenses/customer.license.json")
+        self.assertEqual(license_payload.get("runtime_env"), encryption_helper.LICENSE_FILE_ENV)
         self.assertEqual(
             bundle.get("runtime_integrity", {}).get("compiled_runtime_fingerprints", [{}])[0].get("digest_hex"),
             runtime_digest,
@@ -634,17 +639,21 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             "runtime_delivery": {
                 "validated": True,
                 "compiled_runtime_files": ["pkg/enc_rt_pkg_1234.pyd"],
+                "loader_mode": encryption_helper.RUNTIME_LOADER_MODE_NATIVE_ONLY,
+                "loader_enforced": True,
+                "trust_policy": {
+                    "require_runtime_fingerprint": True,
+                    "runtime_fingerprint_binding": encryption_helper.RUNTIME_FINGERPRINT_BINDING_MANIFEST_COMPILED,
+                    "runtime_path_policy": encryption_helper.RUNTIME_PATH_POLICY_SAME_PACKAGE_DIR,
+                },
             },
             "key_management": {
                 "mode": "license-file",
                 "license_file": "licenses/customer.license.json",
+                "license_path_policy": encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY,
+                "runtime_env": encryption_helper.LICENSE_FILE_ENV,
             },
         }
-        (release_dir / "licenses").mkdir(parents=True, exist_ok=True)
-        (release_dir / "licenses" / "customer.license.json").write_text(
-            json.dumps({"schema": "enc2sop-license/v1"}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
         encryption_helper.write_manifest(
             release_dir,
             manifest_payload,
@@ -666,7 +675,11 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "runtime_compiled_files": ["pkg/enc_rt_pkg_1234.pyd"],
                 "package_init_files": ["pkg/__init__.py"],
                 "license_file": {
-                    "relative_path": "licenses/customer.license.json",
+                    "delivery": "external",
+                    "externalized": True,
+                    "bundled": False,
+                    "source_relative_path": "licenses/customer.license.json",
+                    "runtime_env": encryption_helper.LICENSE_FILE_ENV,
                     "required_for_runtime": True,
                 },
             },
@@ -705,6 +718,26 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(receipt["native_artifacts_verified"], 2)
         self.assertEqual(receipt["key_mode"], "license-file")
         self.assertEqual(receipt["package_metadata"]["version"], "2.0.0")
+        self.assertEqual(receipt["release_tamper_report_relative_path"], encryption_helper.RELEASE_TAMPER_REPORT_FILENAME)
+        tamper_report_path = release_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME
+        self.assertTrue(tamper_report_path.exists())
+        self.assertEqual(receipt["release_tamper_report_sha256"], encryption_helper._sha256_file(tamper_report_path))
+        tamper_report = json.loads(tamper_report_path.read_text(encoding="utf-8"))
+        self.assertEqual(tamper_report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertTrue(tamper_report["success"])
+        self.assertEqual(tamper_report["classification"], encryption_helper.RELEASE_TAMPER_CLASSIFICATION)
+        self.assertFalse(tamper_report["strong_secrecy_boundary"])
+        self.assertTrue(tamper_report["checks"]["manifest_signature"]["present"])
+        binary_paths = {
+            item["relative_path"]: item
+            for item in tamper_report["checks"]["binary_digest"]["artifacts"]
+        }
+        self.assertEqual(binary_paths["pkg/mod.pyd"]["sha256"], hashlib.sha256(module_native.read_bytes()).hexdigest())
+        self.assertEqual(binary_paths["pkg/enc_rt_pkg_1234.pyd"]["role"], "runtime_native_extension")
+        runtime_record = tamper_report["checks"]["runtime_digest"]["artifacts"][0]
+        self.assertEqual(runtime_record["expected_sha256"], runtime_digest)
+        self.assertTrue(runtime_record["matches_expected"])
+        self.assertIn("import", tamper_report["checks"]["import_time_check"]["failure_mode"])
 
     def test_write_release_receipt_rejects_runtime_fingerprint_mismatch(self):
         root = self.make_case_root("release_receipt_digest_mismatch")
@@ -762,6 +795,34 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "release runtime fingerprint mismatch"):
             encryption_helper.write_release_receipt(dist_dir=release_dir)
+
+    def test_write_release_failure_report_records_tamper_failure(self):
+        root = self.make_case_root("release_failure_report")
+        release_dir = root / "release"
+        (release_dir / "pkg").mkdir(parents=True, exist_ok=True)
+        (release_dir / "pkg" / "mod.pyd").write_bytes(b"module-binary")
+        (release_dir / "build_manifest.json").write_text(
+            json.dumps({"runtime_files": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        report_path, report = encryption_helper.write_release_failure_report(
+            dist_dir=release_dir,
+            error=RuntimeError("release runtime fingerprint mismatch for artifact: pkg/mod.pyd"),
+            required_manifest_signature=True,
+            require_approval=False,
+        )
+
+        self.assertEqual(report_path, release_dir / encryption_helper.RELEASE_TAMPER_REPORT_FILENAME)
+        self.assertFalse(report["success"])
+        self.assertEqual(report["schema"], encryption_helper.RELEASE_TAMPER_REPORT_SCHEMA)
+        self.assertIn("fingerprint mismatch", report["failure"]["message"])
+        self.assertTrue(report["checks"]["manifest_signature"]["required"])
+        self.assertFalse(report["checks"]["manifest_signature"]["present"])
+        binary_records = report["checks"]["binary_digest"]["artifacts"]
+        self.assertEqual(binary_records[0]["relative_path"], "pkg/mod.pyd")
+        self.assertEqual(binary_records[0]["sha256"], hashlib.sha256(b"module-binary").hexdigest())
+        self.assertFalse(report["strong_secrecy_boundary"])
 
     def test_write_release_receipt_requires_signed_approval_when_enabled(self):
         root = self.make_case_root("release_receipt_with_approval")
@@ -1384,6 +1445,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(output_dir),
                 "--scope-config",
                 str(scope_path),
+                "--dev-insecure-ok",
             ]
         )
 
@@ -1425,6 +1487,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(output_dir),
                 "--namespace-root",
                 "A",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1468,6 +1531,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "-o",
                 str(output_dir),
                 "--infer-namespace",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1506,6 +1570,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(project_root),
                 "-o",
                 str(output_dir),
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1534,6 +1599,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     "native",
                     "--vcvars-path",
                     str(fake_vcvars),
+                    "--dev-insecure-ok",
                 ]
             )
 
@@ -1551,6 +1617,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     "-o",
                     str(output_dir),
                     "--require-manifest-signature",
+                    "--dev-insecure-ok",
                 ]
             )
 
@@ -1572,6 +1639,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 str(key_file),
                 "--manifest-key-id",
                 "ops-signing",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -1579,7 +1647,24 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertIn("signature", manifest)
         self.assertEqual(manifest["signature"]["key_id"], "ops-signing")
-        self.assertEqual(manifest["key_management"]["mode"], "local-embedded")
+        self.assertEqual(manifest["key_management"]["mode"], encryption_helper.LOCAL_EMBEDDED_DEV_INSECURE_MODE)
+        self.assertEqual(manifest["key_management"]["provider_mode"], "local-embedded")
+
+    def test_local_embedded_requires_explicit_dev_insecure_ok(self):
+        root = self.make_case_root("local_embedded_requires_dev_ok")
+        source = root / "main.py"
+        source.write_text("def ok():\n    return 1\n", encoding="utf-8")
+        output_dir = root / "out"
+
+        with self.assertRaisesRegex(ValueError, "requires --dev-insecure-ok"):
+            encryption_helper.main(
+                [
+                    "-t",
+                    str(source),
+                    "-o",
+                    str(output_dir),
+                ]
+            )
 
     def test_main_rejects_manifest_sign_key_source_conflict(self):
         root = self.make_case_root("manifest_sign_key_conflict")
@@ -1600,6 +1685,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     str(key_file),
                     "--manifest-sign-key-b64",
                     "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+                    "--dev-insecure-ok",
                 ]
             )
 
@@ -1667,7 +1753,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         cwd_before = Path.cwd()
         os.chdir(project_root)
         try:
-            exit_code = encryption_helper.main([])
+            exit_code = encryption_helper.main(["--dev-insecure-ok"])
         finally:
             os.chdir(cwd_before)
         self.assertEqual(exit_code, 0)
@@ -1675,8 +1761,10 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         output_dir = project_root / "build_out"
         manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["config"]["source"], str(cfg_path.resolve()))
-        self.assertEqual(manifest["config"]["key_mode"], "local-embedded")
-        self.assertEqual(manifest["key_management"]["mode"], "local-embedded")
+        self.assertEqual(manifest["config"]["key_mode"], encryption_helper.LOCAL_EMBEDDED_DEV_INSECURE_MODE)
+        self.assertEqual(manifest["config"]["provider_key_mode"], "local-embedded")
+        self.assertEqual(manifest["key_management"]["mode"], encryption_helper.LOCAL_EMBEDDED_DEV_INSECURE_MODE)
+        self.assertEqual(manifest["key_management"]["provider_mode"], "local-embedded")
         self.assertEqual(manifest["config"]["package_metadata"]["name"], "demo-protect")
         self.assertTrue((output_dir / "m.py").exists())
 
@@ -2127,6 +2215,60 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
             ):
                 exec(protected, module_globals, module_globals)
 
+    def test_main_hardening_profile_records_manifest_without_native_compile(self):
+        root = self.make_case_root("hardening_manifest")
+        source = root / "main.py"
+        source.write_text("def ok():\n    return 1\n", encoding="utf-8")
+        output_dir = root / "out"
+
+        exit_code = encryption_helper.main(
+            [
+                "-t",
+                str(source),
+                "-o",
+                str(output_dir),
+                "--hardening-profile",
+                "balanced",
+                "--dev-insecure-ok",
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        hardening = manifest.get("build_hardening") or {}
+        self.assertEqual(hardening.get("profile"), "balanced")
+        self.assertTrue(hardening.get("native_compile_args"))
+        self.assertTrue(hardening.get("native_link_args"))
+        self.assertIn("reverse-engineering cost only", hardening.get("caveat") or "")
+
+    def test_compile_with_batch_builder_passes_hardening_profile(self):
+        root = self.make_case_root("hardening_compile_cmd")
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "build_manifest.json").write_text(
+            json.dumps({"runtime_files": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        commands = []
+
+        def fake_run(command, check, cwd, env):
+            commands.append(command)
+            (output_dir / "build").mkdir(parents=True, exist_ok=True)
+
+        with mock.patch("encryption_helper.prepare_windows_build_env", return_value=None):
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                build_dir = encryption_helper.compile_with_batch_builder(
+                    python_exe=Path(sys.executable),
+                    output_dir=output_dir,
+                    build_profile=encryption_helper.DEFAULT_BUILD_PROFILE,
+                    hardening_profile="balanced",
+                )
+
+        self.assertEqual(build_dir, output_dir / "build")
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--hardening-profile", commands[0])
+        self.assertEqual(commands[0][commands[0].index("--hardening-profile") + 1], "balanced")
+
     def test_main_runtime_native_loader_toggle_sets_manifest_loader_mode(self):
         root = self.make_case_root("runtime_loader_manifest")
         source = root / "main.py"
@@ -2140,6 +2282,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "-o",
                 str(output_dir),
                 "--runtime-native-loader",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -2205,6 +2348,7 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 "--output-dir",
                 str(output_override),
                 "--no-compile",
+                "--dev-insecure-ok",
             ]
         )
         self.assertEqual(exit_code, 0)
@@ -2258,11 +2402,20 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(key_mgmt.get("mode"), "license-file")
         self.assertEqual(key_mgmt.get("license_file"), "licenses/customer.license.json")
         self.assertEqual(key_mgmt.get("license_id"), "customer-a")
+        self.assertEqual(key_mgmt.get("license_path_policy"), encryption_helper.LICENSE_PATH_POLICY_ENV_ONLY)
 
         license_path = output_dir / "licenses" / "customer.license.json"
         self.assertTrue(license_path.exists())
-        module = self._import_module_from_root(output_dir, "pkg", "mod")
-        self.assertEqual(module.protected_sum(4, 5), 12)
+        old_license = os.environ.get("SOENC_LICENSE_FILE")
+        try:
+            os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+            module = self._import_module_from_root(output_dir, "pkg", "mod")
+            self.assertEqual(module.protected_sum(4, 5), 12)
+        finally:
+            if old_license is None:
+                os.environ.pop("SOENC_LICENSE_FILE", None)
+            else:
+                os.environ["SOENC_LICENSE_FILE"] = old_license
 
     def test_license_file_mode_rejects_tampered_license(self):
         root = self.make_case_root("license_mode_tamper")
@@ -2309,10 +2462,147 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         payload["keys"][first_key] = "AAAAAAAAAAAAAAAAAAAAAA=="
         license_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "license integrity mismatch"):
-            self._import_module_from_root(output_dir, "pkg", "mod")
+        old_license = os.environ.get("SOENC_LICENSE_FILE")
+        try:
+            os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+            with self.assertRaisesRegex(ValueError, "license integrity mismatch"):
+                self._import_module_from_root(output_dir, "pkg", "mod")
+        finally:
+            if old_license is None:
+                os.environ.pop("SOENC_LICENSE_FILE", None)
+            else:
+                os.environ["SOENC_LICENSE_FILE"] = old_license
 
-    def test_remote_kms_mode_emits_stub_key_contract_and_runtime_fails_closed(self):
+    def test_license_file_signed_bound_revoked_e2e_runtime_executes_fail_closed(self):
+        root = self.make_case_root("license_mode_signed_bound_revoked")
+        project_root = root / "project"
+        package_name = "licpkg_" + uuid.uuid4().hex[:6]
+        pkg = project_root / package_name
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "mod.py").write_text(
+            "\n".join(
+                [
+                    "BASE = 11",
+                    "",
+                    "def protected_sum(a, b):",
+                    "    return a + b + BASE",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        signing_key = b"0123456789abcdef0123456789abcdef"
+        signing_key_path = project_root / "license_sign.key"
+        signing_key_path.write_bytes(signing_key)
+        cfg_path = project_root / "soenc.toml"
+        cfg_path.write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'target = "./{0}"'.format(package_name),
+                    "",
+                    "[build]",
+                    'output_dir = "./out"',
+                    "compile = false",
+                    "",
+                    "[keys]",
+                    'mode = "license-file"',
+                    'license_file = "licenses/customer.license.json"',
+                    'license_id = "customer-signed-bound"',
+                    "bundle_license = false",
+                    'license_machine_fingerprint = "machine-a"',
+                    'license_subject = "customer-a"',
+                    'license_expires_at = "2099-01-01T00:00:00Z"',
+                    'license_allowed_module_hashes = ["{0}/mod.py:sha256:example"]'.format(
+                        package_name,
+                    ),
+                    'license_sign_key_file = "./license_sign.key"',
+                    'license_sign_key_id = "lic-mainline-beta"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = encryption_helper.main(["--config", str(cfg_path)])
+        self.assertEqual(exit_code, 0)
+        output_dir = project_root / "out"
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        key_mgmt = manifest.get("key_management") or {}
+        self.assertEqual(key_mgmt.get("mode"), "license-file")
+        self.assertFalse(key_mgmt.get("bundle_license"))
+        self.assertTrue(key_mgmt.get("license_signature_required"))
+        self.assertEqual(key_mgmt.get("license_signature_key_id"), "lic-mainline-beta")
+        self.assertEqual(key_mgmt.get("license_verify_key_env"), "SOENC_LICENSE_VERIFY_KEY_B64")
+        self.assertEqual(key_mgmt.get("revocation_env"), "SOENC_LICENSE_REVOCATION_FILE")
+        self.assertEqual((key_mgmt.get("machine_binding") or {}).get("env"), "SOENC_MACHINE_FINGERPRINT")
+        self.assertTrue((key_mgmt.get("machine_binding") or {}).get("required"))
+        self.assertEqual(key_mgmt.get("allowed_module_hash_count"), 1)
+
+        license_path = output_dir / "licenses" / "customer.license.json"
+        self.assertTrue(license_path.exists())
+        license_payload = json.loads(license_path.read_text(encoding="utf-8"))
+        self.assertEqual(license_payload.get("license_id"), "customer-signed-bound")
+        self.assertEqual(license_payload.get("subject"), "customer-a")
+        self.assertEqual(license_payload.get("expires_at"), "2099-01-01T00:00:00Z")
+        self.assertEqual((license_payload.get("signature") or {}).get("algorithm"), "hmac-sha256")
+        self.assertEqual((license_payload.get("signature") or {}).get("key_id"), "lic-mainline-beta")
+        self.assertTrue((license_payload.get("machine_binding") or {}).get("required"))
+        self.assertEqual((license_payload.get("revocation") or {}).get("env"), "SOENC_LICENSE_REVOCATION_FILE")
+
+        env_names = (
+            "SOENC_LICENSE_FILE",
+            "SOENC_MACHINE_FINGERPRINT",
+            "SOENC_LICENSE_VERIFY_KEY_B64",
+            "SOENC_LICENSE_REVOCATION_FILE",
+        )
+        old_env = {name: os.environ.get(name) for name in env_names}
+
+        def reset_package_modules():
+            for module_name in list(sys.modules):
+                if module_name == package_name or module_name.startswith(package_name + "."):
+                    sys.modules.pop(module_name, None)
+
+        try:
+            os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+            os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-a"
+            os.environ["SOENC_LICENSE_VERIFY_KEY_B64"] = base64.b64encode(signing_key).decode("ascii")
+            os.environ.pop("SOENC_LICENSE_REVOCATION_FILE", None)
+            reset_package_modules()
+            module = self._import_module_from_root(output_dir, package_name, "mod")
+            self.assertEqual(module.protected_sum(4, 5), 20)
+
+            os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-b"
+            reset_package_modules()
+            with self.assertRaisesRegex(ValueError, "license machine fingerprint mismatch"):
+                self._import_module_from_root(output_dir, package_name, "mod")
+
+            os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-a"
+            revocation_path = project_root / "revoked.json"
+            revocation_path.write_text(
+                json.dumps({"revoked_license_ids": ["customer-signed-bound"]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.environ["SOENC_LICENSE_REVOCATION_FILE"] = str(revocation_path)
+            reset_package_modules()
+            with self.assertRaisesRegex(ValueError, "license has been revoked"):
+                self._import_module_from_root(output_dir, package_name, "mod")
+
+            os.environ.pop("SOENC_LICENSE_REVOCATION_FILE", None)
+            os.environ.pop("SOENC_LICENSE_VERIFY_KEY_B64", None)
+            reset_package_modules()
+            with self.assertRaisesRegex(ValueError, "SOENC_LICENSE_VERIFY_KEY_B64 is required"):
+                self._import_module_from_root(output_dir, package_name, "mod")
+        finally:
+            reset_package_modules()
+            for name, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = old_value
+
+    def test_remote_kms_mode_emits_key_contract_and_runtime_fails_closed_without_token(self):
         root = self.make_case_root("remote_kms_mode")
         project_root = root / "project"
         pkg = project_root / "pkg"
@@ -2365,7 +2655,9 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertEqual(key_mgmt.get("kms_endpoint"), "https://kms.example.local/v1")
         self.assertEqual(key_mgmt.get("kms_key_id"), "main-key")
         self.assertEqual(key_mgmt.get("kms_token_env"), "SOENC_KMS_TEST_TOKEN")
-        self.assertTrue((key_mgmt.get("kms_stub") or {}).get("enabled"))
+        self.assertTrue((key_mgmt.get("kms_runtime_client") or {}).get("implemented"))
+        self.assertEqual((key_mgmt.get("kms_runtime_client") or {}).get("protocol"), "http-json-unwrap-v1")
+        self.assertNotIn("kms_stub", key_mgmt)
 
         protected_source = (output_dir / "pkg" / "mod.py").read_text(encoding="utf-8")
         self.assertIn("'mode': 'remote-kms'", protected_source)
@@ -2374,11 +2666,9 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
         self.assertIn("'token_env': 'SOENC_KMS_TEST_TOKEN'", protected_source)
         self.assertIn("'retry_policy': {'max_retries': 3, 'backoff_ms': 700", protected_source)
 
-        with self.assertRaisesRegex(RuntimeError, "token env var is missing"):
-            self._import_module_from_root(output_dir, "pkg", "mod")
-
-        with mock.patch.dict(os.environ, {"SOENC_KMS_TEST_TOKEN": "token-value"}, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "runtime integration is stubbed"):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SOENC_KMS_TEST_TOKEN", None)
+            with self.assertRaisesRegex(RuntimeError, "token env var is missing"):
                 self._import_module_from_root(output_dir, "pkg", "mod")
 
     def test_remote_kms_cli_args_require_remote_kms_mode(self):
@@ -2395,11 +2685,10 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                     str(output_dir),
                     "--kms-profile",
                     "prod",
+                    "--dev-insecure-ok",
                 ]
             )
 
 
 if __name__ == "__main__":
     unittest.main()
-
-

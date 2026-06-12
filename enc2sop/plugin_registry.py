@@ -25,7 +25,7 @@ _PLUGIN_SPECS = {
         name="transport",
         module_check="qrcode_helper",
         entrypoint="enc2sop.transport_plugin:main",
-        description="airgap transport workflows (export/recover/verify/analyze/ocr)",
+        description="airgap transport workflows (export/recover/verify/analyze/ocr/certify)",
         install_hint=(
             "transport plugin is unavailable. Ensure qrcode transport files are present "
             "or install a build that includes optional transport support."

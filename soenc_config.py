@@ -14,6 +14,8 @@ from typing import Optional
 from typing import Tuple
 
 from toolchain_profile import SUPPORTED_BUILD_PROFILES
+from enc2sop.protect.hardening import HARDENING_PROFILE_OFF
+from enc2sop.protect.hardening import SUPPORTED_HARDENING_PROFILES
 
 DEFAULT_CONFIG_FILENAME = "soenc.toml"
 SUPPORTED_KEY_MODES = (
@@ -175,6 +177,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
             "python_exe",
             "build_profile",
             "vcvars_path",
+            "hardening_profile",
         ),
     )
 
@@ -198,6 +201,15 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
             )
         build_profile = normalized
     vcvars_path = _resolve_path_text(_optional_text(build_table.get("vcvars_path"), "build.vcvars_path"), config_dir)
+    hardening_profile = _optional_text(build_table.get("hardening_profile"), "build.hardening_profile")
+    if hardening_profile is not None:
+        hardening_profile = hardening_profile.lower()
+        if hardening_profile not in SUPPORTED_HARDENING_PROFILES:
+            raise SoencConfigError(
+                "build.hardening_profile must be one of: {0}".format(", ".join(SUPPORTED_HARDENING_PROFILES))
+            )
+    else:
+        hardening_profile = HARDENING_PROFILE_OFF
 
     return {
         "output_dir": output_dir,
@@ -209,6 +221,7 @@ def _parse_build_section(build_table: Mapping[str, Any], config_dir: Path) -> Di
         "python_exe": python_exe,
         "build_profile": build_profile,
         "vcvars_path": vcvars_path,
+        "hardening_profile": hardening_profile,
     }
 
 
@@ -223,6 +236,13 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
             "require_manifest_signature",
             "license_file",
             "license_id",
+            "bundle_license",
+            "license_machine_fingerprint",
+            "license_subject",
+            "license_expires_at",
+            "license_allowed_module_hashes",
+            "license_sign_key_file",
+            "license_sign_key_id",
             "kms_profile",
             "kms_endpoint",
             "kms_key_id",
@@ -250,6 +270,22 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
     )
     license_file = _optional_text(keys_table.get("license_file"), "keys.license_file")
     license_id = _optional_text(keys_table.get("license_id"), "keys.license_id")
+    bundle_license = _optional_bool(keys_table.get("bundle_license"), "keys.bundle_license")
+    license_machine_fingerprint = _optional_text(
+        keys_table.get("license_machine_fingerprint"),
+        "keys.license_machine_fingerprint",
+    )
+    license_subject = _optional_text(keys_table.get("license_subject"), "keys.license_subject")
+    license_expires_at = _optional_text(keys_table.get("license_expires_at"), "keys.license_expires_at")
+    license_allowed_module_hashes = _string_list(
+        keys_table.get("license_allowed_module_hashes"),
+        "keys.license_allowed_module_hashes",
+    )
+    license_sign_key_file = _resolve_path_text(
+        _optional_text(keys_table.get("license_sign_key_file"), "keys.license_sign_key_file"),
+        config_dir,
+    )
+    license_sign_key_id = _optional_text(keys_table.get("license_sign_key_id"), "keys.license_sign_key_id")
     kms_profile = _optional_text(keys_table.get("kms_profile"), "keys.kms_profile")
     kms_endpoint = _optional_text(keys_table.get("kms_endpoint"), "keys.kms_endpoint")
     kms_key_id = _optional_text(keys_table.get("kms_key_id"), "keys.kms_key_id")
@@ -280,6 +316,15 @@ def _parse_keys_section(keys_table: Mapping[str, Any], config_dir: Path) -> Dict
         "require_manifest_signature": require_manifest_signature,
         "license_file": license_file,
         "license_id": license_id,
+        "bundle_license": bundle_license,
+        "license_machine_fingerprint": license_machine_fingerprint,
+        "license_subject": license_subject,
+        "license_expires_at": license_expires_at,
+        "license_allowed_module_hashes": (
+            list(license_allowed_module_hashes) if license_allowed_module_hashes is not None else None
+        ),
+        "license_sign_key_file": license_sign_key_file,
+        "license_sign_key_id": license_sign_key_id,
         "kms_profile": kms_profile,
         "kms_endpoint": kms_endpoint,
         "kms_key_id": kms_key_id,
@@ -359,6 +404,13 @@ def load_project_config(
             "require_manifest_signature": keys.get("require_manifest_signature"),
             "license_file": keys.get("license_file"),
             "license_id": keys.get("license_id"),
+            "bundle_license": keys.get("bundle_license"),
+            "license_machine_fingerprint": keys.get("license_machine_fingerprint"),
+            "license_subject": keys.get("license_subject"),
+            "license_expires_at": keys.get("license_expires_at"),
+            "license_allowed_module_hash": keys.get("license_allowed_module_hashes"),
+            "license_sign_key_file": keys.get("license_sign_key_file"),
+            "license_sign_key_id": keys.get("license_sign_key_id"),
             "kms_profile": keys.get("kms_profile"),
             "kms_endpoint": keys.get("kms_endpoint"),
             "kms_key_id": keys.get("kms_key_id"),
