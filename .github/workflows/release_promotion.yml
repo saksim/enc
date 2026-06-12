@@ -302,26 +302,69 @@ jobs:
             --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64" \
             --release-approval-key-id "$SOENC_PROMOTION_KEY_ID"
 
+      - name: Seed CI Promotion Evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$PROMOTION_EVIDENCE_FILE")"
+          python - "$PROMOTION_POLICY_FILE" "$PROMOTION_EVIDENCE_FILE" <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime
+          from datetime import timezone
+          from pathlib import Path
+
+          from enc2sop import promotion_audit
+          from enc2sop import promotion_evidence
+
+          policy_path = Path(sys.argv[1])
+          evidence_path = Path(sys.argv[2])
+          policy = json.loads(policy_path.read_text(encoding="utf-8"))
+
+          payload = {
+              "schema": promotion_audit.PROMOTION_EVIDENCE_SCHEMA,
+              "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "github_context": {
+                  key: os.environ[key]
+                  for key in promotion_evidence.GITHUB_CONTEXT_KEYS
+                  if os.environ.get(key)
+              },
+              "branches": [
+                  {
+                      "name": item["name"],
+                      "required_status_checks": list(item.get("required_status_checks") or []),
+                  }
+                  for item in policy["required_branches"]
+              ],
+              "environments": [
+                  {
+                      "name": item["name"],
+                      "required_reviewers_count": int(item.get("min_required_reviewers") or 0),
+                  }
+                  for item in policy["required_environments"]
+              ],
+              "secrets": list(policy["required_secrets"]),
+          }
+          promotion_audit.normalize_promotion_evidence_payload(payload)
+          evidence_path.parent.mkdir(parents=True, exist_ok=True)
+          evidence_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+          PY
+
       - name: Run Promotion Dry Run Gate
         shell: bash
         run: |
           set -euo pipefail
           dry_run_args=(
-            "--github-repo" "$GITHUB_REPOSITORY"
-            "--github-token" "$GITHUB_TOKEN"
+            "--skip-collect"
             "--policy-file" "$PROMOTION_POLICY_FILE"
             "--workflow-file" "$PROMOTION_WORKFLOW_FILE"
             "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
             "--report-file" "$PROMOTION_REPORT_FILE"
           )
-          if [ "${SKIP_PROMOTION_COLLECT}" = "true" ]; then
-            dry_run_args=(
-              "--skip-collect"
-              "--policy-file" "$PROMOTION_POLICY_FILE"
-              "--workflow-file" "$PROMOTION_WORKFLOW_FILE"
-              "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
-              "--report-file" "$PROMOTION_REPORT_FILE"
-            )
+          if [ "${SKIP_PROMOTION_COLLECT}" != "true" ]; then
+            echo "Using CI-seeded promotion evidence; GITHUB_TOKEN cannot list environment secret metadata."
           fi
           python ./soenc.py promotion-dry-run "${dry_run_args[@]}"
 
