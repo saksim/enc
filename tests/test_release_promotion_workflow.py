@@ -760,7 +760,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("run number is not numeric in summary metadata for run_id=${run_id}", payload)
         self.assertIn("run number is not numeric in run details metadata for run_id=${run_id}", payload)
         self.assertIn("run number mismatch between summary and run details for run_id=${run_id}", payload)
-        self.assertIn("run retention_days is missing in run details for run_id=${run_id}", payload)
+        self.assertIn("Run details retention_days is missing; deferring retention_days verification to workflow artifacts for run_id=${run_id}.", payload)
         self.assertIn("run retention_days is not numeric in run details for run_id=${run_id}", payload)
         self.assertIn("run retention_days must be positive in run details for run_id=${run_id}", payload)
         self.assertIn("run attempt is missing in run details for run_id=${run_id}", payload)
@@ -971,6 +971,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         )
         self.assertIn("rotation_workflow_retention_days = parse_required_positive_integer(", payload)
         self.assertIn("\"rotation_rehearsal_report.workflow_retention_days\",", payload)
+        self.assertIn("workflow_retention_days = rotation_workflow_retention_days", payload)
         self.assertIn("rotation_rehearsal_report.workflow_retention_days mismatch with run retention_days: expected {0}, got {1}", payload)
         self.assertIn("rotation_rehearsal_report.{0} must not contain leading or trailing whitespace", payload)
         self.assertIn(

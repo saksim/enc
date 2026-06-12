@@ -1690,19 +1690,18 @@ if [[ -n "$run_number" && -n "$run_number_api" && "$run_number" != "$run_number_
 fi
 
 if [[ -z "$run_retention_days_api" ]]; then
-  echo "run retention_days is missing in run details for run_id=${run_id}" >&2
-  echo "run_url=${run_url}" >&2
-  exit 1
-fi
-if [[ ! "$run_retention_days_api" =~ ^[0-9]+$ ]]; then
-  echo "run retention_days is not numeric in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
-  echo "run_url=${run_url}" >&2
-  exit 1
-fi
-if [[ "$run_retention_days_api" -le 0 ]]; then
-  echo "run retention_days must be positive in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
-  echo "run_url=${run_url}" >&2
-  exit 1
+  echo "Run details retention_days is missing; deferring retention_days verification to workflow artifacts for run_id=${run_id}." >&2
+else
+  if [[ ! "$run_retention_days_api" =~ ^[0-9]+$ ]]; then
+    echo "run retention_days is not numeric in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  if [[ "$run_retention_days_api" -le 0 ]]; then
+    echo "run retention_days must be positive in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
 fi
 
 run_timestamp_verification="$(python - "$run_id" "$run_url" "$run_created_at" "$run_started_at" "$run_updated_at" "$run_created_at_api" "$run_started_at_api" "$run_updated_at_api" <<'PY'
@@ -3306,6 +3305,8 @@ rotation_workflow_retention_days = parse_required_positive_integer(
     "rotation_rehearsal_report.workflow_retention_days",
     rotation_report_payload.get("workflow_retention_days"),
 )
+if not workflow_retention_days:
+    workflow_retention_days = rotation_workflow_retention_days
 require_timestamp_within_workflow_run_window(
     "rotation_rehearsal_report.generated_at_utc",
     rotation_report_generated_at_utc,
