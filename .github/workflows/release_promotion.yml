@@ -424,12 +424,15 @@ jobs:
             echo "::error::Missing required secret SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64 for rotation rehearsal"
             exit 1
           fi
+          rotation_release_dir="${RELEASE_DIR}.rotation-rehearsal"
+          rm -rf "$rotation_release_dir"
+          cp -a "$RELEASE_DIR" "$rotation_release_dir"
           set +e
           python ./soenc.py release \
-            --dist-dir "$RELEASE_DIR" \
+            --dist-dir "$rotation_release_dir" \
             --require-manifest-signature \
             --require-release-approval \
-            --release-approval-file "$RELEASE_DIR/release_approval.json" \
+            --release-approval-file "$rotation_release_dir/release_approval.json" \
             --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64" \
             --release-approval-key-id "$SOENC_PROMOTION_KEY_ID"
           status=$?

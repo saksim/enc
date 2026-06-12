@@ -126,6 +126,25 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn('\n          {\n            "schema": "enc2sop-rotation-rehearsal/v1"', section)
         self.assertNotIn('\n            {\n              "schema": "enc2sop-rotation-rehearsal/v1"', section)
 
+    def test_rotation_rehearsal_uses_isolated_release_copy(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        workflow_path = repo_root / ".github" / "workflows" / "release_promotion.yml"
+        payload = workflow_path.read_text(encoding="utf-8")
+
+        marker = "      - name: Rehearse Approval Key Rotation (old key must fail)"
+        next_marker = "      - name: Verify Promotion Artifacts"
+        start = payload.index(marker)
+        end = payload.index(next_marker, start)
+        section = payload[start:end]
+
+        self.assertIn('rotation_release_dir="${RELEASE_DIR}.rotation-rehearsal"', section)
+        self.assertIn('rm -rf "$rotation_release_dir"', section)
+        self.assertIn('cp -a "$RELEASE_DIR" "$rotation_release_dir"', section)
+        self.assertIn('--dist-dir "$rotation_release_dir"', section)
+        self.assertIn('--release-approval-file "$rotation_release_dir/release_approval.json"', section)
+        self.assertNotIn('--dist-dir "$RELEASE_DIR"', section)
+        self.assertNotIn('--release-approval-file "$RELEASE_DIR/release_approval.json"', section)
+
     def test_mainline_beta_smoke_script_contract(self):
         repo_root = pathlib.Path(__file__).resolve().parents[1]
         script_path = repo_root / "scripts" / "mainline_beta_smoke.ps1"
