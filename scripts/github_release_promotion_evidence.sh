@@ -2649,7 +2649,7 @@ artifact_zip_path="${run_dir}/${artifact_name}.zip"
 mkdir -p "$download_dir"
 
 echo "Downloading artifact archive ${artifact_name}"
-gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" --method GET --header "Accept: application/zip" --output "$artifact_zip_path"
+gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" --method GET --header "Accept: application/zip" > "$artifact_zip_path"
 
 echo "Verifying artifact archive digest and extracting ${artifact_name}"
 artifact_archive_verification="$(python - "$artifact_zip_path" "$artifact_digest" "$artifact_size_bytes" "$download_dir" <<'PY'
