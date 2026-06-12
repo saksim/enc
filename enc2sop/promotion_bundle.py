@@ -171,9 +171,13 @@ def create_promotion_artifact_bundle(
     promotion_audit.normalize_promotion_evidence_payload(
         _load_json_object(evidence_path, "promotion evidence"),
     )
-    promotion_audit.normalize_promotion_audit_report_payload(
+    normalized_promotion_report = promotion_audit.normalize_promotion_audit_report_payload(
         _load_json_object(promotion_report_path, "promotion audit report"),
     )
+    if not bool(normalized_promotion_report.get("passed")):
+        raise PromotionArtifactBundleError(
+            "promotion audit report must be passed=true before bundling"
+        )
 
     rows = _bundle_rows(
         release_dir=release_dir,

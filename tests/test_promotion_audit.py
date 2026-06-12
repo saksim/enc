@@ -24,6 +24,68 @@ class PromotionAuditTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(str(root), ignore_errors=True))
         return root
 
+    def test_normalize_promotion_audit_report_payload_accepts_passed_report(self):
+        root = self.make_case_root("promotion_audit_normalize")
+        evidence_path = root / "promotion_evidence.json"
+        policy_path = root / "policy.json"
+        workflow_path = root / "release_promotion.yml"
+        payload = {
+            "schema": promotion_audit.PROMOTION_AUDIT_REPORT_SCHEMA,
+            "generated_at_utc": "2026-06-12T00:00:00Z",
+            "passed": True,
+            "summary": {
+                "branch_failures": 0,
+                "environment_failures": 0,
+                "secret_failures": 0,
+                "workflow_failures": 0,
+                "total_failures": 0,
+            },
+            "failures": [],
+            "details": {
+                "branches": [],
+                "environments": [],
+                "secrets": [],
+                "workflow": [],
+            },
+            "inputs": {
+                "policy_file": str(policy_path),
+                "policy_sha256": "a" * 64,
+                "evidence_file": str(evidence_path),
+                "evidence_sha256": "b" * 64,
+                "workflow_file": str(workflow_path),
+                "workflow_sha256": "c" * 64,
+            },
+        }
+
+        normalized = promotion_audit.normalize_promotion_audit_report_payload(payload)
+
+        self.assertTrue(normalized["passed"])
+        self.assertEqual(normalized["summary"]["total_failures"], 0)
+        self.assertEqual(normalized["inputs"]["workflow_sha256"], "c" * 64)
+
+    def test_normalize_promotion_audit_report_payload_rejects_failure_count_mismatch(self):
+        root = self.make_case_root("promotion_audit_normalize_bad")
+        payload = {
+            "schema": promotion_audit.PROMOTION_AUDIT_REPORT_SCHEMA,
+            "passed": False,
+            "summary": {"total_failures": 2},
+            "failures": ["missing branch evidence for 'main'"],
+            "inputs": {
+                "policy_file": str(root / "policy.json"),
+                "policy_sha256": "a" * 64,
+                "evidence_file": str(root / "promotion_evidence.json"),
+                "evidence_sha256": "b" * 64,
+                "workflow_file": str(root / "release_promotion.yml"),
+                "workflow_sha256": None,
+            },
+        }
+
+        with self.assertRaisesRegex(
+            promotion_audit.PromotionAuditError,
+            "total_failures must match length",
+        ):
+            promotion_audit.normalize_promotion_audit_report_payload(payload)
+
     def test_run_promotion_audit_writes_input_digest_binding_metadata(self):
         root = self.make_case_root("promotion_audit_input_binding")
         policy_path = root / "policy.json"

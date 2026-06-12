@@ -1,0 +1,38 @@
+# enc2sop non-OCR Mainline Beta / production-default template.
+# This file intentionally uses license-file, externalized license delivery,
+# signed manifests, native-only runtime loading, no-source release packaging,
+# and signed release approval. Replace placeholder paths/ids before use.
+
+[build]
+output_dir = "./protected_build"
+dist_dir = "./dist_native"
+compile = true
+runtime_native_loader = true
+build_profile = "auto"
+hardening_profile = "balanced"
+
+[keys]
+mode = "license-file"
+license_file = "licenses/production.license.json"
+license_id = "production-mainline-beta"
+bundle_license = false
+require_manifest_signature = true
+manifest_sign_key_file = "keys/manifest-signing.key"
+manifest_key_id = "manifest-mainline-beta"
+license_sign_key_file = "keys/license-signing.key"
+license_sign_key_id = "license-mainline-beta"
+# Optional production hardening knobs:
+# license_machine_fingerprint = "<stable-machine-fingerprint>"
+# license_subject = "<customer-or-tenant-id>"
+# license_expires_at = "2099-01-01T00:00:00Z"
+
+[release]
+require_approval = true
+approval_file = "./dist_native/release_approval.json"
+approval_key_file = "keys/release-approval.key"
+approval_key_id = "release-approval-mainline-beta"
+
+[package]
+name = "enc2sop-protected-package"
+version = "0.0.0-mainline-beta"
+channel = "mainline-beta"

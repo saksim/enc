@@ -213,6 +213,24 @@ class SoencConfigTests(unittest.TestCase):
             self.assertEqual(project.cli_defaults["hardening_profile"], "balanced")
             self.assertTrue(project.cli_defaults["skip_bad_files"])
 
+    def test_production_template_uses_license_file_beta_defaults(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        cfg_path = repo_root / "soenc.production.toml"
+
+        project = soenc_config.load_project_config(str(cfg_path), base_dir=repo_root)
+
+        self.assertIsNotNone(project)
+        self.assertEqual(project.key_mode, "license-file")
+        self.assertTrue(project.cli_defaults["compile"])
+        self.assertTrue(project.cli_defaults["runtime_native_loader"])
+        self.assertEqual(project.cli_defaults["hardening_profile"], "balanced")
+        self.assertTrue(project.cli_defaults["require_manifest_signature"])
+        self.assertFalse(project.cli_defaults["bundle_license"])
+        self.assertEqual(project.cli_defaults["license_file"], "licenses/production.license.json")
+        self.assertIsNotNone(project.cli_defaults["license_sign_key_file"])
+        self.assertTrue(project.cli_defaults["require_release_approval"])
+        self.assertEqual(project.cli_defaults["release_approval_key_id"], "release-approval-mainline-beta")
+
     def test_load_project_config_rejects_invalid_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()

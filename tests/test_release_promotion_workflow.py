@@ -84,6 +84,23 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("\"workflow_ref_protected\": \"${GITHUB_REF_PROTECTED}\"", payload)
         self.assertIn("if-no-files-found: error", payload)
 
+    def test_mainline_beta_smoke_script_contract(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        script_path = repo_root / "scripts" / "mainline_beta_smoke.ps1"
+        self.assertTrue(script_path.exists(), "Mainline Beta smoke script is missing")
+        payload = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("non_ocr_code_protection_launch_strategy_20260612.md", payload)
+        self.assertIn(r"tests\test_encryption_helper.py", payload)
+        self.assertIn(r"tests\test_decryption_helper.py", payload)
+        self.assertIn(r"tests\test_soenc_cli.py", payload)
+        self.assertIn(r"tests\test_promotion_bundle.py", payload)
+        self.assertIn(r"tests\test_release_promotion_workflow.py", payload)
+        self.assertIn(r"scripts\smoke_code_protection.py", payload)
+        self.assertIn(r"scripts\smoke_runtime_integrity.py", payload)
+        self.assertIn("MAINLINE_BETA_SMOKE_OK", payload)
+        self.assertNotIn("test_crossmedia", payload)
+
     def test_live_promotion_capture_script_contract(self):
         repo_root = pathlib.Path(__file__).resolve().parents[1]
         script_path = repo_root / "scripts" / "github_release_promotion_evidence.sh"
