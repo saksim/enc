@@ -109,6 +109,23 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("\"workflow_ref_protected\": \"${GITHUB_REF_PROTECTED}\"", payload)
         self.assertIn("if-no-files-found: error", payload)
 
+    def test_rotation_rehearsal_report_heredoc_delimiter_is_left_aligned(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        workflow_path = repo_root / ".github" / "workflows" / "release_promotion.yml"
+        payload = workflow_path.read_text(encoding="utf-8")
+
+        marker = "      - name: Rehearse Approval Key Rotation (old key must fail)"
+        next_marker = "      - name: Verify Promotion Artifacts"
+        start = payload.index(marker)
+        end = payload.index(next_marker, start)
+        section = payload[start:end]
+
+        self.assertIn('cat <<JSON > "$ROTATION_REPORT_FILE"', section)
+        self.assertIn("\n          JSON\n", section)
+        self.assertNotIn("\n            JSON\n", section)
+        self.assertIn('\n          {\n            "schema": "enc2sop-rotation-rehearsal/v1"', section)
+        self.assertNotIn('\n            {\n              "schema": "enc2sop-rotation-rehearsal/v1"', section)
+
     def test_mainline_beta_smoke_script_contract(self):
         repo_root = pathlib.Path(__file__).resolve().parents[1]
         script_path = repo_root / "scripts" / "mainline_beta_smoke.ps1"
