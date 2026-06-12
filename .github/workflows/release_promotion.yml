@@ -188,7 +188,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          workspace_root=".tmp_ci/workspace"
+          workspace_root="$(pwd)/.tmp_ci/workspace"
           source_root="${workspace_root}/src_pkg"
           staging_dir="${workspace_root}/staging"
           scope_file="${workspace_root}/scope.json"

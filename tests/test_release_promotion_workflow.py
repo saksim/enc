@@ -69,6 +69,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("hardening_profile = \"balanced\"", payload)
         self.assertIn("python encryption_helper.py", payload)
         self.assertIn("--config \"$ci_config\"", payload)
+        self.assertIn("workspace_root=\"$(pwd)/.tmp_ci/workspace\"", payload)
         self.assertIn("\"workflow_name\": \"${GITHUB_WORKFLOW}\"", payload)
         self.assertIn("\"workflow_repository\": \"${GITHUB_REPOSITORY}\"", payload)
         self.assertIn("\"workflow_run_number\": \"${GITHUB_RUN_NUMBER}\"", payload)
