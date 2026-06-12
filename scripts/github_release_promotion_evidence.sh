@@ -1182,14 +1182,39 @@ if [[ -n "$dispatch_workflow_id_api" ]]; then
   fi
 fi
 
-if [[ -z "$run_workflow_path_ref" || "$run_workflow_path_ref" != *@* ]]; then
-  echo "Unable to resolve workflow path@ref identity for run_id=${run_id}." >&2
+if [[ -z "$run_workflow_path_ref" ]]; then
+  echo "Unable to resolve workflow path identity for run_id=${run_id}." >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_workflow_path_ref" != "${run_workflow_path_ref//[[:space:]]/}" ]]; then
+  echo "Resolved workflow path identity is invalid for run_id=${run_id}: ${run_workflow_path_ref}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
 
-run_workflow_path="${run_workflow_path_ref%@*}"
-run_workflow_ref="${run_workflow_path_ref#*@}"
+if [[ "$run_workflow_path_ref" == *@* ]]; then
+  run_workflow_path="${run_workflow_path_ref%@*}"
+  run_workflow_ref="${run_workflow_path_ref#*@}"
+else
+  run_workflow_path="$run_workflow_path_ref"
+  if [[ -z "$run_head_branch_api" ]]; then
+    echo "Unable to derive workflow ref for run_id=${run_id}: run details path did not include @ref and head_branch is missing." >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  run_workflow_ref="$run_head_branch_api"
+  echo "Run details workflow path did not include @ref; deriving workflow ref from head_branch for run_id=${run_id}." >&2
+fi
+
+if [[ "$run_workflow_path" == "${REPO}/.github/workflows/"* ]]; then
+  run_workflow_path="${run_workflow_path#${REPO}/}"
+fi
+if [[ -z "$run_workflow_path" || "$run_workflow_path" != "${run_workflow_path//[[:space:]]/}" ]]; then
+  echo "Resolved workflow path is invalid for run_id=${run_id}: ${run_workflow_path}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
 
 if [[ -n "$expected_workflow_path" && "$run_workflow_path" != "$expected_workflow_path" ]]; then
   echo "workflow path mismatch for run_id=${run_id}: expected ${expected_workflow_path}, got ${run_workflow_path}" >&2
@@ -1282,6 +1307,8 @@ if [[ -n "$run_head_branch_api" ]]; then
     exit 1
   fi
 fi
+run_workflow_ref="$workflow_ref_normalization_verified"
+run_workflow_path_ref_identity="${REPO}/${run_workflow_path}@${run_workflow_ref}"
 
 if [[ -n "$expected_branch_ref" ]]; then
   require_branch_match="false"
@@ -2751,7 +2778,7 @@ python - \
   "$run_event_api" \
   "$run_head_branch_api" \
   "$run_workflow_path" \
-  "$run_workflow_ref" \
+  "$run_workflow_path_ref_identity" \
   "$run_html_url_api" \
   "$run_url_host_verified" \
   "$run_url_attempt_verified" \
@@ -4886,6 +4913,7 @@ if workflow_path_ref:
     if workflow_path_ref_ref != workflow_path_ref_ref.strip():
         print("Resolved run workflow ref segment must not contain leading or trailing whitespace.", file=sys.stderr)
         sys.exit(1)
+    workflow_ref = workflow_path_ref_ref
     context_workflow_ref_value = run_receipt_context.get("GITHUB_WORKFLOW_REF")
     if not isinstance(context_workflow_ref_value, str) or not context_workflow_ref_value:
         print("promotion_run_receipt.github_context missing required key: GITHUB_WORKFLOW_REF", file=sys.stderr)
