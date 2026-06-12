@@ -124,6 +124,13 @@ require_token_no_whitespace() {
   fi
 }
 
+strip_crlf() {
+  local value="$1"
+  value="${value//$'\r'/}"
+  value="${value//$'\n'/}"
+  printf '%s' "$value"
+}
+
 verify_github_cli_repo_access() {
   local repo="$1"
   local auth_status_output=""
@@ -363,6 +370,9 @@ verify_secret_metadata_name() {
   local secret_encoded=""
   local repo_secret_json=""
   local repo_secret_status=0
+  secret_name="$(strip_crlf "$secret_name")"
+  environment_name="$(strip_crlf "$environment_name")"
+  require_token_no_whitespace "$secret_name" "required-secret"
   secret_encoded="$(urlencode_path_segment "$secret_name")"
   set +e
   repo_secret_json="$(gh api "repos/${repo}/actions/secrets/${secret_encoded}" 2>&1)"
@@ -550,6 +560,7 @@ print(workflow_id_text)
 
 urlencode_path_segment() {
   local value="$1"
+  value="$(strip_crlf "$value")"
   python - "$value" <<'PY'
 import sys
 from urllib.parse import quote
@@ -916,6 +927,7 @@ environment_preflight_json="$(verify_environment_preflight "$REPO" "$EXPECTED_EN
 required_secret_names_resolved="$(verify_required_secrets_preflight "$REPO" "$EXPECTED_ENVIRONMENT" "$REQUIRED_SECRET_NAMES" "$ROTATION_REHEARSAL")"
 required_secret_preflight_jsonl=""
 while IFS= read -r required_secret_name; do
+  required_secret_name="$(strip_crlf "$required_secret_name")"
   if [[ -z "$required_secret_name" ]]; then
     continue
   fi
