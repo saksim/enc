@@ -238,7 +238,7 @@ jobs:
 
           [keys]
           mode = "license-file"
-          license_file = "${workspace_root}/licenses/ci-license.json"
+          license_file = "licenses/ci-license.json"
           license_id = "ci-mainline-beta-license"
           bundle_license = false
           require_manifest_signature = true
@@ -263,7 +263,8 @@ jobs:
             --config "$ci_config" \
             -t "$source_root" \
             -o "$staging_dir" \
-            --scope-config "$scope_file"
+            --scope-config "$scope_file" \
+            --no-compile
           python ./soenc.py build \
             --config "$ci_config" \
             --staging-dir "$staging_dir" \
