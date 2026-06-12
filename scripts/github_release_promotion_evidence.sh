@@ -4319,8 +4319,6 @@ required_run_receipt_entries = {
     "promotion_evidence": "promotion_evidence.json",
     "promotion_audit_report": "promotion_audit_report.json",
     "rotation_rehearsal_report": "rotation_rehearsal_report.json",
-    "promotion_policy": "promotion_rollout_policy.json",
-    "promotion_workflow": "release_promotion.yml",
     "promotion_artifact_audit_report": "promotion_artifact_audit_report.json",
 }
 
@@ -4447,6 +4445,15 @@ if promotion_artifact_audit_report_policy_file != policy_row["path"]:
         file=sys.stderr,
     )
     sys.exit(1)
+if policy_row["sha256"] != bundle_policy_row["sha256"]:
+    print(
+        "promotion_run_receipt.artifacts[promotion_policy].sha256 mismatch with promotion_policy bundle entry: expected {0}, got {1}".format(
+            bundle_policy_row["sha256"],
+            policy_row["sha256"],
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 workflow_row = run_receipt_rows_by_name.get("promotion_workflow")
 if workflow_row is None:
     print(
@@ -4468,6 +4475,15 @@ if promotion_artifact_audit_report_workflow_file != workflow_row["path"]:
         "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}".format(
             workflow_row["path"],
             promotion_artifact_audit_report_workflow_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if workflow_row["sha256"] != bundle_workflow_row["sha256"]:
+    print(
+        "promotion_run_receipt.artifacts[promotion_workflow].sha256 mismatch with promotion_workflow bundle entry: expected {0}, got {1}".format(
+            bundle_workflow_row["sha256"],
+            workflow_row["sha256"],
         ),
         file=sys.stderr,
     )

@@ -512,6 +512,14 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
             payload,
         )
         self.assertIn(
+            "promotion_run_receipt.artifacts[promotion_policy].sha256 mismatch with promotion_policy bundle entry: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_run_receipt.artifacts[promotion_workflow].sha256 mismatch with promotion_workflow bundle entry: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
             "promotion_run_receipt.artifacts missing required entry: promotion_policy",
             payload,
         )
