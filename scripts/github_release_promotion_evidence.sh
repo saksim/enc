@@ -15,6 +15,9 @@ RUN_ID=""
 RUN_ATTEMPT=""
 OUTPUT_ROOT=".tmp_ci/live_promotion"
 PREFLIGHT_ONLY="false"
+EXPECTED_ENVIRONMENT="production-promotion"
+REQUIRE_ENVIRONMENT_REVIEWERS="true"
+REQUIRED_SECRET_NAMES="SOENC_RELEASE_APPROVAL_KEY_B64"
 POLL_INTERVAL_SECONDS=10
 TIMEOUT_SECONDS=5400
 ARTIFACT_INDEX_WAIT_SECONDS=180
@@ -38,6 +41,9 @@ Options:
   --run-attempt <int>                Expected attempt number for --run-id (optional strict check).
   --output-root <dir>                Local evidence output root (default: .tmp_ci/live_promotion).
   --preflight-only                   Validate repo/workflow identity, write promotion_preflight_receipt.json, and exit before dispatch.
+  --expected-environment <name>      Required GitHub environment name (default: production-promotion).
+  --no-require-environment-reviewers Do not require at least one deployment branch policy/reviewer in environment preflight.
+  --required-secret <name>           Required repository/environment secret metadata name. Repeatable.
   --poll-interval-seconds <int>      Run-state poll interval (default: 10).
   --timeout-seconds <int>            Max wait for run completion (default: 5400).
   --artifact-index-wait-seconds <int>
@@ -100,6 +106,20 @@ require_repo_slug() {
   fi
   if [[ "$value" != */* || "$value" == */ || "$value" == /* || "$value" == */*/* ]]; then
     echo "Invalid repo slug: ${value} (expected owner/repo)" >&2
+    exit 1
+  fi
+}
+
+join_by_comma() {
+  local IFS=","
+  printf '%s' "$*"
+}
+
+require_token_no_whitespace() {
+  local value="$1"
+  local label="$2"
+  if [[ -z "$value" || "$value" != "${value//[[:space:]]/}" ]]; then
+    echo "Invalid ${label}: ${value} (expected non-empty token without whitespace)" >&2
     exit 1
   fi
 }
@@ -210,6 +230,183 @@ PY
   printf '%s\n' "$workflow_path"
   printf '%s\n' "$workflow_state"
   printf '%s\n' "$workflow_name"
+}
+
+verify_branch_protection_preflight() {
+  local repo="$1"
+  local ref_name="$2"
+  if [[ -z "$ref_name" ]]; then
+    echo '{"required":false,"verified":false,"reason":"non-branch-ref"}'
+    return 0
+  fi
+  local branch_encoded=""
+  local branch_json=""
+  local branch_status=0
+  branch_encoded="$(urlencode_path_segment "$ref_name")"
+  set +e
+  branch_json="$(gh api "repos/${repo}/branches/${branch_encoded}" 2>&1)"
+  branch_status=$?
+  set -e
+  if [[ "$branch_status" -ne 0 ]]; then
+    echo "Unable to resolve branch protection metadata for ${repo}@${ref_name}." >&2
+    printf '%s\n' "$branch_json" >&2
+    exit 1
+  fi
+  python - "$ref_name" "$branch_json" <<'PY'
+import json
+import sys
+
+ref_name = sys.argv[1]
+payload = json.loads(sys.argv[2])
+protected = payload.get("protected")
+if protected is not True:
+    print(
+        "Branch protection preflight failed for {0}: branches API protected flag must be true".format(ref_name),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(json.dumps({
+    "required": True,
+    "verified": True,
+    "branch": ref_name,
+    "protected": True,
+}, ensure_ascii=False))
+PY
+}
+
+verify_environment_preflight() {
+  local repo="$1"
+  local environment_name="$2"
+  local require_reviewers="$3"
+  if [[ -z "$environment_name" ]]; then
+    echo '{"required":false,"verified":false,"reason":"not-configured"}'
+    return 0
+  fi
+  local environment_encoded=""
+  local environment_json=""
+  local environment_status=0
+  environment_encoded="$(urlencode_path_segment "$environment_name")"
+  set +e
+  environment_json="$(gh api "repos/${repo}/environments/${environment_encoded}" 2>&1)"
+  environment_status=$?
+  set -e
+  if [[ "$environment_status" -ne 0 ]]; then
+    echo "Unable to resolve environment metadata for ${repo} environment ${environment_name}." >&2
+    printf '%s\n' "$environment_json" >&2
+    exit 1
+  fi
+  python - "$environment_name" "$require_reviewers" "$environment_json" <<'PY'
+import json
+import sys
+
+expected_name, require_reviewers, raw = sys.argv[1:4]
+payload = json.loads(raw)
+actual_name = payload.get("name")
+if actual_name != expected_name:
+    print(
+        "Environment preflight name mismatch: expected {0}, got {1}".format(expected_name, actual_name),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+protection_rules = payload.get("protection_rules")
+if not isinstance(protection_rules, list):
+    protection_rules = []
+reviewer_count = 0
+required_reviewer_rule_count = 0
+for rule in protection_rules:
+    if not isinstance(rule, dict) or rule.get("type") != "required_reviewers":
+        continue
+    required_reviewer_rule_count += 1
+    reviewers = rule.get("reviewers")
+    if isinstance(reviewers, list):
+        reviewer_count += len(reviewers)
+if require_reviewers == "true" and reviewer_count <= 0:
+    print("Environment preflight requires at least one reviewer for {0}".format(expected_name), file=sys.stderr)
+    sys.exit(1)
+deployment_branch_policy = payload.get("deployment_branch_policy")
+print(json.dumps({
+    "required": True,
+    "verified": True,
+    "name": actual_name,
+    "reviewer_count": reviewer_count,
+    "required_reviewer_rule_count": required_reviewer_rule_count,
+    "reviewers_required": require_reviewers == "true",
+    "deployment_branch_policy_present": isinstance(deployment_branch_policy, dict),
+}, ensure_ascii=False))
+PY
+}
+
+verify_required_secrets_preflight() {
+  local repo="$1"
+  local environment_name="$2"
+  local required_csv="$3"
+  local rotation_rehearsal="$4"
+  python - "$required_csv" "$rotation_rehearsal" <<'PY'
+import sys
+
+required_csv, rotation_rehearsal = sys.argv[1:3]
+names = [item.strip() for item in required_csv.split(",") if item.strip()]
+if rotation_rehearsal == "true" and "SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64" not in names:
+    names.append("SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64")
+for name in names:
+    if any(ch.isspace() for ch in name):
+        print("Required secret name must not contain whitespace: {0}".format(name), file=sys.stderr)
+        sys.exit(1)
+print("\n".join(names))
+PY
+}
+
+verify_secret_metadata_name() {
+  local repo="$1"
+  local environment_name="$2"
+  local secret_name="$3"
+  local secret_encoded=""
+  local repo_secret_json=""
+  local repo_secret_status=0
+  secret_encoded="$(urlencode_path_segment "$secret_name")"
+  set +e
+  repo_secret_json="$(gh api "repos/${repo}/actions/secrets/${secret_encoded}" 2>&1)"
+  repo_secret_status=$?
+  set -e
+  if [[ "$repo_secret_status" -eq 0 ]]; then
+    python - "$secret_name" "repository" "$repo_secret_json" <<'PY'
+import json
+import sys
+expected_name, scope, raw = sys.argv[1:4]
+payload = json.loads(raw)
+if payload.get("name") != expected_name:
+    print("Required secret metadata name mismatch for {0}: got {1}".format(expected_name, payload.get("name")), file=sys.stderr)
+    sys.exit(1)
+print(json.dumps({"name": expected_name, "scope": scope, "metadata_verified": True}, ensure_ascii=False))
+PY
+    return 0
+  fi
+  if [[ -n "$environment_name" ]]; then
+    local environment_encoded=""
+    local env_secret_json=""
+    local env_secret_status=0
+    environment_encoded="$(urlencode_path_segment "$environment_name")"
+    set +e
+    env_secret_json="$(gh api "repos/${repo}/environments/${environment_encoded}/secrets/${secret_encoded}" 2>&1)"
+    env_secret_status=$?
+    set -e
+    if [[ "$env_secret_status" -eq 0 ]]; then
+      python - "$secret_name" "environment" "$environment_name" "$env_secret_json" <<'PY'
+import json
+import sys
+expected_name, scope, environment_name, raw = sys.argv[1:5]
+payload = json.loads(raw)
+if payload.get("name") != expected_name:
+    print("Required environment secret metadata name mismatch for {0}: got {1}".format(expected_name, payload.get("name")), file=sys.stderr)
+    sys.exit(1)
+print(json.dumps({"name": expected_name, "scope": scope, "environment": environment_name, "metadata_verified": True}, ensure_ascii=False))
+PY
+      return 0
+    fi
+  fi
+  echo "Required secret metadata not found for ${secret_name} in repository or environment ${environment_name:-<none>}." >&2
+  printf '%s\n' "$repo_secret_json" >&2
+  exit 1
 }
 
 normalize_branch_ref_name() {
@@ -419,6 +616,9 @@ write_promotion_preflight_receipt() {
   local workflow_name="$9"
   local rotation_rehearsal="${10}"
   local skip_collect="${11}"
+  local branch_protection_preflight_json="${12}"
+  local environment_preflight_json="${13}"
+  local required_secret_preflight_jsonl="${14}"
   python - \
     "$receipt_path" \
     "$repo" \
@@ -430,7 +630,10 @@ write_promotion_preflight_receipt() {
     "$workflow_state" \
     "$workflow_name" \
     "$rotation_rehearsal" \
-    "$skip_collect" <<'PY'
+    "$skip_collect" \
+    "$branch_protection_preflight_json" \
+    "$environment_preflight_json" \
+    "$required_secret_preflight_jsonl" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -448,7 +651,29 @@ from pathlib import Path
     workflow_name,
     rotation_rehearsal,
     skip_collect,
-) = sys.argv[1:12]
+    branch_protection_preflight_json,
+    environment_preflight_json,
+    required_secret_preflight_jsonl,
+) = sys.argv[1:15]
+
+def load_object(label: str, text: str):
+    try:
+        payload = json.loads(text)
+    except Exception as exc:
+        print("{0} preflight payload is not valid JSON: {1}".format(label, exc), file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(payload, dict):
+        print("{0} preflight payload must be a JSON object".format(label), file=sys.stderr)
+        sys.exit(1)
+    return payload
+
+branch_protection_preflight = load_object("branch_protection", branch_protection_preflight_json)
+environment_preflight = load_object("environment", environment_preflight_json)
+required_secret_preflight = []
+for line in required_secret_preflight_jsonl.splitlines():
+    if not line.strip():
+        continue
+    required_secret_preflight.append(load_object("required_secret", line))
 
 payload = {
     "schema": "enc2sop-promotion-preflight/v1",
@@ -467,6 +692,12 @@ payload = {
         "expected_path": expected_workflow_path or workflow_path,
         "state": workflow_state,
         "name": workflow_name,
+    },
+    "branch_protection_preflight": branch_protection_preflight,
+    "environment_reviewer_preflight": environment_preflight,
+    "required_secret_preflight": {
+        "required_count": len(required_secret_preflight),
+        "secrets": required_secret_preflight,
     },
     "next_step": "rerun without --preflight-only to dispatch or capture the protected-branch promotion run",
 }
@@ -580,6 +811,23 @@ while [[ $# -gt 0 ]]; do
       PREFLIGHT_ONLY="true"
       shift
       ;;
+    --expected-environment)
+      EXPECTED_ENVIRONMENT="$2"
+      shift 2
+      ;;
+    --no-require-environment-reviewers)
+      REQUIRE_ENVIRONMENT_REVIEWERS="false"
+      shift
+      ;;
+    --required-secret)
+      require_token_no_whitespace "$2" "required-secret"
+      if [[ -z "$REQUIRED_SECRET_NAMES" ]]; then
+        REQUIRED_SECRET_NAMES="$2"
+      else
+        REQUIRED_SECRET_NAMES="${REQUIRED_SECRET_NAMES},$2"
+      fi
+      shift 2
+      ;;
     --poll-interval-seconds)
       POLL_INTERVAL_SECONDS="$2"
       shift 2
@@ -616,6 +864,13 @@ fi
 require_boolean_token "$ROTATION_REHEARSAL" "rotation-rehearsal"
 require_boolean_token "$SKIP_PROMOTION_COLLECT" "skip-promotion-collect"
 require_boolean_token "$PREFLIGHT_ONLY" "preflight-only"
+require_boolean_token "$REQUIRE_ENVIRONMENT_REVIEWERS" "require-environment-reviewers"
+if [[ -n "$EXPECTED_ENVIRONMENT" ]]; then
+  if [[ "$EXPECTED_ENVIRONMENT" =~ ^[[:space:]] || "$EXPECTED_ENVIRONMENT" =~ [[:space:]]$ ]]; then
+    echo "Invalid expected-environment: must not contain leading or trailing whitespace" >&2
+    exit 1
+  fi
+fi
 require_positive_integer "$POLL_INTERVAL_SECONDS" "poll-interval-seconds"
 require_positive_integer "$TIMEOUT_SECONDS" "timeout-seconds"
 require_positive_integer "$ARTIFACT_INDEX_WAIT_SECONDS" "artifact-index-wait-seconds"
@@ -656,6 +911,22 @@ if [[ -z "$expected_workflow_path" ]]; then
   expected_workflow_path="$resolved_workflow_definition_path"
 fi
 
+branch_protection_preflight_json="$(verify_branch_protection_preflight "$REPO" "$expected_branch_ref")"
+environment_preflight_json="$(verify_environment_preflight "$REPO" "$EXPECTED_ENVIRONMENT" "$REQUIRE_ENVIRONMENT_REVIEWERS")"
+required_secret_names_resolved="$(verify_required_secrets_preflight "$REPO" "$EXPECTED_ENVIRONMENT" "$REQUIRED_SECRET_NAMES" "$ROTATION_REHEARSAL")"
+required_secret_preflight_jsonl=""
+while IFS= read -r required_secret_name; do
+  if [[ -z "$required_secret_name" ]]; then
+    continue
+  fi
+  required_secret_row="$(verify_secret_metadata_name "$REPO" "$EXPECTED_ENVIRONMENT" "$required_secret_name")"
+  if [[ -z "$required_secret_preflight_jsonl" ]]; then
+    required_secret_preflight_jsonl="$required_secret_row"
+  else
+    required_secret_preflight_jsonl="${required_secret_preflight_jsonl}"$'\n'"${required_secret_row}"
+  fi
+done <<< "$required_secret_names_resolved"
+
 mkdir -p "$OUTPUT_ROOT"
 if [[ "$PREFLIGHT_ONLY" == "true" ]]; then
   preflight_receipt_path="${OUTPUT_ROOT}/promotion_preflight_receipt.json"
@@ -670,7 +941,10 @@ if [[ "$PREFLIGHT_ONLY" == "true" ]]; then
     "$resolved_workflow_definition_state" \
     "$resolved_workflow_definition_name" \
     "$ROTATION_REHEARSAL" \
-    "$SKIP_PROMOTION_COLLECT"
+    "$SKIP_PROMOTION_COLLECT" \
+    "$branch_protection_preflight_json" \
+    "$environment_preflight_json" \
+    "$required_secret_preflight_jsonl"
   echo "Promotion evidence preflight passed."
   echo "preflight_receipt=${preflight_receipt_path}"
   exit 0
@@ -2523,7 +2797,10 @@ python - \
   "$resolved_workflow_definition_id" \
   "$resolved_workflow_definition_path" \
   "$resolved_workflow_definition_state" \
-  "$resolved_workflow_definition_name" <<'PY'
+  "$resolved_workflow_definition_name" \
+  "$branch_protection_preflight_json" \
+  "$environment_preflight_json" \
+  "$required_secret_preflight_jsonl" <<'PY'
 import hashlib
 import json
 import re
@@ -2617,6 +2894,9 @@ from pathlib import Path
     workflow_definition_path,
     workflow_definition_state,
     workflow_definition_name,
+    branch_protection_preflight_json,
+    environment_preflight_json,
+    required_secret_preflight_jsonl,
 ) = sys.argv[1:]
 
 download_root = Path(download_root_arg).resolve()
@@ -2665,6 +2945,31 @@ if missing or duplicate:
     sys.exit(1)
 
 generated_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def load_preflight_object(label: str, text: str):
+    try:
+        payload = json.loads(text)
+    except Exception as exc:
+        print("{0} preflight payload is not valid JSON: {1}".format(label, exc), file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(payload, dict):
+        print("{0} preflight payload must be a JSON object".format(label), file=sys.stderr)
+        sys.exit(1)
+    return payload
+
+branch_protection_preflight = load_preflight_object(
+    "branch_protection",
+    branch_protection_preflight_json,
+)
+environment_preflight = load_preflight_object(
+    "environment",
+    environment_preflight_json,
+)
+required_secret_preflight = [
+    load_preflight_object("required_secret", line)
+    for line in required_secret_preflight_jsonl.splitlines()
+    if line.strip()
+]
 
 def parse_required_iso8601_utc(label: str, value: object):
     if not isinstance(value, str) or not value.strip():
@@ -4873,6 +5178,12 @@ receipt = {
         "state": workflow_definition_state or None,
         "name": workflow_definition_name or None,
         "run_workflow_id": _maybe_int(workflow_run_workflow_id),
+    },
+    "branch_protection_preflight": branch_protection_preflight,
+    "environment_reviewer_preflight": environment_preflight,
+    "required_secret_preflight": {
+        "required_count": len(required_secret_preflight),
+        "secrets": required_secret_preflight,
     },
     "release_context_verification": {
         "contexts_verified": [label for label, _ in release_context_rows],
