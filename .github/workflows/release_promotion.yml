@@ -230,7 +230,6 @@ jobs:
           cat <<TOML > "$ci_config"
           [build]
           output_dir = "${staging_dir}"
-          dist_dir = "${RELEASE_DIR}"
           compile = true
           runtime_native_loader = true
           build_profile = "native"

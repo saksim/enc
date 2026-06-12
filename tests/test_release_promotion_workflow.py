@@ -71,6 +71,8 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("--config \"$ci_config\"", payload)
         self.assertIn("license_file = \"licenses/ci-license.json\"", payload)
         self.assertNotIn("license_file = \"${workspace_root}/licenses/ci-license.json\"", payload)
+        self.assertNotIn("dist_dir = \"${RELEASE_DIR}\"", payload)
+        self.assertIn("--dist-dir \"$RELEASE_DIR\"", payload)
         self.assertIn("--no-compile", payload)
         self.assertIn("workspace_root=\"$(pwd)/.tmp_ci/workspace\"", payload)
         self.assertIn("\"workflow_name\": \"${GITHUB_WORKFLOW}\"", payload)
