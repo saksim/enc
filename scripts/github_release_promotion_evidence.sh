@@ -2632,6 +2632,7 @@ required_files = [
     "promotion_artifact_audit_report.json",
     "promotion_run_receipt.json",
     "promotion_artifact_bundle.zip",
+    "non_ocr_release_gate_report.json",
 ]
 
 def sha256_file(path: Path) -> str:
@@ -2882,6 +2883,40 @@ for name in required_files:
             "sha256": sha256_file(path),
         }
     )
+
+non_ocr_release_gate_report_path = resolved["non_ocr_release_gate_report.json"]
+try:
+    non_ocr_release_gate_report_payload = json.loads(
+        non_ocr_release_gate_report_path.read_text(encoding="utf-8")
+    )
+except Exception as exc:
+    print("non_ocr_release_gate_report.json is not valid JSON: {0}".format(exc), file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(non_ocr_release_gate_report_payload, dict):
+    print("non_ocr_release_gate_report.json must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+if non_ocr_release_gate_report_payload.get("schema") != "enc2sop-non-ocr-release-gate/v1":
+    print(
+        "non_ocr_release_gate_report schema mismatch: expected enc2sop-non-ocr-release-gate/v1, got {0}".format(
+            non_ocr_release_gate_report_payload.get("schema")
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if non_ocr_release_gate_report_payload.get("passed") is not True:
+    print("non_ocr_release_gate_report.passed must be true", file=sys.stderr)
+    sys.exit(1)
+non_ocr_release_gate_summary = non_ocr_release_gate_report_payload.get("summary")
+if not isinstance(non_ocr_release_gate_summary, dict):
+    print("non_ocr_release_gate_report.summary must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+if non_ocr_release_gate_summary.get("total_failures") != 0:
+    print("non_ocr_release_gate_report.summary.total_failures must be 0", file=sys.stderr)
+    sys.exit(1)
+if non_ocr_release_gate_report_payload.get("failures") not in ([], None):
+    print("non_ocr_release_gate_report.failures must be empty", file=sys.stderr)
+    sys.exit(1)
 
 rotation_report_path = resolved["rotation_rehearsal_report.json"]
 try:

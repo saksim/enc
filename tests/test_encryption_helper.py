@@ -1,3 +1,4 @@
+import base64
 import json
 import importlib
 import hashlib
@@ -2471,6 +2472,135 @@ class EncryptionHelperTests(WorkspaceTempMixin, unittest.TestCase):
                 os.environ.pop("SOENC_LICENSE_FILE", None)
             else:
                 os.environ["SOENC_LICENSE_FILE"] = old_license
+
+    def test_license_file_signed_bound_revoked_e2e_runtime_executes_fail_closed(self):
+        root = self.make_case_root("license_mode_signed_bound_revoked")
+        project_root = root / "project"
+        package_name = "licpkg_" + uuid.uuid4().hex[:6]
+        pkg = project_root / package_name
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "mod.py").write_text(
+            "\n".join(
+                [
+                    "BASE = 11",
+                    "",
+                    "def protected_sum(a, b):",
+                    "    return a + b + BASE",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        signing_key = b"0123456789abcdef0123456789abcdef"
+        signing_key_path = project_root / "license_sign.key"
+        signing_key_path.write_bytes(signing_key)
+        cfg_path = project_root / "soenc.toml"
+        cfg_path.write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'target = "./{0}"'.format(package_name),
+                    "",
+                    "[build]",
+                    'output_dir = "./out"',
+                    "compile = false",
+                    "",
+                    "[keys]",
+                    'mode = "license-file"',
+                    'license_file = "licenses/customer.license.json"',
+                    'license_id = "customer-signed-bound"',
+                    "bundle_license = false",
+                    'license_machine_fingerprint = "machine-a"',
+                    'license_subject = "customer-a"',
+                    'license_expires_at = "2099-01-01T00:00:00Z"',
+                    'license_allowed_module_hashes = ["{0}/mod.py:sha256:example"]'.format(
+                        package_name,
+                    ),
+                    'license_sign_key_file = "./license_sign.key"',
+                    'license_sign_key_id = "lic-mainline-beta"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = encryption_helper.main(["--config", str(cfg_path)])
+        self.assertEqual(exit_code, 0)
+        output_dir = project_root / "out"
+        manifest = json.loads((output_dir / "build_manifest.json").read_text(encoding="utf-8"))
+        key_mgmt = manifest.get("key_management") or {}
+        self.assertEqual(key_mgmt.get("mode"), "license-file")
+        self.assertFalse(key_mgmt.get("bundle_license"))
+        self.assertTrue(key_mgmt.get("license_signature_required"))
+        self.assertEqual(key_mgmt.get("license_signature_key_id"), "lic-mainline-beta")
+        self.assertEqual(key_mgmt.get("license_verify_key_env"), "SOENC_LICENSE_VERIFY_KEY_B64")
+        self.assertEqual(key_mgmt.get("revocation_env"), "SOENC_LICENSE_REVOCATION_FILE")
+        self.assertEqual((key_mgmt.get("machine_binding") or {}).get("env"), "SOENC_MACHINE_FINGERPRINT")
+        self.assertTrue((key_mgmt.get("machine_binding") or {}).get("required"))
+        self.assertEqual(key_mgmt.get("allowed_module_hash_count"), 1)
+
+        license_path = output_dir / "licenses" / "customer.license.json"
+        self.assertTrue(license_path.exists())
+        license_payload = json.loads(license_path.read_text(encoding="utf-8"))
+        self.assertEqual(license_payload.get("license_id"), "customer-signed-bound")
+        self.assertEqual(license_payload.get("subject"), "customer-a")
+        self.assertEqual(license_payload.get("expires_at"), "2099-01-01T00:00:00Z")
+        self.assertEqual((license_payload.get("signature") or {}).get("algorithm"), "hmac-sha256")
+        self.assertEqual((license_payload.get("signature") or {}).get("key_id"), "lic-mainline-beta")
+        self.assertTrue((license_payload.get("machine_binding") or {}).get("required"))
+        self.assertEqual((license_payload.get("revocation") or {}).get("env"), "SOENC_LICENSE_REVOCATION_FILE")
+
+        env_names = (
+            "SOENC_LICENSE_FILE",
+            "SOENC_MACHINE_FINGERPRINT",
+            "SOENC_LICENSE_VERIFY_KEY_B64",
+            "SOENC_LICENSE_REVOCATION_FILE",
+        )
+        old_env = {name: os.environ.get(name) for name in env_names}
+
+        def reset_package_modules():
+            for module_name in list(sys.modules):
+                if module_name == package_name or module_name.startswith(package_name + "."):
+                    sys.modules.pop(module_name, None)
+
+        try:
+            os.environ["SOENC_LICENSE_FILE"] = str(license_path)
+            os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-a"
+            os.environ["SOENC_LICENSE_VERIFY_KEY_B64"] = base64.b64encode(signing_key).decode("ascii")
+            os.environ.pop("SOENC_LICENSE_REVOCATION_FILE", None)
+            reset_package_modules()
+            module = self._import_module_from_root(output_dir, package_name, "mod")
+            self.assertEqual(module.protected_sum(4, 5), 20)
+
+            os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-b"
+            reset_package_modules()
+            with self.assertRaisesRegex(ValueError, "license machine fingerprint mismatch"):
+                self._import_module_from_root(output_dir, package_name, "mod")
+
+            os.environ["SOENC_MACHINE_FINGERPRINT"] = "machine-a"
+            revocation_path = project_root / "revoked.json"
+            revocation_path.write_text(
+                json.dumps({"revoked_license_ids": ["customer-signed-bound"]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.environ["SOENC_LICENSE_REVOCATION_FILE"] = str(revocation_path)
+            reset_package_modules()
+            with self.assertRaisesRegex(ValueError, "license has been revoked"):
+                self._import_module_from_root(output_dir, package_name, "mod")
+
+            os.environ.pop("SOENC_LICENSE_REVOCATION_FILE", None)
+            os.environ.pop("SOENC_LICENSE_VERIFY_KEY_B64", None)
+            reset_package_modules()
+            with self.assertRaisesRegex(ValueError, "SOENC_LICENSE_VERIFY_KEY_B64 is required"):
+                self._import_module_from_root(output_dir, package_name, "mod")
+        finally:
+            reset_package_modules()
+            for name, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = old_value
 
     def test_remote_kms_mode_emits_key_contract_and_runtime_fails_closed_without_token(self):
         root = self.make_case_root("remote_kms_mode")

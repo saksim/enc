@@ -24,6 +24,10 @@ BUILD_PROFILE_CHOICES = (
     "windows-msvc",
     "native",
 )
+HARDENING_PROFILE_CHOICES = (
+    "off",
+    "balanced",
+)
 
 
 _LAZY_COMPAT_MODULES = {
@@ -156,6 +160,11 @@ def _run_build(args) -> int:
     project_config = _load_project_config(args.config)
     staging_dir = _resolve_staging_dir(args, project_config)
     build_profile = args.build_profile or _project_default(project_config, "build_profile") or _default_build_profile()
+    hardening_profile = (
+        args.hardening_profile
+        or _project_default(project_config, "hardening_profile")
+        or encryption_helper.HARDENING_PROFILE_OFF
+    )
     vcvars_text = args.vcvars_path or _project_default(project_config, "vcvars_path")
     vcvars_path = encryption_helper.normalize_path(vcvars_text) if vcvars_text else None
     # Explicit CLI override must win over config defaults to avoid venv/system interpreter drift.
@@ -175,10 +184,12 @@ def _run_build(args) -> int:
         vcvars_path=vcvars_path,
         manifest_sign_key=manifest_sign_key,
         require_manifest_signature=require_manifest_signature,
+        hardening_profile=hardening_profile,
     )
     print("staging_dir={0}".format(staging_dir))
     print("build_dir={0}".format(build_dir))
     print("build_profile={0}".format(build_profile))
+    print("hardening_profile={0}".format(hardening_profile))
     return 0
 
 
@@ -547,6 +558,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--build-profile",
         choices=BUILD_PROFILE_CHOICES,
         help="Build profile used for native compile.",
+    )
+    build_parser.add_argument(
+        "--hardening-profile",
+        choices=HARDENING_PROFILE_CHOICES,
+        help="Hardening profile used for native compile flags and manifest metadata.",
     )
     build_parser.add_argument("--vcvars-path", help="Optional explicit vcvars64.bat path for windows-msvc profile.")
     build_parser.add_argument(

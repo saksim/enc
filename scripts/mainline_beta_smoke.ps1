@@ -45,7 +45,9 @@ $nonOcrTests = @(
     "tests\test_runtime_integrity_smoke.py",
     "tests\test_code_protection_smoke.py",
     "tests\test_promotion_bundle.py",
+    "tests\test_promotion_artifacts.py",
     "tests\test_release_promotion_workflow.py",
+    "tests\test_non_ocr_release_gate.py",
     "tests\test_promotion_evidence.py"
 )
 
@@ -74,6 +76,10 @@ try {
 
     Invoke-MainlineStep "runtime integrity smoke" {
         & $Python -B "scripts\smoke_runtime_integrity.py"
+    }
+
+    Invoke-MainlineStep "non-OCR release gate config-only" {
+        & $Python -B "scripts\non_ocr_release_gate.py" --config "soenc.production.toml" --config-only
     }
 
     Write-Host "MAINLINE_BETA_SMOKE_OK"

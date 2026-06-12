@@ -96,6 +96,7 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
                     "output_dir = \"./staging\"",
                     "python_exe = \"{0}\"".format(str(Path(sys.executable)).replace("\\", "/")),
                     "build_profile = \"native\"",
+                    "hardening_profile = \"balanced\"",
                     "",
                 ]
             ),
@@ -109,6 +110,41 @@ class SoencCliTests(WorkspaceTempMixin, unittest.TestCase):
         mocked_compile.assert_called_once()
         self.assertEqual(mocked_compile.call_args.kwargs["output_dir"], staging_dir.resolve())
         self.assertEqual(mocked_compile.call_args.kwargs["build_profile"], "native")
+        self.assertEqual(mocked_compile.call_args.kwargs["hardening_profile"], "balanced")
+
+    def test_build_command_cli_hardening_profile_overrides_config(self):
+        root = self.make_case_root("soenc_build_hardening_override")
+        staging_dir = root / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        config_path = root / "soenc.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[build]",
+                    "output_dir = \"./staging\"",
+                    "python_exe = \"{0}\"".format(str(Path(sys.executable)).replace("\\", "/")),
+                    "build_profile = \"native\"",
+                    "hardening_profile = \"off\"",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(encryption_helper, "compile_with_batch_builder", return_value=staging_dir / "build") as mocked_compile:
+            exit_code = soenc_cli.main(
+                [
+                    "build",
+                    "--config",
+                    str(config_path),
+                    "--hardening-profile",
+                    "balanced",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mocked_compile.assert_called_once()
+        self.assertEqual(mocked_compile.call_args.kwargs["hardening_profile"], "balanced")
 
     def test_build_command_cli_python_exe_overrides_config_python_exe(self):
         root = self.make_case_root("soenc_build_python_exe_override")
