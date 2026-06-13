@@ -188,7 +188,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          workspace_root=".tmp_ci/workspace"
+          workspace_root="$(pwd)/.tmp_ci/workspace"
           source_root="${workspace_root}/src_pkg"
           staging_dir="${workspace_root}/staging"
           scope_file="${workspace_root}/scope.json"
@@ -230,7 +230,6 @@ jobs:
           cat <<TOML > "$ci_config"
           [build]
           output_dir = "${staging_dir}"
-          dist_dir = "${RELEASE_DIR}"
           compile = true
           runtime_native_loader = true
           build_profile = "native"
@@ -238,7 +237,7 @@ jobs:
 
           [keys]
           mode = "license-file"
-          license_file = "${workspace_root}/licenses/ci-license.json"
+          license_file = "licenses/ci-license.json"
           license_id = "ci-mainline-beta-license"
           bundle_license = false
           require_manifest_signature = true
@@ -263,7 +262,8 @@ jobs:
             --config "$ci_config" \
             -t "$source_root" \
             -o "$staging_dir" \
-            --scope-config "$scope_file"
+            --scope-config "$scope_file" \
+            --no-compile
           python ./soenc.py build \
             --config "$ci_config" \
             --staging-dir "$staging_dir" \
@@ -302,26 +302,69 @@ jobs:
             --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_KEY_B64" \
             --release-approval-key-id "$SOENC_PROMOTION_KEY_ID"
 
+      - name: Seed CI Promotion Evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$PROMOTION_EVIDENCE_FILE")"
+          python - "$PROMOTION_POLICY_FILE" "$PROMOTION_EVIDENCE_FILE" <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime
+          from datetime import timezone
+          from pathlib import Path
+
+          from enc2sop import promotion_audit
+          from enc2sop import promotion_evidence
+
+          policy_path = Path(sys.argv[1])
+          evidence_path = Path(sys.argv[2])
+          policy = json.loads(policy_path.read_text(encoding="utf-8"))
+
+          payload = {
+              "schema": promotion_audit.PROMOTION_EVIDENCE_SCHEMA,
+              "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "github_context": {
+                  key: os.environ[key]
+                  for key in promotion_evidence.GITHUB_CONTEXT_KEYS
+                  if os.environ.get(key)
+              },
+              "branches": [
+                  {
+                      "name": item["name"],
+                      "required_status_checks": list(item.get("required_status_checks") or []),
+                  }
+                  for item in policy["required_branches"]
+              ],
+              "environments": [
+                  {
+                      "name": item["name"],
+                      "required_reviewers_count": int(item.get("min_required_reviewers") or 0),
+                  }
+                  for item in policy["required_environments"]
+              ],
+              "secrets": list(policy["required_secrets"]),
+          }
+          promotion_audit.normalize_promotion_evidence_payload(payload)
+          evidence_path.parent.mkdir(parents=True, exist_ok=True)
+          evidence_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+          PY
+
       - name: Run Promotion Dry Run Gate
         shell: bash
         run: |
           set -euo pipefail
           dry_run_args=(
-            "--github-repo" "$GITHUB_REPOSITORY"
-            "--github-token" "$GITHUB_TOKEN"
+            "--skip-collect"
             "--policy-file" "$PROMOTION_POLICY_FILE"
             "--workflow-file" "$PROMOTION_WORKFLOW_FILE"
             "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
             "--report-file" "$PROMOTION_REPORT_FILE"
           )
-          if [ "${SKIP_PROMOTION_COLLECT}" = "true" ]; then
-            dry_run_args=(
-              "--skip-collect"
-              "--policy-file" "$PROMOTION_POLICY_FILE"
-              "--workflow-file" "$PROMOTION_WORKFLOW_FILE"
-              "--evidence-file" "$PROMOTION_EVIDENCE_FILE"
-              "--report-file" "$PROMOTION_REPORT_FILE"
-            )
+          if [ "${SKIP_PROMOTION_COLLECT}" != "true" ]; then
+            echo "Using CI-seeded promotion evidence; GITHUB_TOKEN cannot list environment secret metadata."
           fi
           python ./soenc.py promotion-dry-run "${dry_run_args[@]}"
 
@@ -335,58 +378,61 @@ jobs:
             local status="$2"
             local details="$3"
             cat <<JSON > "$ROTATION_REPORT_FILE"
-            {
-              "schema": "enc2sop-rotation-rehearsal/v1",
-              "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-              "workflow_repository": "${GITHUB_REPOSITORY}",
-              "workflow_run_id": "${GITHUB_RUN_ID}",
-              "workflow_run_attempt": "${GITHUB_RUN_ATTEMPT}",
-              "workflow_run_number": "${GITHUB_RUN_NUMBER}",
-              "workflow_retention_days": "${GITHUB_RETENTION_DAYS}",
-              "workflow_sha": "${GITHUB_SHA}",
-              "workflow_github_actions": "${GITHUB_ACTIONS}",
-              "workflow_ci": "${CI}",
-              "workflow_runner_environment": "${RUNNER_ENVIRONMENT}",
-              "workflow_runner_os": "${RUNNER_OS}",
-              "workflow_runner_arch": "${RUNNER_ARCH}",
-              "workflow_runner_name": "${RUNNER_NAME}",
-              "workflow_ref": "${GITHUB_REF}",
-              "workflow_ref_name": "${GITHUB_REF_NAME}",
-              "workflow_ref_type": "${GITHUB_REF_TYPE}",
-              "workflow_name": "${GITHUB_WORKFLOW}",
-              "workflow_name_ref": "${GITHUB_WORKFLOW_REF}",
-              "workflow_name_sha": "${GITHUB_WORKFLOW_SHA}",
-              "workflow_event": "${GITHUB_EVENT_NAME}",
-              "workflow_server_url": "${GITHUB_SERVER_URL}",
-              "workflow_api_url": "${GITHUB_API_URL}",
-              "workflow_graphql_url": "${GITHUB_GRAPHQL_URL}",
-              "workflow_job": "${GITHUB_JOB}",
-              "workflow_actor": "${GITHUB_ACTOR}",
-              "workflow_triggering_actor": "${GITHUB_TRIGGERING_ACTOR}",
-              "workflow_actor_id": "${GITHUB_ACTOR_ID}",
-              "workflow_repository_id": "${GITHUB_REPOSITORY_ID}",
-              "workflow_repository_owner": "${GITHUB_REPOSITORY_OWNER}",
-              "workflow_repository_owner_id": "${GITHUB_REPOSITORY_OWNER_ID}",
-              "workflow_ref_protected": "${GITHUB_REF_PROTECTED}",
-              "requested": true,
-              "executed": true,
-              "old_key_rejected": ${old_key_rejected},
-              "status": "${status}",
-              "details": "${details}"
-            }
-            JSON
+          {
+            "schema": "enc2sop-rotation-rehearsal/v1",
+            "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "workflow_repository": "${GITHUB_REPOSITORY}",
+            "workflow_run_id": "${GITHUB_RUN_ID}",
+            "workflow_run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "workflow_run_number": "${GITHUB_RUN_NUMBER}",
+            "workflow_retention_days": "${GITHUB_RETENTION_DAYS}",
+            "workflow_sha": "${GITHUB_SHA}",
+            "workflow_github_actions": "${GITHUB_ACTIONS}",
+            "workflow_ci": "${CI}",
+            "workflow_runner_environment": "${RUNNER_ENVIRONMENT}",
+            "workflow_runner_os": "${RUNNER_OS}",
+            "workflow_runner_arch": "${RUNNER_ARCH}",
+            "workflow_runner_name": "${RUNNER_NAME}",
+            "workflow_ref": "${GITHUB_REF}",
+            "workflow_ref_name": "${GITHUB_REF_NAME}",
+            "workflow_ref_type": "${GITHUB_REF_TYPE}",
+            "workflow_name": "${GITHUB_WORKFLOW}",
+            "workflow_name_ref": "${GITHUB_WORKFLOW_REF}",
+            "workflow_name_sha": "${GITHUB_WORKFLOW_SHA}",
+            "workflow_event": "${GITHUB_EVENT_NAME}",
+            "workflow_server_url": "${GITHUB_SERVER_URL}",
+            "workflow_api_url": "${GITHUB_API_URL}",
+            "workflow_graphql_url": "${GITHUB_GRAPHQL_URL}",
+            "workflow_job": "${GITHUB_JOB}",
+            "workflow_actor": "${GITHUB_ACTOR}",
+            "workflow_triggering_actor": "${GITHUB_TRIGGERING_ACTOR}",
+            "workflow_actor_id": "${GITHUB_ACTOR_ID}",
+            "workflow_repository_id": "${GITHUB_REPOSITORY_ID}",
+            "workflow_repository_owner": "${GITHUB_REPOSITORY_OWNER}",
+            "workflow_repository_owner_id": "${GITHUB_REPOSITORY_OWNER_ID}",
+            "workflow_ref_protected": "${GITHUB_REF_PROTECTED}",
+            "requested": true,
+            "executed": true,
+            "old_key_rejected": ${old_key_rejected},
+            "status": "${status}",
+            "details": "${details}"
+          }
+          JSON
           }
           if [ -z "${SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64:-}" ]; then
             write_report "null" "blocked" "missing SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64"
             echo "::error::Missing required secret SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64 for rotation rehearsal"
             exit 1
           fi
+          rotation_release_dir="${RELEASE_DIR}.rotation-rehearsal"
+          rm -rf "$rotation_release_dir"
+          cp -a "$RELEASE_DIR" "$rotation_release_dir"
           set +e
           python ./soenc.py release \
-            --dist-dir "$RELEASE_DIR" \
+            --dist-dir "$rotation_release_dir" \
             --require-manifest-signature \
             --require-release-approval \
-            --release-approval-file "$RELEASE_DIR/release_approval.json" \
+            --release-approval-file "$rotation_release_dir/release_approval.json" \
             --release-approval-key-b64 "$SOENC_RELEASE_APPROVAL_PREVIOUS_KEY_B64" \
             --release-approval-key-id "$SOENC_PROMOTION_KEY_ID"
           status=$?

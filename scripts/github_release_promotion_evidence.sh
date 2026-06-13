@@ -66,6 +66,24 @@ require_command() {
   fi
 }
 
+resolve_python_command() {
+  local candidate
+  for candidate in "${PYTHON:-}" python3 py python; do
+    if [[ -z "$candidate" ]]; then
+      continue
+    fi
+    if ! command -v "$candidate" >/dev/null 2>&1; then
+      continue
+    fi
+    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "Missing usable Python 3 interpreter. Set PYTHON to a working Python executable or fix PATH." >&2
+  exit 1
+}
+
 require_boolean_token() {
   local value="$1"
   local label="$2"
@@ -122,6 +140,13 @@ require_token_no_whitespace() {
     echo "Invalid ${label}: ${value} (expected non-empty token without whitespace)" >&2
     exit 1
   fi
+}
+
+strip_crlf() {
+  local value="$1"
+  value="${value//$'\r'/}"
+  value="${value//$'\n'/}"
+  printf '%s' "$value"
 }
 
 verify_github_cli_repo_access() {
@@ -363,6 +388,9 @@ verify_secret_metadata_name() {
   local secret_encoded=""
   local repo_secret_json=""
   local repo_secret_status=0
+  secret_name="$(strip_crlf "$secret_name")"
+  environment_name="$(strip_crlf "$environment_name")"
+  require_token_no_whitespace "$secret_name" "required-secret"
   secret_encoded="$(urlencode_path_segment "$secret_name")"
   set +e
   repo_secret_json="$(gh api "repos/${repo}/actions/secrets/${secret_encoded}" 2>&1)"
@@ -550,6 +578,7 @@ print(workflow_id_text)
 
 urlencode_path_segment() {
   local value="$1"
+  value="$(strip_crlf "$value")"
   python - "$value" <<'PY'
 import sys
 from urllib.parse import quote
@@ -853,8 +882,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_command gh
-require_command python
 require_command sed
+PYTHON_CMD="$(resolve_python_command)"
+python() {
+  "$PYTHON_CMD" "$@"
+}
 
 if [[ -z "$WORKFLOW_JOB_ID" || "$WORKFLOW_JOB_ID" != "${WORKFLOW_JOB_ID//[[:space:]]/}" ]]; then
   echo "Invalid workflow-job-id: ${WORKFLOW_JOB_ID} (expected non-empty token without whitespace)" >&2
@@ -916,6 +948,7 @@ environment_preflight_json="$(verify_environment_preflight "$REPO" "$EXPECTED_EN
 required_secret_names_resolved="$(verify_required_secrets_preflight "$REPO" "$EXPECTED_ENVIRONMENT" "$REQUIRED_SECRET_NAMES" "$ROTATION_REHEARSAL")"
 required_secret_preflight_jsonl=""
 while IFS= read -r required_secret_name; do
+  required_secret_name="$(strip_crlf "$required_secret_name")"
   if [[ -z "$required_secret_name" ]]; then
     continue
   fi
@@ -1170,14 +1203,39 @@ if [[ -n "$dispatch_workflow_id_api" ]]; then
   fi
 fi
 
-if [[ -z "$run_workflow_path_ref" || "$run_workflow_path_ref" != *@* ]]; then
-  echo "Unable to resolve workflow path@ref identity for run_id=${run_id}." >&2
+if [[ -z "$run_workflow_path_ref" ]]; then
+  echo "Unable to resolve workflow path identity for run_id=${run_id}." >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
+if [[ "$run_workflow_path_ref" != "${run_workflow_path_ref//[[:space:]]/}" ]]; then
+  echo "Resolved workflow path identity is invalid for run_id=${run_id}: ${run_workflow_path_ref}" >&2
   echo "run_url=${run_url}" >&2
   exit 1
 fi
 
-run_workflow_path="${run_workflow_path_ref%@*}"
-run_workflow_ref="${run_workflow_path_ref#*@}"
+if [[ "$run_workflow_path_ref" == *@* ]]; then
+  run_workflow_path="${run_workflow_path_ref%@*}"
+  run_workflow_ref="${run_workflow_path_ref#*@}"
+else
+  run_workflow_path="$run_workflow_path_ref"
+  if [[ -z "$run_head_branch_api" ]]; then
+    echo "Unable to derive workflow ref for run_id=${run_id}: run details path did not include @ref and head_branch is missing." >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  run_workflow_ref="$run_head_branch_api"
+  echo "Run details workflow path did not include @ref; deriving workflow ref from head_branch for run_id=${run_id}." >&2
+fi
+
+if [[ "$run_workflow_path" == "${REPO}/.github/workflows/"* ]]; then
+  run_workflow_path="${run_workflow_path#${REPO}/}"
+fi
+if [[ -z "$run_workflow_path" || "$run_workflow_path" != "${run_workflow_path//[[:space:]]/}" ]]; then
+  echo "Resolved workflow path is invalid for run_id=${run_id}: ${run_workflow_path}" >&2
+  echo "run_url=${run_url}" >&2
+  exit 1
+fi
 
 if [[ -n "$expected_workflow_path" && "$run_workflow_path" != "$expected_workflow_path" ]]; then
   echo "workflow path mismatch for run_id=${run_id}: expected ${expected_workflow_path}, got ${run_workflow_path}" >&2
@@ -1270,6 +1328,8 @@ if [[ -n "$run_head_branch_api" ]]; then
     exit 1
   fi
 fi
+run_workflow_ref="$workflow_ref_normalization_verified"
+run_workflow_path_ref_identity="${REPO}/${run_workflow_path}@${run_workflow_ref}"
 
 if [[ -n "$expected_branch_ref" ]]; then
   require_branch_match="false"
@@ -1525,7 +1585,7 @@ expected_host = sys.argv[4]
 dispatch_run_url = sys.argv[5]
 dispatch_html_url = sys.argv[6]
 
-def _verify_optional_dispatch_url(label: str, value: str) -> tuple[str, str]:
+def _verify_optional_dispatch_url(label, value):
     if not value:
         return "", ""
     if value != value.strip():
@@ -1651,19 +1711,18 @@ if [[ -n "$run_number" && -n "$run_number_api" && "$run_number" != "$run_number_
 fi
 
 if [[ -z "$run_retention_days_api" ]]; then
-  echo "run retention_days is missing in run details for run_id=${run_id}" >&2
-  echo "run_url=${run_url}" >&2
-  exit 1
-fi
-if [[ ! "$run_retention_days_api" =~ ^[0-9]+$ ]]; then
-  echo "run retention_days is not numeric in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
-  echo "run_url=${run_url}" >&2
-  exit 1
-fi
-if [[ "$run_retention_days_api" -le 0 ]]; then
-  echo "run retention_days must be positive in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
-  echo "run_url=${run_url}" >&2
-  exit 1
+  echo "Run details retention_days is missing; deferring retention_days verification to workflow artifacts for run_id=${run_id}." >&2
+else
+  if [[ ! "$run_retention_days_api" =~ ^[0-9]+$ ]]; then
+    echo "run retention_days is not numeric in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
+  if [[ "$run_retention_days_api" -le 0 ]]; then
+    echo "run retention_days must be positive in run details for run_id=${run_id}: ${run_retention_days_api}" >&2
+    echo "run_url=${run_url}" >&2
+    exit 1
+  fi
 fi
 
 run_timestamp_verification="$(python - "$run_id" "$run_url" "$run_created_at" "$run_started_at" "$run_updated_at" "$run_created_at_api" "$run_started_at_api" "$run_updated_at_api" <<'PY'
@@ -2611,7 +2670,7 @@ artifact_zip_path="${run_dir}/${artifact_name}.zip"
 mkdir -p "$download_dir"
 
 echo "Downloading artifact archive ${artifact_name}"
-gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" --method GET --header "Accept: application/zip" --output "$artifact_zip_path"
+gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" --method GET > "$artifact_zip_path"
 
 echo "Verifying artifact archive digest and extracting ${artifact_name}"
 artifact_archive_verification="$(python - "$artifact_zip_path" "$artifact_digest" "$artifact_size_bytes" "$download_dir" <<'PY'
@@ -2739,7 +2798,7 @@ python - \
   "$run_event_api" \
   "$run_head_branch_api" \
   "$run_workflow_path" \
-  "$run_workflow_ref" \
+  "$run_workflow_path_ref_identity" \
   "$run_html_url_api" \
   "$run_url_host_verified" \
   "$run_url_attempt_verified" \
@@ -2827,9 +2886,9 @@ from pathlib import Path
     dispatch_run_url,
     dispatch_run_html_url,
     dispatch_run_url_host,
-    dispatch_run_html_url_host,
+    dispatch_html_url_host,
     dispatch_run_url_attempt,
-    dispatch_run_html_url_attempt,
+    dispatch_html_url_attempt,
     capture_mode,
     run_id_resolution_mode,
     workflow_event,
@@ -3267,6 +3326,8 @@ rotation_workflow_retention_days = parse_required_positive_integer(
     "rotation_rehearsal_report.workflow_retention_days",
     rotation_report_payload.get("workflow_retention_days"),
 )
+if not workflow_retention_days:
+    workflow_retention_days = rotation_workflow_retention_days
 require_timestamp_within_workflow_run_window(
     "rotation_rehearsal_report.generated_at_utc",
     rotation_report_generated_at_utc,
@@ -4279,8 +4340,6 @@ required_run_receipt_entries = {
     "promotion_evidence": "promotion_evidence.json",
     "promotion_audit_report": "promotion_audit_report.json",
     "rotation_rehearsal_report": "rotation_rehearsal_report.json",
-    "promotion_policy": "promotion_rollout_policy.json",
-    "promotion_workflow": "release_promotion.yml",
     "promotion_artifact_audit_report": "promotion_artifact_audit_report.json",
 }
 
@@ -4407,6 +4466,15 @@ if promotion_artifact_audit_report_policy_file != policy_row["path"]:
         file=sys.stderr,
     )
     sys.exit(1)
+if policy_row["sha256"] != bundle_policy_row["sha256"]:
+    print(
+        "promotion_run_receipt.artifacts[promotion_policy].sha256 mismatch with promotion_policy bundle entry: expected {0}, got {1}".format(
+            bundle_policy_row["sha256"],
+            policy_row["sha256"],
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 workflow_row = run_receipt_rows_by_name.get("promotion_workflow")
 if workflow_row is None:
     print(
@@ -4428,6 +4496,15 @@ if promotion_artifact_audit_report_workflow_file != workflow_row["path"]:
         "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}".format(
             workflow_row["path"],
             promotion_artifact_audit_report_workflow_file,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if workflow_row["sha256"] != bundle_workflow_row["sha256"]:
+    print(
+        "promotion_run_receipt.artifacts[promotion_workflow].sha256 mismatch with promotion_workflow bundle entry: expected {0}, got {1}".format(
+            bundle_workflow_row["sha256"],
+            workflow_row["sha256"],
         ),
         file=sys.stderr,
     )
@@ -4874,6 +4951,7 @@ if workflow_path_ref:
     if workflow_path_ref_ref != workflow_path_ref_ref.strip():
         print("Resolved run workflow ref segment must not contain leading or trailing whitespace.", file=sys.stderr)
         sys.exit(1)
+    workflow_ref = workflow_path_ref_ref
     context_workflow_ref_value = run_receipt_context.get("GITHUB_WORKFLOW_REF")
     if not isinstance(context_workflow_ref_value, str) or not context_workflow_ref_value:
         print("promotion_run_receipt.github_context missing required key: GITHUB_WORKFLOW_REF", file=sys.stderr)

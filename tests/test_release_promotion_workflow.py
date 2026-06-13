@@ -14,6 +14,12 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("python ./soenc.py release", payload)
         self.assertIn("--require-release-approval", payload)
         self.assertIn("python ./soenc.py promotion-dry-run", payload)
+        self.assertIn("Seed CI Promotion Evidence", payload)
+        self.assertIn("promotion_evidence.GITHUB_CONTEXT_KEYS", payload)
+        self.assertIn("promotion_audit.normalize_promotion_evidence_payload(payload)", payload)
+        self.assertIn("Using CI-seeded promotion evidence; GITHUB_TOKEN cannot list environment secret metadata.", payload)
+        self.assertIn("\"--skip-collect\"", payload)
+        self.assertNotIn("\"--github-token\" \"$GITHUB_TOKEN\"", payload)
         self.assertIn("python ./soenc.py verify-promotion-artifacts", payload)
         self.assertIn("python ./soenc.py bundle-promotion-artifacts", payload)
         self.assertIn("python scripts/non_ocr_release_gate.py", payload)
@@ -69,6 +75,12 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("hardening_profile = \"balanced\"", payload)
         self.assertIn("python encryption_helper.py", payload)
         self.assertIn("--config \"$ci_config\"", payload)
+        self.assertIn("license_file = \"licenses/ci-license.json\"", payload)
+        self.assertNotIn("license_file = \"${workspace_root}/licenses/ci-license.json\"", payload)
+        self.assertNotIn("dist_dir = \"${RELEASE_DIR}\"", payload)
+        self.assertIn("--dist-dir \"$RELEASE_DIR\"", payload)
+        self.assertIn("--no-compile", payload)
+        self.assertIn("workspace_root=\"$(pwd)/.tmp_ci/workspace\"", payload)
         self.assertIn("\"workflow_name\": \"${GITHUB_WORKFLOW}\"", payload)
         self.assertIn("\"workflow_repository\": \"${GITHUB_REPOSITORY}\"", payload)
         self.assertIn("\"workflow_run_number\": \"${GITHUB_RUN_NUMBER}\"", payload)
@@ -96,6 +108,42 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("\"workflow_repository_owner_id\": \"${GITHUB_REPOSITORY_OWNER_ID}\"", payload)
         self.assertIn("\"workflow_ref_protected\": \"${GITHUB_REF_PROTECTED}\"", payload)
         self.assertIn("if-no-files-found: error", payload)
+
+    def test_rotation_rehearsal_report_heredoc_delimiter_is_left_aligned(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        workflow_path = repo_root / ".github" / "workflows" / "release_promotion.yml"
+        payload = workflow_path.read_text(encoding="utf-8")
+
+        marker = "      - name: Rehearse Approval Key Rotation (old key must fail)"
+        next_marker = "      - name: Verify Promotion Artifacts"
+        start = payload.index(marker)
+        end = payload.index(next_marker, start)
+        section = payload[start:end]
+
+        self.assertIn('cat <<JSON > "$ROTATION_REPORT_FILE"', section)
+        self.assertIn("\n          JSON\n", section)
+        self.assertNotIn("\n            JSON\n", section)
+        self.assertIn('\n          {\n            "schema": "enc2sop-rotation-rehearsal/v1"', section)
+        self.assertNotIn('\n            {\n              "schema": "enc2sop-rotation-rehearsal/v1"', section)
+
+    def test_rotation_rehearsal_uses_isolated_release_copy(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        workflow_path = repo_root / ".github" / "workflows" / "release_promotion.yml"
+        payload = workflow_path.read_text(encoding="utf-8")
+
+        marker = "      - name: Rehearse Approval Key Rotation (old key must fail)"
+        next_marker = "      - name: Verify Promotion Artifacts"
+        start = payload.index(marker)
+        end = payload.index(next_marker, start)
+        section = payload[start:end]
+
+        self.assertIn('rotation_release_dir="${RELEASE_DIR}.rotation-rehearsal"', section)
+        self.assertIn('rm -rf "$rotation_release_dir"', section)
+        self.assertIn('cp -a "$RELEASE_DIR" "$rotation_release_dir"', section)
+        self.assertIn('--dist-dir "$rotation_release_dir"', section)
+        self.assertIn('--release-approval-file "$rotation_release_dir/release_approval.json"', section)
+        self.assertNotIn('--dist-dir "$RELEASE_DIR"', section)
+        self.assertNotIn('--release-approval-file "$RELEASE_DIR/release_approval.json"', section)
 
     def test_mainline_beta_smoke_script_contract(self):
         repo_root = pathlib.Path(__file__).resolve().parents[1]
@@ -218,6 +266,8 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("{0} run_id path mismatch: expected {1}, got {2}", payload)
         self.assertIn("{0} attempt path mismatch: expected {1}, got {2}", payload)
         self.assertIn("dispatch response URL host mismatch between run_url and html_url: {0} vs {1}", payload)
+        self.assertIn("def _verify_optional_dispatch_url(label, value):", payload)
+        self.assertNotIn("tuple[str, str]", payload)
         self.assertIn("Checking GitHub CLI authentication and repository API access...", payload)
         self.assertIn("gh auth status reported non-zero; continuing with repository API probe for ${repo}.", payload)
         self.assertIn("repo_probe_output=\"$(gh api \"repos/${repo}\" --jq '.full_name' 2>&1)\"", payload)
@@ -225,6 +275,12 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("Provide a token with repository and Actions API access via GH_TOKEN/GITHUB_TOKEN or gh auth login.", payload)
         self.assertIn("GitHub repository API probe passed for ${repo_probe_output}", payload)
         self.assertIn("GitHub repository API probe mismatch: expected ${repo}, got ${repo_probe_output}", payload)
+        self.assertIn("resolve_python_command()", payload)
+        self.assertIn("PYTHON_CMD=\"$(resolve_python_command)\"", payload)
+        self.assertIn("python() {", payload)
+        self.assertIn("\"$PYTHON_CMD\" \"$@\"", payload)
+        self.assertIn("Missing usable Python 3 interpreter. Set PYTHON to a working Python executable or fix PATH.", payload)
+        self.assertNotIn("require_command python", payload)
         self.assertIn("Invalid repo slug: ${value} (expected owner/repo)", payload)
         self.assertIn("require_repo_slug \"$REPO\"", payload)
         self.assertIn("Resolving workflow definition identity for ${workflow_file} on ${repo}...", payload)
@@ -298,7 +354,8 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("rotation rehearsal step must conclude with success when required; got {0}", payload)
         self.assertIn("rotation rehearsal step must conclude with skipped when rehearsal is not required; got {0}", payload)
         self.assertIn("gh api \"repos/${REPO}/actions/runs/${run_id}/artifacts?per_page=100&name=${artifact_name}\"", payload)
-        self.assertIn("gh api \"repos/${REPO}/actions/artifacts/${artifact_id}/zip\" --method GET --header \"Accept: application/zip\" --output \"$artifact_zip_path\"", payload)
+        self.assertIn("gh api \"repos/${REPO}/actions/artifacts/${artifact_id}/zip\" --method GET > \"$artifact_zip_path\"", payload)
+        self.assertNotIn("--header \"Accept: application/zip\"", payload)
         self.assertIn("--artifact-index-wait-seconds <int>", payload)
         self.assertIn("--preflight-only", payload)
         self.assertIn("--preflight-only cannot be combined with --run-id.", payload)
@@ -313,6 +370,9 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("--expected-environment <name>", payload)
         self.assertIn("--no-require-environment-reviewers", payload)
         self.assertIn("--required-secret <name>", payload)
+        self.assertIn("strip_crlf()", payload)
+        self.assertIn("secret_name=\"$(strip_crlf \"$secret_name\")\"", payload)
+        self.assertIn("required_secret_name=\"$(strip_crlf \"$required_secret_name\")\"", payload)
         self.assertIn("verify_branch_protection_preflight", payload)
         self.assertIn("branches API protected flag must be true", payload)
         self.assertIn("verify_environment_preflight", payload)
@@ -457,6 +517,14 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "promotion_artifact_audit_report.promotion_workflow_file does not match promotion_run_receipt.artifacts[promotion_workflow].path: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_run_receipt.artifacts[promotion_policy].sha256 mismatch with promotion_policy bundle entry: expected {0}, got {1}",
+            payload,
+        )
+        self.assertIn(
+            "promotion_run_receipt.artifacts[promotion_workflow].sha256 mismatch with promotion_workflow bundle entry: expected {0}, got {1}",
             payload,
         )
         self.assertIn(
@@ -690,6 +758,11 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("run html_url mismatch between summary and run details for run_id=${run_id}", payload)
         self.assertIn("run workflow ref is missing for run_id={0}", payload)
         self.assertIn("run workflow ref must not contain leading or trailing whitespace for run_id={0}", payload)
+        self.assertIn("Run details workflow path did not include @ref; deriving workflow ref from head_branch for run_id=${run_id}.", payload)
+        self.assertIn("Unable to derive workflow ref for run_id=${run_id}: run details path did not include @ref and head_branch is missing.", payload)
+        self.assertIn('run_workflow_path_ref_identity="${REPO}/${run_workflow_path}@${run_workflow_ref}"', payload)
+        self.assertIn('"$run_workflow_path_ref_identity"', payload)
+        self.assertIn("workflow_ref = workflow_path_ref_ref", payload)
         self.assertIn("run workflow ref short branch mismatch for run_id={0}: workflow_ref={1}, head_branch={2}", payload)
         self.assertIn("run workflow ref is not canonical or semantically normalizable for run_id={0}: {1}", payload)
         self.assertIn("run workflow ref normalization mismatch with head branch for run_id=${run_id}", payload)
@@ -704,7 +777,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("run number is not numeric in summary metadata for run_id=${run_id}", payload)
         self.assertIn("run number is not numeric in run details metadata for run_id=${run_id}", payload)
         self.assertIn("run number mismatch between summary and run details for run_id=${run_id}", payload)
-        self.assertIn("run retention_days is missing in run details for run_id=${run_id}", payload)
+        self.assertIn("Run details retention_days is missing; deferring retention_days verification to workflow artifacts for run_id=${run_id}.", payload)
         self.assertIn("run retention_days is not numeric in run details for run_id=${run_id}", payload)
         self.assertIn("run retention_days must be positive in run details for run_id=${run_id}", payload)
         self.assertIn("run attempt is missing in run details for run_id=${run_id}", payload)
@@ -853,8 +926,12 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("\"html_url\": dispatch_run_html_url or None", payload)
         self.assertIn("\"run_url_host\": dispatch_run_url_host or None", payload)
         self.assertIn("\"html_url_host\": dispatch_html_url_host or None", payload)
+        self.assertIn("    dispatch_html_url_host,\n", payload)
+        self.assertNotIn("dispatch_run_html_url_host", payload)
         self.assertIn("\"run_url_attempt\": _maybe_int(dispatch_run_url_attempt)", payload)
         self.assertIn("\"html_url_attempt\": _maybe_int(dispatch_html_url_attempt)", payload)
+        self.assertIn("    dispatch_html_url_attempt,\n", payload)
+        self.assertNotIn("dispatch_run_html_url_attempt", payload)
         self.assertIn("workflow_definition_verification", payload)
         self.assertIn("\"workflow_definition_verification\": {", payload)
         self.assertIn("\"run_workflow_id\": _maybe_int(workflow_run_workflow_id)", payload)
@@ -915,6 +992,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         )
         self.assertIn("rotation_workflow_retention_days = parse_required_positive_integer(", payload)
         self.assertIn("\"rotation_rehearsal_report.workflow_retention_days\",", payload)
+        self.assertIn("workflow_retention_days = rotation_workflow_retention_days", payload)
         self.assertIn("rotation_rehearsal_report.workflow_retention_days mismatch with run retention_days: expected {0}, got {1}", payload)
         self.assertIn("rotation_rehearsal_report.{0} must not contain leading or trailing whitespace", payload)
         self.assertIn(
