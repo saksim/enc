@@ -1396,8 +1396,8 @@ Cython/SO/PYD 是逆向成本加固，不是密钥安全；
 The V0.3 implementation status for this blueprint is now tracked in:
 
 ```text
-docs/current/cross_media_enc_trans_v3_gap_mapping.md
-docs/current/cross_media_enc_trans_v3_completion_report.md
+docs/working/cross_media_enc_trans_v3_gap_mapping.md
+docs/working/cross_media_enc_trans_v3_completion_report.md
 ```
 
 Current documented status:
