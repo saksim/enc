@@ -11,4 +11,8 @@ Release documents should answer four questions:
 
 Current release:
 
+- `v0.1.0-ga.md`: non-OCR encryption / code-protection GA.
+
+Previous release:
+
 - `v0.1.0-mainline-beta.1.md`: non-OCR encryption / code-protection Mainline Beta.

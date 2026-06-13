@@ -11,15 +11,16 @@ docs/archive/   Historical snapshots and retired plans.
 
 ## What To Read
 
-For the current non-OCR Mainline Beta release:
+For the current non-OCR GA release:
+
+1. `docs/latest/non_ocr_ga_release_manual.md`
+2. `docs/latest/non_ocr_release_reverse_cost_checklist.md`
+3. `docs/releases/v0.1.0-ga.md`
+
+For historical non-OCR Mainline Beta context:
 
 1. `docs/latest/non_ocr_code_protection_launch_strategy.md`
-2. `docs/latest/non_ocr_release_reverse_cost_checklist.md`
-3. `docs/releases/v0.1.0-mainline-beta.1.md`
-
-For the next non-OCR GA iteration:
-
-1. `docs/working/non_ocr_ga_release_governance_plan.md`
+2. `docs/releases/v0.1.0-mainline-beta.1.md`
 
 For ongoing OCR / cross-media work:
 

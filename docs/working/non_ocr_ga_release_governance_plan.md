@@ -1,7 +1,7 @@
 # Non-OCR GA Release Governance Plan
 
 日期：2026-06-13
-状态：working
+状态：completed; archived snapshot exists under docs/archive/
 目标：把非 OCR 加密 / 代码保护能力从 Mainline Beta 推进到可正式 GA 宣称。
 
 ## 一句话结论
@@ -200,8 +200,8 @@ python -B scripts\non_ocr_ga_release_governance_smoke.py --work-dir .tmp_non_ocr
 python -B -m pytest -q tests\test_dist_no_source_leakage.py tests\test_non_ocr_ga_release_governance_smoke.py tests\test_non_ocr_release_gate.py tests\test_promotion_artifacts.py tests\test_promotion_bundle.py -p no:cacheprovider
 ```
 
-剩余主线仍按顺序推进：
+主线闭环状态：
 
 ```text
-5. 正式 GA 文档上线
+5. 正式 GA 文档上线：已生成 docs/latest/non_ocr_ga_release_manual.md 与 docs/releases/v0.1.0-ga.md，并归档计划快照。
 ```
