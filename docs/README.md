@@ -17,9 +17,13 @@ For the current non-OCR GA release:
 2. `docs/latest/non_ocr_release_reverse_cost_checklist.md`
 3. `docs/releases/v0.1.0-ga.md`
 
-For historical non-OCR Mainline Beta context:
+For the next non-OCR GA post-release mainline:
 
-1. `docs/latest/non_ocr_code_protection_launch_strategy.md`
+1. `docs/working/non_ocr_ga_release_landing_trust_hardening_plan.md`
+
+For completed non-OCR GA governance history:
+
+1. `docs/archive/non_ocr_ga_release_governance_plan_2026-06-13.md`
 2. `docs/releases/v0.1.0-mainline-beta.1.md`
 
 For ongoing OCR / cross-media work:

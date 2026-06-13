@@ -6,7 +6,9 @@ Documents here may describe implemented pieces, experiments, or completed sub-sc
 
 Current working tracks:
 
-- Non-OCR GA release governance plan.
+- `non_ocr_ga_release_landing_trust_hardening_plan.md`: next non-OCR GA mainline, focused on real release/tag/artifact closure, runbook, CI gates, and trust hardening.
 - Cross-media encrypted transport V0.3 blueprint.
 - OCR / sidecar / visual-assist certification boundaries.
 - Gap mapping and completion evidence for the cross-media line.
+
+Completed working tracks have been moved to `docs/archive/`.
