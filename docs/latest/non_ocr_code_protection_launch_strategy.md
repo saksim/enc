@@ -1,12 +1,12 @@
-﻿# 非 OCR 代码保护线上线策略与 GPT5.5 施工交接（2026-06-12）
+# 非 OCR 代码保护线上线策略与 GPT5.5 施工交接（2026-06-12）
 
 ## 1. 结论
 
 非 OCR 代码保护线独立上线，作为当前主线产品推进。
 
 ```text
-Mainline Beta：Go
-正式 GA：No-Go，需先补齐发布治理与生产默认安全策略
+Mainline Beta：Go，当前已作为非 OCR 上线口径
+正式 GA：No-Go，仍需完成真实发布环境证据归档、密钥轮换演练与运营验收
 OCR / 跨介质线：本轮不纳入上线承诺
 ```
 
@@ -138,28 +138,30 @@ python -B scripts\smoke_runtime_integrity.py
 
 ### Phase 2：正式 GA 前 P0
 
-必须修复：
+已补齐 Mainline Beta 发布治理闭环：
 
 ```text
-enc2sop/promotion_bundle.py 当前调用缺失函数：
-promotion_audit.normalize_promotion_audit_report_payload
+promotion_audit.normalize_promotion_audit_report_payload 已存在
+promotion_bundle.py 已校验 promotion audit report / artifact audit report / run receipt passed=true
+release_promotion.yml 已生成 promotion_artifact_bundle.zip
+scripts/non_ocr_release_gate.py 已校验 production config、release dist 与 promotion bundle
+```
+
+GA 前仍需补齐运营级证据：
+
+```text
+真实 GitHub workflow artifact 归档
+protected branch evidence
+environment reviewer evidence
+required secret evidence
+approval key rotation rehearsal evidence
 ```
 
 验收命令：
 
 ```powershell
 python -B -m pytest -q tests\test_promotion_bundle.py
-python -B -m pytest -q tests\test_release_promotion_workflow.py tests\test_promotion_evidence.py tests\test_promotion_bundle.py
-```
-
-必须补齐：
-
-```text
-live CI / promotion evidence
-protected branch evidence
-environment reviewer evidence
-required secret evidence
-promotion artifact bundle archive
+python -B -m pytest -q tests\test_release_promotion_workflow.py tests\test_promotion_evidence.py tests\test_promotion_bundle.py tests\test_promotion_artifacts.py tests\test_non_ocr_release_gate.py
 ```
 
 ### Phase 3：Security Hardening Release
@@ -194,10 +196,10 @@ remote-kms 实体服务
 ### P0
 
 ```text
-1. 修复 promotion_bundle.py 缺失 normalize_promotion_audit_report_payload 问题。
-2. 将生产默认文档与配置收敛到 license-file。
-3. 明确 local-embedded 只允许 dev/demo/anti-casual。
-4. 跑通 release/promotion/bundle 验收链路。
+1. 保持生产默认配置收敛到 license-file。
+2. 保持 local-embedded 仅允许 dev/demo/anti-casual，并要求显式 --dev-insecure-ok。
+3. 保持 release/promotion/bundle/non-OCR gate 验收链路通过。
+4. GA 前补齐真实 workflow artifact、环境审批、密钥轮换演练和归档证据。
 ```
 
 ### P1
