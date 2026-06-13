@@ -64,12 +64,16 @@ def test_non_ocr_ga_governance_smoke_writes_release_and_license_evidence() -> No
         assert payload["summary"] == {
             "license_file_e2e_passed": True,
             "release_governance_passed": True,
+            "reverse_cost_check_passed": True,
             "total_failures": 0,
         }
 
         release_governance = payload["release_governance"]
         assert release_governance["passed"] is True
         assert release_governance["non_ocr_release_gate_passed"] is True
+        assert release_governance["reverse_cost_check_passed"] is True
+        assert release_governance["reverse_cost_check"]["passed"] is True
+        assert release_governance["reverse_cost_check"]["issues"] == []
         assert REQUIRED_BUNDLE_ENTRIES.issubset(set(release_governance["promotion_artifact_bundle_entries"]))
         for key in (
             "release_bundle",

@@ -40,6 +40,7 @@ from enc2sop import promotion_artifacts
 from enc2sop import promotion_audit
 from enc2sop import promotion_bundle
 from enc2sop.keys import LicenseFileKeyProvider
+from enc2sop.protect.dist_check import run_dist_no_source_leak_check
 from scripts import non_ocr_release_gate
 
 
@@ -481,6 +482,7 @@ def _run_release_governance(work_dir: Path) -> Dict[str, object]:
         ]
     )
     gate_report = json.loads(gate_report_path.read_text(encoding="utf-8"))
+    reverse_cost_report = run_dist_no_source_leak_check(dist_dir, require_release_metadata=True)
     with zipfile.ZipFile(bundle_path, "r") as zipped:
         bundle_entries = sorted(zipped.namelist())
     return {
@@ -488,7 +490,8 @@ def _run_release_governance(work_dir: Path) -> Dict[str, object]:
         and bool(rotation.get("passed"))
         and bool(artifact_report.get("passed"))
         and gate_code == 0
-        and bool(gate_report.get("passed")),
+        and bool(gate_report.get("passed"))
+        and bool(reverse_cost_report.get("passed")),
         "dist_dir": str(dist_dir),
         "ops_dir": str(ops_dir),
         "config": str(config_path),
@@ -506,6 +509,8 @@ def _run_release_governance(work_dir: Path) -> Dict[str, object]:
         "promotion_artifact_bundle_entries": bundle_entries,
         "non_ocr_release_gate_report": str(gate_report_path),
         "non_ocr_release_gate_passed": bool(gate_report.get("passed")),
+        "reverse_cost_check": reverse_cost_report,
+        "reverse_cost_check_passed": bool(reverse_cost_report.get("passed")),
     }
 
 
@@ -551,6 +556,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "summary": {
             "total_failures": len(failures),
             "release_governance_passed": bool(release_governance.get("passed")),
+            "reverse_cost_check_passed": bool(release_governance.get("reverse_cost_check_passed")),
             "license_file_e2e_passed": bool(license_e2e.get("passed")),
         },
         "failures": failures,

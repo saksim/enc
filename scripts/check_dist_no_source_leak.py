@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--report", help="Optional JSON report output path.")
     parser.add_argument(
+        "--require-release-metadata",
+        action="store_true",
+        help="Require release_bundle.json and release_tamper_report.json and validate their release metadata.",
+    )
+    parser.add_argument(
         "--scan-bytes-limit",
         type=int,
         default=2 * 1024 * 1024,
@@ -50,6 +55,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         allowed_py=args.allow_py,
         forbidden_tokens=args.forbid_token,
         scan_bytes_limit=args.scan_bytes_limit,
+        require_release_metadata=args.require_release_metadata,
     )
     if args.report:
         report_path = write_report(args.report, report)
