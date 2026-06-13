@@ -17,6 +17,10 @@ For the current non-OCR Mainline Beta release:
 2. `docs/latest/non_ocr_release_reverse_cost_checklist.md`
 3. `docs/releases/v0.1.0-mainline-beta.1.md`
 
+For the next non-OCR GA iteration:
+
+1. `docs/working/non_ocr_ga_release_governance_plan.md`
+
 For ongoing OCR / cross-media work:
 
 1. `docs/working/cross_media_enc_trans_imple_guide_v3.md`
