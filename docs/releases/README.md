@@ -11,8 +11,9 @@ Release documents should answer four questions:
 
 Current release:
 
+- `v0.1.0-ga.1.md`: non-OCR GA release evidence closure patch; GitHub Actions artifact, GitHub Release asset, and download replay are now closed.
+
+Previous releases:
+
 - `v0.1.0-ga.md`: non-OCR encryption / code-protection GA.
-
-Previous release:
-
 - `v0.1.0-mainline-beta.1.md`: non-OCR encryption / code-protection Mainline Beta.

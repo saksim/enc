@@ -14,17 +14,20 @@ docs/archive/   Historical snapshots and retired plans.
 For the current non-OCR GA release:
 
 1. `docs/latest/non_ocr_ga_release_manual.md`
-2. `docs/latest/non_ocr_release_reverse_cost_checklist.md`
-3. `docs/releases/v0.1.0-ga.md`
+2. `docs/latest/non_ocr_ga_release_runbook.md`
+3. `docs/latest/non_ocr_release_reverse_cost_checklist.md`
+4. `docs/releases/v0.1.0-ga.1.md`
+5. `docs/releases/v0.1.0-ga.md`
 
 For the next non-OCR GA post-release mainline:
 
-1. `docs/working/non_ocr_ga_release_landing_trust_hardening_plan.md`
+1. `docs/working/non_ocr_post_ga_trust_hardening_checklist.md`
 
 For completed non-OCR GA governance history:
 
-1. `docs/archive/non_ocr_ga_release_governance_plan_2026-06-13.md`
-2. `docs/releases/v0.1.0-mainline-beta.1.md`
+1. `docs/archive/non_ocr_ga_release_landing_trust_hardening_plan_2026-06-13.md`
+2. `docs/archive/non_ocr_ga_release_governance_plan_2026-06-13.md`
+3. `docs/releases/v0.1.0-mainline-beta.1.md`
 
 For ongoing OCR / cross-media work:
 
