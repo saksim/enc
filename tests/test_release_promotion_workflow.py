@@ -151,7 +151,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertTrue(script_path.exists(), "Mainline Beta smoke script is missing")
         payload = script_path.read_text(encoding="utf-8")
 
-        self.assertIn("non_ocr_code_protection_launch_strategy_20260612.md", payload)
+        self.assertIn("docs/latest/non_ocr_code_protection_launch_strategy.md", payload)
         self.assertIn(r"tests\test_encryption_helper.py", payload)
         self.assertIn(r"tests\test_decryption_helper.py", payload)
         self.assertIn(r"tests\test_soenc_cli.py", payload)
@@ -168,7 +168,7 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
 
     def test_release_reverse_cost_checklist_contract(self):
         repo_root = pathlib.Path(__file__).resolve().parents[1]
-        checklist_path = repo_root / "docs" / "current" / "non_ocr_release_reverse_cost_checklist_20260612.md"
+        checklist_path = repo_root / "docs" / "latest" / "non_ocr_release_reverse_cost_checklist.md"
         self.assertTrue(checklist_path.exists(), "release reverse-cost checklist is missing")
         payload = checklist_path.read_text(encoding="utf-8")
 
