@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Non-OCR Mainline Beta / GA release gate.
 
-This gate is intentionally scoped to the launch docs under ``docs/current``:
+This gate is intentionally scoped to the published non-OCR docs:
 
-* non_ocr_launch_decision_brief_20260612.md
-* non_ocr_code_protection_launch_strategy_20260612.md
+* docs/latest/non_ocr_code_protection_launch_strategy.md
+* docs/latest/non_ocr_release_reverse_cost_checklist.md
+* docs/releases/v0.1.0-mainline-beta.1.md
 
 It verifies production-default safety posture for the non-OCR code-protection
 line only. It does not add OCR, QR, cross-media, or remote-KMS service checks.

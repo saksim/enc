@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Run the non-OCR Mainline Beta gate from docs/current/non_ocr_code_protection_launch_strategy_20260612.md.
+Run the non-OCR Mainline Beta gate from docs/latest/non_ocr_code_protection_launch_strategy.md.
 
 .DESCRIPTION
 This script intentionally excludes OCR / cross-media tests. It verifies the code

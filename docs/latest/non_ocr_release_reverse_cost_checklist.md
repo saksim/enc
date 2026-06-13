@@ -1,6 +1,6 @@
 # 非 OCR release 包逆向成本检查清单（2026-06-12）
 
-本清单只服务 `docs/current/non_ocr_code_protection_launch_strategy_20260612.md` 中的非 OCR 代码保护线：`protect -> build -> package -> verify -> release`。它用于 Mainline Beta / GA 前 release 包评审，目标是确认“显著提高逆向、破译、篡改成本”，不承诺绝对不可逆向、绝对不可破解。
+本清单只服务 `docs/latest/non_ocr_code_protection_launch_strategy.md` 中的非 OCR 代码保护线：`protect -> build -> package -> verify -> release`。它用于 Mainline Beta / GA 前 release 包评审，目标是确认“显著提高逆向、破译、篡改成本”，不承诺绝对不可逆向、绝对不可破解。
 
 ## 0. 适用边界
 

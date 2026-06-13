@@ -1,7 +1,7 @@
 # Cross-media encrypted transport V0.3 completion report
 
-> Source blueprint: `docs/current/cross_media_enc_trans_imple_guide_v3.md`  
-> Gap mapping: `docs/current/cross_media_enc_trans_v3_gap_mapping.md`  
+> Source blueprint: `docs/working/cross_media_enc_trans_imple_guide_v3.md`  
+> Gap mapping: `docs/working/cross_media_enc_trans_v3_gap_mapping.md`  
 > Completion date: 2026-06-11  
 > Status: complete for the V0.3 items tracked by the current implementation blueprint.
 
