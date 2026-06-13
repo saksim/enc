@@ -918,6 +918,8 @@ class ReleasePromotionWorkflowTests(unittest.TestCase):
         self.assertIn("\"html_url\": dispatch_run_html_url or None", payload)
         self.assertIn("\"run_url_host\": dispatch_run_url_host or None", payload)
         self.assertIn("\"html_url_host\": dispatch_html_url_host or None", payload)
+        self.assertIn("    dispatch_html_url_host,\n", payload)
+        self.assertNotIn("dispatch_run_html_url_host", payload)
         self.assertIn("\"run_url_attempt\": _maybe_int(dispatch_run_url_attempt)", payload)
         self.assertIn("\"html_url_attempt\": _maybe_int(dispatch_html_url_attempt)", payload)
         self.assertIn("workflow_definition_verification", payload)

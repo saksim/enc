@@ -2865,7 +2865,7 @@ from pathlib import Path
     dispatch_run_url,
     dispatch_run_html_url,
     dispatch_run_url_host,
-    dispatch_run_html_url_host,
+    dispatch_html_url_host,
     dispatch_run_url_attempt,
     dispatch_run_html_url_attempt,
     capture_mode,
