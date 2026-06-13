@@ -165,3 +165,25 @@ local-embedded 可抵抗强攻击者
 OCR / cross-media 已随非 OCR GA 一起上线
 remote-KMS 已随本 GA 正式上线
 ```
+
+## 8. GA Landing Gate
+
+GA 后续 release landing 使用以下入口复验可下载证据包：
+
+```powershell
+python -B scripts\non_ocr_ga_landing_gate.py --smoke-report <path>\non_ocr_ga_governance_smoke_report.json --promotion-bundle <path>\promotion_artifact_bundle.zip --report <path>\non_ocr_ga_landing_gate_report.json
+```
+
+该 gate 会校验：
+
+```text
+promotion_artifact_bundle.zip sha256
+bundle_manifest.json schema / file_count / entry sha256
+关键 release / promotion JSON schema
+promotion_audit_report.passed == true
+promotion_artifact_audit_report.passed == true
+promotion_run_receipt.passed == true
+rotation_rehearsal_report.status == passed
+license_file_e2e_passed == true
+reverse_cost_check_passed == true
+```

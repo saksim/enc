@@ -1,0 +1,121 @@
+name: non-ocr-ga-landing
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GA tag used when publishing artifacts to GitHub Release"
+        required: false
+        default: "v0.1.0-ga"
+      publish_release_artifacts:
+        description: "Upload GA evidence artifacts to the GitHub Release for release_tag"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*-ga"
+      - "v*-ga.*"
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: non-ocr-ga-landing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ga-landing-gate:
+    name: Non-OCR GA Landing Gate
+    runs-on: ubuntu-latest
+    env:
+      WORK_DIR: .tmp_ci/non_ocr_ga_landing
+      SMOKE_REPORT: .tmp_ci/non_ocr_ga_landing/non_ocr_ga_governance_smoke_report.json
+      LANDING_REPORT: .tmp_ci/non_ocr_ga_landing/non_ocr_ga_landing_gate_report.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Mainline Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pycryptodome setuptools Cython pytest
+
+      - name: Run Non-OCR GA Governance Smoke
+        run: |
+          python -B scripts/non_ocr_ga_release_governance_smoke.py --work-dir "$WORK_DIR" --report "$SMOKE_REPORT"
+
+      - name: Run Non-OCR GA Landing Gate
+        run: |
+          python -B scripts/non_ocr_ga_landing_gate.py --smoke-report "$SMOKE_REPORT" --report "$LANDING_REPORT"
+
+      - name: Show GA Landing Summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("${{ env.LANDING_REPORT }}").read_text(encoding="utf-8"))
+          summary = report["summary"]
+          print("passed={}".format(report["passed"]))
+          print("promotion_artifact_bundle_sha256={}".format(report["promotion_artifact_bundle_sha256"]))
+          print("license_file_e2e_passed={}".format(summary["license_file_e2e_passed"]))
+          print("reverse_cost_check_passed={}".format(summary["reverse_cost_check_passed"]))
+          print("promotion_audit_passed={}".format(summary["promotion_audit_passed"]))
+          print("promotion_artifact_audit_passed={}".format(summary["promotion_artifact_audit_passed"]))
+          print("promotion_run_receipt_passed={}".format(summary["promotion_run_receipt_passed"]))
+          print("rotation_rehearsal_passed={}".format(summary["rotation_rehearsal_passed"]))
+          PY
+
+      - name: Upload GA Landing Artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: non-ocr-ga-landing-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.SMOKE_REPORT }}
+            ${{ env.LANDING_REPORT }}
+            ${{ env.WORK_DIR }}/release/release_bundle.json
+            ${{ env.WORK_DIR }}/release/release_approval.json
+            ${{ env.WORK_DIR }}/release/release_receipt.json
+            ${{ env.WORK_DIR }}/release/release_tamper_report.json
+            ${{ env.WORK_DIR }}/ops/promotion_evidence.json
+            ${{ env.WORK_DIR }}/ops/promotion_audit_report.json
+            ${{ env.WORK_DIR }}/ops/rotation_rehearsal_report.json
+            ${{ env.WORK_DIR }}/ops/promotion_artifact_audit_report.json
+            ${{ env.WORK_DIR }}/ops/promotion_run_receipt.json
+            ${{ env.WORK_DIR }}/ops/promotion_artifact_bundle.zip
+          if-no-files-found: error
+
+      - name: Publish Evidence To GitHub Release
+        if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release_artifacts == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${REQUESTED_TAG:-v0.1.0-ga}"
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::Tag ${tag} does not exist locally. Create and push the GA tag before publishing release artifacts."
+            exit 1
+          fi
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --notes-file docs/releases/v0.1.0-ga.md
+          fi
+          gh release upload "${tag}" \
+            "$SMOKE_REPORT" \
+            "$LANDING_REPORT" \
+            "$WORK_DIR/ops/promotion_artifact_bundle.zip" \
+            --clobber

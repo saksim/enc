@@ -176,3 +176,36 @@ remote-KMS Enterprise plan
 python -B scripts\non_ocr_ga_release_governance_smoke.py --work-dir .tmp_non_ocr_ga_governance_smoke_verify
 python -B -m pytest -q tests\test_dist_no_source_leakage.py tests\test_non_ocr_ga_release_governance_smoke.py tests\test_non_ocr_release_gate.py tests\test_promotion_artifacts.py tests\test_promotion_bundle.py -p no:cacheprovider
 ```
+
+## 本轮实现状态
+
+已新增非 OCR GA landing gate：
+
+```text
+enc2sop/ga_landing.py
+scripts/non_ocr_ga_landing_gate.py
+tests/test_non_ocr_ga_landing_gate.py
+```
+
+它覆盖当前推荐施工批次的第一轮落点：
+
+```text
+1. 真实 GitHub Release / Tag / Artifact 闭环：新增 .github/workflows/non_ocr_ga_landing.yml，产出可下载 smoke report、landing gate report、promotion_artifact_bundle.zip，并支持已有 GA tag 的 GitHub Release artifact 上传。
+2. 生产 Release Runbook 与一键复验入口：新增 docs/latest/non_ocr_ga_release_runbook.md，定义 dry-run、CI artifact、下载后复验、停止条件和回滚口径。
+3. GA 后 CI 质量门禁：landing gate 已校验 license_file_e2e_passed、reverse_cost_check_passed、promotion audit、artifact audit、run receipt、rotation rehearsal 和 bundle manifest sha256。
+```
+
+新增验收命令：
+
+```powershell
+python -B scripts\non_ocr_ga_release_governance_smoke.py --work-dir .tmp_non_ocr_ga_governance_smoke_verify
+python -B scripts\non_ocr_ga_landing_gate.py --smoke-report .tmp_non_ocr_ga_governance_smoke_verify\non_ocr_ga_governance_smoke_report.json --report .tmp_non_ocr_ga_governance_smoke_verify\non_ocr_ga_landing_gate_report.json
+python -B -m pytest -q tests\test_non_ocr_ga_landing_gate.py tests\test_non_ocr_ga_release_governance_smoke.py tests\test_dist_no_source_leakage.py tests\test_non_ocr_release_gate.py tests\test_promotion_artifacts.py tests\test_promotion_bundle.py -p no:cacheprovider
+```
+
+剩余主线仍按顺序推进：
+
+```text
+4. 证据包可审计性增强：后续继续扩大 schema/version 检查和归档保留周期说明。
+5. 发布后信任硬化清单：后续只形成 checklist / plan，不进入 latest 已上线承诺。
+```
