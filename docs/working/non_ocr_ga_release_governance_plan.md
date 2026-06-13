@@ -168,3 +168,38 @@ OCR / cross-media 随非 OCR GA 一起上线
 版本事实 -> docs/releases/
 旧计划快照 -> docs/archive/
 ```
+## 本轮实现状态
+
+已新增本地 GA 治理 smoke：
+
+```text
+scripts/non_ocr_ga_release_governance_smoke.py
+```
+
+它覆盖第一施工批次：
+
+```text
+1. 发布证据归档上线：生成 release / promotion / gate / bundle 全套本地证据。
+2. 密钥轮换演练上线：使用旧 approval key 复验 release gate 必须失败，并写入 rotation_rehearsal_report.json。
+3. 生产 license-file E2E 示例上线：覆盖 happy path、缺 license、签名错误、机器不匹配、过期、吊销 fail-closed。
+```
+
+回归测试：
+
+```text
+tests/test_non_ocr_ga_release_governance_smoke.py
+```
+
+验收命令：
+
+```powershell
+python -B scripts\non_ocr_ga_release_governance_smoke.py --work-dir .tmp_non_ocr_ga_governance_smoke
+python -B -m pytest -q tests\test_non_ocr_ga_release_governance_smoke.py tests\test_non_ocr_release_gate.py tests\test_promotion_artifacts.py tests\test_promotion_bundle.py -p no:cacheprovider
+```
+
+剩余主线仍按顺序推进：
+
+```text
+4. Release 包逆向成本检查上线
+5. 正式 GA 文档上线
+```
