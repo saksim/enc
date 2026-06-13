@@ -1585,7 +1585,7 @@ expected_host = sys.argv[4]
 dispatch_run_url = sys.argv[5]
 dispatch_html_url = sys.argv[6]
 
-def _verify_optional_dispatch_url(label: str, value: str) -> tuple[str, str]:
+def _verify_optional_dispatch_url(label, value):
     if not value:
         return "", ""
     if value != value.strip():
@@ -2888,7 +2888,7 @@ from pathlib import Path
     dispatch_run_url_host,
     dispatch_html_url_host,
     dispatch_run_url_attempt,
-    dispatch_run_html_url_attempt,
+    dispatch_html_url_attempt,
     capture_mode,
     run_id_resolution_mode,
     workflow_event,
