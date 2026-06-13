@@ -14,7 +14,6 @@ from typing import Dict
 from typing import List
 from typing import Mapping
 from typing import Optional
-from typing import Sequence
 from typing import Tuple
 
 import encryption_helper
@@ -78,6 +77,10 @@ def _load_json_bytes(payload: bytes, label: str) -> Dict[str, object]:
 def _append_if_false(failures: List[str], condition: bool, message: str) -> None:
     if not condition:
         failures.append(message)
+
+
+def _non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _normalize_path(value: Optional[str], *, repo_root: Path) -> Optional[Path]:
@@ -151,6 +154,8 @@ def _validate_manifest(entries: Mapping[str, bytes], failures: List[str]) -> Tup
                 manifest.get("schema"),
             )
         )
+    if not _non_empty_string(manifest.get("generated_at_utc")):
+        failures.append("bundle_manifest.generated_at_utc is required")
     files = manifest.get("files")
     if not isinstance(files, list):
         failures.append("bundle_manifest.files must be a list")
@@ -173,6 +178,8 @@ def _validate_manifest(entries: Mapping[str, bytes], failures: List[str]) -> Tup
         rows[archive_path] = row
         if not name:
             failures.append("bundle_manifest entry name is required for {0}".format(archive_path))
+        if not _non_empty_string(row.get("source_path")):
+            failures.append("bundle_manifest entry source_path is required for {0}".format(archive_path))
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
             failures.append("bundle_manifest entry sha256 must be 64-char lowercase hex: {0}".format(archive_path))
             continue
@@ -188,7 +195,30 @@ def _validate_manifest(entries: Mapping[str, bytes], failures: List[str]) -> Tup
         failures.append("bundle_manifest.file_count must be an integer")
     elif declared_count != len(files):
         failures.append("bundle_manifest.file_count must equal len(files)")
+
+    declared_paths = set(rows)
+    for required in REQUIRED_BUNDLE_ENTRIES:
+        if required != "bundle_manifest.json" and required not in declared_paths:
+            failures.append("bundle_manifest missing required archive_path: {0}".format(required))
+    for archive_path in entries:
+        if archive_path != "bundle_manifest.json" and archive_path not in declared_paths:
+            failures.append("zip entry is not declared in bundle_manifest: {0}".format(archive_path))
     return manifest, rows
+
+
+def _artifact_sha256_manifest(rows: Mapping[str, Mapping[str, object]]) -> List[Dict[str, object]]:
+    sha_rows: List[Dict[str, object]] = []
+    for archive_path in sorted(rows):
+        row = rows[archive_path]
+        sha_rows.append(
+            {
+                "archive_path": archive_path,
+                "name": str(row.get("name") or ""),
+                "source_path": str(row.get("source_path") or ""),
+                "sha256": str(row.get("sha256") or "").lower(),
+            }
+        )
+    return sha_rows
 
 
 def _validate_json_artifacts(entries: Mapping[str, bytes], failures: List[str], *, require_rotation_pass: bool) -> Dict[str, bool]:
@@ -219,6 +249,8 @@ def _validate_json_artifacts(entries: Mapping[str, bytes], failures: List[str], 
         failures.append("promotion_run_receipt schema mismatch")
     if rotation_payload.get("schema") != promotion_artifacts.ROTATION_REHEARSAL_SCHEMA:
         failures.append("rotation_rehearsal_report schema mismatch")
+    if release_bundle_payload.get("layout_version") != encryption_helper.RELEASE_LAYOUT_VERSION:
+        failures.append("release_bundle layout_version mismatch")
 
     bundle_contents = release_bundle_payload.get("bundle_contents")
     license_file = bundle_contents.get("license_file") if isinstance(bundle_contents, dict) else None
@@ -241,6 +273,18 @@ def _validate_json_artifacts(entries: Mapping[str, bytes], failures: List[str], 
     _append_if_false(failures, flags["promotion_run_receipt_passed"], "promotion_run_receipt.passed must be true")
     if require_rotation_pass:
         _append_if_false(failures, flags["rotation_rehearsal_passed"], "rotation rehearsal must pass with old_key_rejected=true")
+    flags["json_schema_version_audit_passed"] = not any(
+        entry.get("schema") != expected_schema
+        for entry, expected_schema in (
+            (release_bundle_payload, encryption_helper.RELEASE_BUNDLE_SCHEMA),
+            (release_approval_payload, encryption_helper.RELEASE_APPROVAL_SCHEMA),
+            (release_receipt_payload, encryption_helper.RELEASE_RECEIPT_SCHEMA),
+            (promotion_audit_payload, promotion_audit.PROMOTION_AUDIT_REPORT_SCHEMA),
+            (artifact_audit_payload, promotion_artifacts.PROMOTION_ARTIFACT_AUDIT_SCHEMA),
+            (run_receipt_payload, promotion_artifacts.PROMOTION_RUN_RECEIPT_SCHEMA),
+            (rotation_payload, promotion_artifacts.ROTATION_REHEARSAL_SCHEMA),
+        )
+    ) and release_bundle_payload.get("layout_version") == encryption_helper.RELEASE_LAYOUT_VERSION
     return flags
 
 
@@ -287,9 +331,10 @@ def run_ga_landing_gate(
             failures.append("promotion_artifact_bundle missing required entry: {0}".format(required))
 
     manifest: Dict[str, object] = {}
+    manifest_rows: Dict[str, Dict[str, object]] = {}
     artifact_flags: Dict[str, bool] = {}
     if "bundle_manifest.json" in entries:
-        manifest, _rows = _validate_manifest(entries, failures)
+        manifest, manifest_rows = _validate_manifest(entries, failures)
     if all(path in entries for path in REQUIRED_BUNDLE_ENTRIES):
         artifact_flags = _validate_json_artifacts(entries, failures, require_rotation_pass=require_rotation_pass)
 
@@ -312,8 +357,14 @@ def run_ga_landing_gate(
             "promotion_artifact_audit_passed": bool(artifact_flags.get("promotion_artifact_audit_passed")),
             "promotion_run_receipt_passed": bool(artifact_flags.get("promotion_run_receipt_passed")),
             "rotation_rehearsal_passed": bool(artifact_flags.get("rotation_rehearsal_passed")),
+            "json_schema_version_audit_passed": bool(artifact_flags.get("json_schema_version_audit_passed")),
         },
         "required_bundle_entries": list(REQUIRED_BUNDLE_ENTRIES),
+        "artifact_manifest": {
+            "zip_entry_count": len(entries),
+            "declared_file_count": len(manifest_rows),
+            "sha256": _artifact_sha256_manifest(manifest_rows),
+        },
         "failures": failures,
     }
 

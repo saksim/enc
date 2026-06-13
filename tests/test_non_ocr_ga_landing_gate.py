@@ -28,7 +28,16 @@ def _json_bytes(payload: Dict[str, object]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
 
 
-def _write_bundle(path: Path, *, corrupt_manifest_sha: bool = False, rotation_passed: bool = True) -> str:
+def _write_bundle(
+    path: Path,
+    *,
+    corrupt_manifest_sha: bool = False,
+    rotation_passed: bool = True,
+    omit_entry: str = "",
+    extra_unmanifested_entry: bool = False,
+    missing_manifest_source_path: bool = False,
+    missing_bundle_layout_version: bool = False,
+) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     payloads = {
         "release/release_bundle.json": {
@@ -94,21 +103,26 @@ def _write_bundle(path: Path, *, corrupt_manifest_sha: bool = False, rotation_pa
         },
         "policy/promotion_rollout_policy.json": {"schema": "enc2sop-promotion-policy/v1"},
     }
+    if missing_bundle_layout_version:
+        del payloads["release/release_bundle.json"]["layout_version"]
     raw_entries = {name: _json_bytes(payload) for name, payload in payloads.items()}
     raw_entries["workflow/release_promotion.yml"] = b"name: release-promotion-gate\n"
+    if omit_entry:
+        raw_entries.pop(omit_entry, None)
     manifest_files = []
     for index, name in enumerate(sorted(raw_entries)):
         digest = hashlib.sha256(raw_entries[name]).hexdigest()
         if corrupt_manifest_sha and index == 0:
             digest = "0" * 64
-        manifest_files.append(
-            {
-                "name": name.replace("/", "_"),
-                "archive_path": name,
-                "source_path": name,
-                "sha256": digest,
-            }
-        )
+        manifest_row = {
+            "name": name.replace("/", "_"),
+            "archive_path": name,
+            "source_path": name,
+            "sha256": digest,
+        }
+        if missing_manifest_source_path and name == "release/release_bundle.json":
+            del manifest_row["source_path"]
+        manifest_files.append(manifest_row)
     manifest = {
         "schema": promotion_bundle.PROMOTION_ARTIFACT_BUNDLE_SCHEMA,
         "generated_at_utc": "2026-06-13T00:00:00Z",
@@ -116,7 +130,10 @@ def _write_bundle(path: Path, *, corrupt_manifest_sha: bool = False, rotation_pa
         "files": manifest_files,
     }
     raw_entries["bundle_manifest.json"] = _json_bytes(manifest)
-    assert set(REQUIRED_BUNDLE_ENTRIES).issubset(set(raw_entries))
+    if extra_unmanifested_entry:
+        raw_entries["extra/unmanifested.txt"] = b"not in manifest\n"
+    if not omit_entry:
+        assert set(REQUIRED_BUNDLE_ENTRIES).issubset(set(raw_entries))
     with zipfile.ZipFile(path, "w") as zipped:
         for name, data in raw_entries.items():
             zipped.writestr(name, data)
@@ -164,6 +181,9 @@ def test_ga_landing_gate_passes_with_valid_smoke_report_and_bundle(tmp_path: Pat
     assert report["summary"]["license_file_e2e_passed"] is True
     assert report["summary"]["reverse_cost_check_passed"] is True
     assert report["summary"]["rotation_rehearsal_passed"] is True
+    assert report["summary"]["json_schema_version_audit_passed"] is True
+    assert report["artifact_manifest"]["declared_file_count"] == len(REQUIRED_BUNDLE_ENTRIES) - 1
+    assert len(report["artifact_manifest"]["sha256"]) == len(REQUIRED_BUNDLE_ENTRIES) - 1
     assert report["failures"] == []
     assert json.loads(report_path.read_text(encoding="utf-8"))["passed"] is True
 
@@ -198,6 +218,68 @@ def test_ga_landing_gate_fails_when_reverse_cost_did_not_pass(tmp_path: Path) ->
     assert "reverse_cost_check_passed must be true" in report["failures"]
     assert "reverse_cost_check.passed must be true" in report["failures"]
     assert "reverse_cost_check.issues must be empty" in report["failures"]
+
+
+def test_ga_landing_gate_fails_when_required_evidence_entry_is_missing(tmp_path: Path) -> None:
+    bundle_path = tmp_path / "promotion_artifact_bundle.zip"
+    bundle_sha = _write_bundle(bundle_path, omit_entry="ops/promotion_run_receipt.json")
+    smoke_path = tmp_path / "non_ocr_ga_governance_smoke_report.json"
+    _write_smoke_report(smoke_path, bundle_path, bundle_sha)
+
+    _output_path, report = run_ga_landing_gate(
+        smoke_report_file=str(smoke_path),
+        repo_root=REPO_ROOT,
+    )
+
+    assert report["passed"] is False
+    assert "promotion_artifact_bundle missing required entry: ops/promotion_run_receipt.json" in report["failures"]
+    assert "bundle_manifest missing required archive_path: ops/promotion_run_receipt.json" in report["failures"]
+
+
+def test_ga_landing_gate_fails_when_zip_contains_unmanifested_entry(tmp_path: Path) -> None:
+    bundle_path = tmp_path / "promotion_artifact_bundle.zip"
+    bundle_sha = _write_bundle(bundle_path, extra_unmanifested_entry=True)
+    smoke_path = tmp_path / "non_ocr_ga_governance_smoke_report.json"
+    _write_smoke_report(smoke_path, bundle_path, bundle_sha)
+
+    _output_path, report = run_ga_landing_gate(
+        smoke_report_file=str(smoke_path),
+        repo_root=REPO_ROOT,
+    )
+
+    assert report["passed"] is False
+    assert "zip entry is not declared in bundle_manifest: extra/unmanifested.txt" in report["failures"]
+
+
+def test_ga_landing_gate_fails_when_manifest_source_path_is_missing(tmp_path: Path) -> None:
+    bundle_path = tmp_path / "promotion_artifact_bundle.zip"
+    bundle_sha = _write_bundle(bundle_path, missing_manifest_source_path=True)
+    smoke_path = tmp_path / "non_ocr_ga_governance_smoke_report.json"
+    _write_smoke_report(smoke_path, bundle_path, bundle_sha)
+
+    _output_path, report = run_ga_landing_gate(
+        smoke_report_file=str(smoke_path),
+        repo_root=REPO_ROOT,
+    )
+
+    assert report["passed"] is False
+    assert "bundle_manifest entry source_path is required for release/release_bundle.json" in report["failures"]
+
+
+def test_ga_landing_gate_fails_when_schema_version_metadata_is_missing(tmp_path: Path) -> None:
+    bundle_path = tmp_path / "promotion_artifact_bundle.zip"
+    bundle_sha = _write_bundle(bundle_path, missing_bundle_layout_version=True)
+    smoke_path = tmp_path / "non_ocr_ga_governance_smoke_report.json"
+    _write_smoke_report(smoke_path, bundle_path, bundle_sha)
+
+    _output_path, report = run_ga_landing_gate(
+        smoke_report_file=str(smoke_path),
+        repo_root=REPO_ROOT,
+    )
+
+    assert report["passed"] is False
+    assert "release_bundle layout_version mismatch" in report["failures"]
+    assert report["summary"]["json_schema_version_audit_passed"] is False
 
 
 def test_ga_landing_gate_cli_prints_ci_visible_flags(tmp_path: Path) -> None:

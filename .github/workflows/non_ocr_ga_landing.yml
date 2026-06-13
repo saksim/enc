@@ -73,6 +73,7 @@ jobs:
           print("promotion_artifact_audit_passed={}".format(summary["promotion_artifact_audit_passed"]))
           print("promotion_run_receipt_passed={}".format(summary["promotion_run_receipt_passed"]))
           print("rotation_rehearsal_passed={}".format(summary["rotation_rehearsal_passed"]))
+          print("json_schema_version_audit_passed={}".format(summary["json_schema_version_audit_passed"]))
           PY
 
       - name: Upload GA Landing Artifacts
@@ -94,6 +95,7 @@ jobs:
             ${{ env.WORK_DIR }}/ops/promotion_run_receipt.json
             ${{ env.WORK_DIR }}/ops/promotion_artifact_bundle.zip
           if-no-files-found: error
+          retention-days: 90
 
       - name: Publish Evidence To GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release_artifacts == 'true' }}

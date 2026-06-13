@@ -110,7 +110,22 @@ python -B scripts\non_ocr_ga_landing_gate.py --smoke-report <downloaded>\non_ocr
 
 如果 bundle sha256、manifest entry sha256、关键 JSON schema、passed 字段或 rotation rehearsal 不满足要求，命令必须失败。
 
-## 7. 停止条件
+
+## 7. 证据归档与保留周期
+
+证据包归档路径以 GitHub Actions artifact 为主，以 GitHub Release artifact 为长期发布事实：
+
+```text
+Workflow artifact: non-ocr-ga-landing-<run_id>-attempt-<run_attempt>
+Workflow retention: 90 days
+GitHub Release artifact: attached to v0.1.0-ga or the selected GA tag
+Release retention: retained while the GitHub Release exists
+Local replay path: downloaded artifact directory chosen by the operator
+```
+
+`non_ocr_ga_landing_gate_report.json` 必须包含 `artifact_manifest.sha256` 清单。下载后复验时，任何必需证据缺失、manifest 未声明 zip 条目、sha256 不匹配、关键 JSON schema/version 缺失，均视为发布证据不可用并停止发布。
+
+## 8. 停止条件
 
 出现任一情况，停止发布：
 
@@ -125,7 +140,7 @@ rotation_rehearsal_passed != true
 release_tamper_report.success != true
 ```
 
-## 8. 回滚口径
+## 9. 回滚口径
 
 文档或证据发布失败时，只回滚发布动作和 artifact，不回滚已验证的代码保护能力。
 

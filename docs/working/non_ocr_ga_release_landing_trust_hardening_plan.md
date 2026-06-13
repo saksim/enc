@@ -209,3 +209,27 @@ python -B -m pytest -q tests\test_non_ocr_ga_landing_gate.py tests\test_non_ocr_
 4. 证据包可审计性增强：后续继续扩大 schema/version 检查和归档保留周期说明。
 5. 发布后信任硬化清单：后续只形成 checklist / plan，不进入 latest 已上线承诺。
 ```
+
+## 本轮补充实现状态
+
+本轮继续按本施工文档第 4、5 项补齐：
+
+```text
+4. 证据包可审计性增强：landing gate 已增强 manifest generated_at_utc、entry source_path、必需条目、未声明 zip 条目、manifest sha256、release_bundle layout_version 检查；报告输出 artifact_manifest.sha256 清单。
+5. 发布后信任硬化清单：新增 docs/working/non_ocr_post_ga_trust_hardening_checklist.md，仅作为后续 working 候选池，不进入 latest 已上线承诺。
+```
+
+对应 CI / 文档补充：
+
+```text
+.github/workflows/non_ocr_ga_landing.yml 增加 json_schema_version_audit_passed 输出和 artifact retention-days=90。
+docs/latest/non_ocr_ga_release_runbook.md 增加证据归档路径、保留周期、下载后复验失败条件。
+```
+
+剩余需要远端完成的动作：
+
+```text
+触发 GitHub Actions non-ocr-ga-landing workflow。
+如需对外发布证据包，基于已存在 GA tag 将 smoke report、landing gate report、promotion_artifact_bundle.zip 上传到 GitHub Release。
+下载 artifact 后再次运行 landing gate replay。
+```
