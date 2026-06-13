@@ -66,6 +66,24 @@ require_command() {
   fi
 }
 
+resolve_python_command() {
+  local candidate
+  for candidate in "${PYTHON:-}" python3 py python; do
+    if [[ -z "$candidate" ]]; then
+      continue
+    fi
+    if ! command -v "$candidate" >/dev/null 2>&1; then
+      continue
+    fi
+    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "Missing usable Python 3 interpreter. Set PYTHON to a working Python executable or fix PATH." >&2
+  exit 1
+}
+
 require_boolean_token() {
   local value="$1"
   local label="$2"
@@ -864,8 +882,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_command gh
-require_command python
 require_command sed
+PYTHON_CMD="$(resolve_python_command)"
+python() {
+  "$PYTHON_CMD" "$@"
+}
 
 if [[ -z "$WORKFLOW_JOB_ID" || "$WORKFLOW_JOB_ID" != "${WORKFLOW_JOB_ID//[[:space:]]/}" ]]; then
   echo "Invalid workflow-job-id: ${WORKFLOW_JOB_ID} (expected non-empty token without whitespace)" >&2
