@@ -22,14 +22,14 @@ For the current non-OCR GA release:
 For the next non-OCR GA post-release mainline:
 
 1. `docs/working/non_ocr_post_ga_trust_hardening_checklist.md`
-2. `docs/working/non_ocr_third_party_reverse_eval_plan.md`
-3. `docs/working/non_ocr_third_party_reverse_eval_template.md`
+2. `docs/working/non_ocr_third_party_reverse_eval_template.md`
 
 For completed non-OCR GA governance history:
 
-1. `docs/archive/non_ocr_ga_release_landing_trust_hardening_plan_2026-06-13.md`
-2. `docs/archive/non_ocr_ga_release_governance_plan_2026-06-13.md`
-3. `docs/releases/v0.1.0-mainline-beta.1.md`
+1. `docs/archive/non_ocr_third_party_reverse_eval_plan_2026-06-14.md`
+2. `docs/archive/non_ocr_ga_release_landing_trust_hardening_plan_2026-06-13.md`
+3. `docs/archive/non_ocr_ga_release_governance_plan_2026-06-13.md`
+4. `docs/releases/v0.1.0-mainline-beta.1.md`
 
 For ongoing OCR / cross-media work:
 

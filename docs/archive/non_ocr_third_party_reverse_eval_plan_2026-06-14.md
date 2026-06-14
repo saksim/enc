@@ -1,7 +1,8 @@
-# Non-OCR Third-Party Reverse Evaluation Plan
+﻿# Non-OCR Third-Party Reverse Evaluation Plan
 
 Date: 2026-06-13
-Status: working
+Archived: 2026-06-14
+Status: archived
 Parent: `docs/working/non_ocr_post_ga_trust_hardening_checklist.md`
 Scope item: third-party reverse-engineering evaluation template
 
@@ -125,3 +126,4 @@ The gate verifies local sample files exist and match reported sha256 values.
 The gate verifies the local promotion artifact bundle path, landing gate report path, landing gate passed=true, and final report sha256 when --require-local-evidence is used.
 The workflow_dispatch path can opt into local evidence replay with require_local_evidence=true.
 ```
+
