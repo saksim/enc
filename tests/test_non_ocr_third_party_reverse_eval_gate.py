@@ -171,8 +171,8 @@ def _write_evidence_file(root: Path, relative_path: str, payload: bytes) -> str:
 def _completed_local_report(root: Path) -> Dict[str, object]:
     report = _completed_report()
     bundle_sha = _write_evidence_file(root, "evidence/promotion_artifact_bundle.zip", b"promotion-bundle")
-    _write_evidence_file(root, "evidence/non_ocr_ga_landing_gate_report.json", b"{}")
-    _write_evidence_file(root, "evidence/final_report.json", b"final-report")
+    _write_evidence_file(root, "evidence/non_ocr_ga_landing_gate_report.json", b"{\"passed\": true}")
+    final_report_sha = _write_evidence_file(root, "evidence/final_report.json", b"final-report")
     sample_specs = [
         ("sample-001", "encrypted-file", "samples/sample.enc", b"encrypted-file"),
         ("sample-002", "protected-python-package", "samples/protected_package.zip", b"protected-package"),
@@ -201,6 +201,7 @@ def _completed_local_report(root: Path) -> Dict[str, object]:
         "landing_gate_report": "evidence/non_ocr_ga_landing_gate_report.json",
         "sample_hashes_verified": True,
     }
+    report["approval"]["final_report_sha256"] = final_report_sha  # type: ignore[index]
     report["approval"]["final_report_storage_path"] = "evidence/final_report.json"  # type: ignore[index]
     return report
 def test_draft_template_passes_structure_gate_without_completed_claim() -> None:
@@ -278,6 +279,38 @@ def test_local_evidence_gate_rejects_sample_hash_mismatch(tmp_path: Path) -> Non
 
     assert gate_report["passed"] is False
     assert "samples[0] sha256 mismatch" in gate_report["failures"]
+
+def test_local_evidence_gate_rejects_final_report_hash_mismatch(tmp_path: Path) -> None:
+    report = _completed_local_report(tmp_path)
+    report["approval"]["final_report_sha256"] = "b" * 64  # type: ignore[index]
+
+    gate_report = validate_report(
+        report,
+        require_completed=True,
+        require_local_evidence=True,
+        evidence_root=tmp_path,
+    )
+
+    assert gate_report["passed"] is False
+    assert "approval.final_report_storage_path sha256 mismatch" in gate_report["failures"]
+
+
+def test_local_evidence_gate_rejects_failed_landing_report(tmp_path: Path) -> None:
+    report = _completed_local_report(tmp_path)
+    (tmp_path / "evidence" / "non_ocr_ga_landing_gate_report.json").write_text(
+        json.dumps({"passed": False}),
+        encoding="utf-8",
+    )
+
+    gate_report = validate_report(
+        report,
+        require_completed=True,
+        require_local_evidence=True,
+        evidence_root=tmp_path,
+    )
+
+    assert gate_report["passed"] is False
+    assert "release_evidence.landing_gate_report.passed must be true" in gate_report["failures"]
 def test_gate_cli_writes_report_for_template(tmp_path: Path) -> None:
     report_path = tmp_path / "eval.json"
     report_path.write_text(json.dumps(_draft_report(), indent=2, sort_keys=True), encoding="utf-8")

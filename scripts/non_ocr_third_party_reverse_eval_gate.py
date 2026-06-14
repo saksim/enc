@@ -161,6 +161,14 @@ def _validate_release_evidence(report: Mapping[str, object], failures: List[str]
         landing_path = _resolve_local_evidence_path(evidence.get("landing_gate_report"), evidence_root=evidence_root)
         if landing_path is None or not landing_path.is_file():
             failures.append("release_evidence.landing_gate_report local file missing")
+        else:
+            try:
+                landing_report = _load_json_object(landing_path)
+            except Exception as exc:
+                failures.append("release_evidence.landing_gate_report must be valid JSON: {0}".format(exc))
+            else:
+                if landing_report.get("passed") is not True:
+                    failures.append("release_evidence.landing_gate_report.passed must be true")
 
 
 def _validate_samples(report: Mapping[str, object], failures: List[str], *, require_completed: bool, require_local_evidence: bool, evidence_root: Path) -> None:
@@ -293,9 +301,14 @@ def _validate_approval(report: Mapping[str, object], failures: List[str], *, req
             _append_if_false(failures, _non_empty_string(approval.get(key)), "approval.{0} is required for completed reports".format(key))
         _append_if_false(failures, _is_sha256(approval.get("final_report_sha256")), "approval.final_report_sha256 must be a lowercase sha256 for completed reports")
     if require_local_evidence:
-        storage_path = _resolve_local_evidence_path(approval.get("final_report_storage_path"), evidence_root=evidence_root)
-        if storage_path is None or not storage_path.is_file():
-            failures.append("approval.final_report_storage_path local file missing")
+        _validate_local_file_sha256(
+            path_value=approval.get("final_report_storage_path"),
+            expected_sha256=approval.get("final_report_sha256"),
+            evidence_root=evidence_root,
+            label="approval.final_report_storage_path",
+            failures=failures,
+            require_local_evidence=True,
+        )
 
 
 def validate_report(

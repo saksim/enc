@@ -113,7 +113,7 @@ Remaining before any public third-party claim:
 ```text
 A real third-party assessor must fill a completed report.
 The completed report must pass --require-completed.
-If local evidence files are provided, the completed report should also pass --require-local-evidence with matching sha256 values.
+If local evidence files are provided, the completed report should also pass --require-local-evidence with matching sha256 values, final report sha256, and landing gate report passed=true.
 The final report sha256 and storage path must be recorded.
 Only then can a release document reference the third-party assessment as completed.
 ```
@@ -122,6 +122,6 @@ Additional implementation in this round:
 ```text
 Completed reports can now require local evidence replay.
 The gate verifies local sample files exist and match reported sha256 values.
-The gate verifies the local promotion artifact bundle path and landing gate report path when --require-local-evidence is used.
+The gate verifies the local promotion artifact bundle path, landing gate report path, landing gate passed=true, and final report sha256 when --require-local-evidence is used.
 The workflow_dispatch path can opt into local evidence replay with require_local_evidence=true.
 ```
