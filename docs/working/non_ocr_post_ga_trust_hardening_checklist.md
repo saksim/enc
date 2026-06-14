@@ -44,3 +44,41 @@
 - 范围：错误 artifact、错误 license、密钥泄露、证据包污染的回滚路径。
 - 禁止：只写流程不做演练。
 - 验收：演练报告包含开始时间、执行人、影响范围、回滚证据、复盘项。
+## Current Implementation Status
+
+### Item 2. Third-party reverse evaluation template
+
+Status: in progress, working artifacts created.
+
+Artifacts:
+
+```text
+docs/working/non_ocr_third_party_reverse_eval_plan.md
+docs/working/non_ocr_third_party_reverse_eval_template.md
+docs/working/non_ocr_third_party_reverse_eval_report.template.json
+scripts/non_ocr_third_party_reverse_eval_gate.py
+tests/test_non_ocr_third_party_reverse_eval_gate.py
+.github/workflows/non_ocr_third_party_reverse_eval.yml
+```
+
+What is now covered:
+
+```text
+sample inventory
+environment and toolchain
+attack budget
+findings and risk levels
+retest records
+claim boundary acknowledgement
+completed-report approval gate
+completed-report minimum sample set gate
+GitHub Actions draft/completed separation gate
+```
+
+Important boundary:
+
+```text
+This does not mean a third-party evaluation has been completed.
+The gate only validates report structure by default.
+A completed assessment must pass scripts/non_ocr_third_party_reverse_eval_gate.py --require-completed with real assessor and project-owner approval fields.
+```

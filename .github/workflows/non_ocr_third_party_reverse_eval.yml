@@ -1,0 +1,90 @@
+name: non-ocr-third-party-reverse-eval
+
+on:
+  pull_request:
+    paths:
+      - "docs/working/non_ocr_third_party_reverse_eval_plan.md"
+      - "docs/working/non_ocr_third_party_reverse_eval_template.md"
+      - "docs/working/non_ocr_third_party_reverse_eval_report.template.json"
+      - "scripts/non_ocr_third_party_reverse_eval_gate.py"
+      - "tests/test_non_ocr_third_party_reverse_eval_gate.py"
+      - ".github/workflows/non_ocr_third_party_reverse_eval.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/working/non_ocr_third_party_reverse_eval_plan.md"
+      - "docs/working/non_ocr_third_party_reverse_eval_template.md"
+      - "docs/working/non_ocr_third_party_reverse_eval_report.template.json"
+      - "scripts/non_ocr_third_party_reverse_eval_gate.py"
+      - "tests/test_non_ocr_third_party_reverse_eval_gate.py"
+      - ".github/workflows/non_ocr_third_party_reverse_eval.yml"
+  workflow_dispatch:
+    inputs:
+      completed_report_path:
+        description: "Optional completed third-party reverse-evaluation report JSON path to validate with --require-completed"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: non-ocr-third-party-reverse-eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  reverse-eval-gate:
+    name: Non-OCR Third-Party Reverse Evaluation Gate
+    runs-on: ubuntu-latest
+    env:
+      TEMPLATE_REPORT: docs/working/non_ocr_third_party_reverse_eval_report.template.json
+      TEMPLATE_GATE_REPORT: .tmp_ci/non_ocr_third_party_reverse_eval/template_gate_report.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Validate Draft Template Structure
+        run: |
+          python -B scripts/non_ocr_third_party_reverse_eval_gate.py \
+            --report "$TEMPLATE_REPORT" \
+            --gate-report "$TEMPLATE_GATE_REPORT"
+
+      - name: Prove Draft Template Is Not A Completed Assessment
+        run: |
+          if python -B scripts/non_ocr_third_party_reverse_eval_gate.py --report "$TEMPLATE_REPORT" --require-completed; then
+            echo "::error::Draft third-party reverse-evaluation template passed the completed-report gate."
+            exit 1
+          fi
+
+      - name: Run Reverse Evaluation Gate Tests
+        run: |
+          python -B -m pytest -q tests/test_non_ocr_third_party_reverse_eval_gate.py -p no:cacheprovider
+
+      - name: Validate Completed Report Input
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.completed_report_path != '' }}
+        run: |
+          python -B scripts/non_ocr_third_party_reverse_eval_gate.py \
+            --report "${{ github.event.inputs.completed_report_path }}" \
+            --require-completed \
+            --gate-report .tmp_ci/non_ocr_third_party_reverse_eval/completed_gate_report.json
+
+      - name: Upload Reverse Evaluation Gate Reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: non-ocr-third-party-reverse-eval-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            .tmp_ci/non_ocr_third_party_reverse_eval/*.json
+          if-no-files-found: ignore
+          retention-days: 90

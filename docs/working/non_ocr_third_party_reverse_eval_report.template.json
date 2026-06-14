@@ -1,0 +1,65 @@
+{
+  "schema": "enc2sop-non-ocr-third-party-reverse-eval/v1",
+  "status": "draft",
+  "evaluation_id": "non-ocr-third-party-reverse-eval-YYYYMMDD",
+  "claim_boundary": {
+    "accepted": false,
+    "allowed_claim": "The non-OCR encryption/code-protection line increases the cost of casual and low-budget reverse engineering, tampering, and source recovery.",
+    "excluded_claims": [
+      "absolute non-reversibility",
+      "absolute non-crackability",
+      "OCR / QR / cross-media launch coverage",
+      "remote-KMS service launch coverage",
+      "resistance after attacker obtains full runtime environment and all keys"
+    ]
+  },
+  "release_evidence": {
+    "release_tag": "v0.1.0-ga.1",
+    "promotion_artifact_bundle_sha256": "",
+    "landing_gate_report": "",
+    "sample_hashes_verified": false
+  },
+  "samples": [
+    {
+      "sample_id": "sample-001",
+      "artifact_type": "promotion-bundle",
+      "source_path_or_url": "",
+      "sha256": "",
+      "size_bytes": 0,
+      "selection_reason": ""
+    }
+  ],
+  "environment": {
+    "os": "",
+    "architecture": "",
+    "python_version": "",
+    "tools": []
+  },
+  "attack_budget": {
+    "total_hours": 0,
+    "assessors": [],
+    "allowed_techniques": [],
+    "prohibited_techniques": [],
+    "success_criteria": [],
+    "stop_criteria": []
+  },
+  "findings": [],
+  "retest": {
+    "required": false,
+    "records": []
+  },
+  "conclusion": {
+    "direct_source_disclosure_found": null,
+    "reverse_cost_increased_within_budget": null,
+    "ga_blocking_findings": null,
+    "excluded_claims_respected": false
+  },
+  "approval": {
+    "assessor": "",
+    "assessor_approved_at_utc": "",
+    "project_owner": "",
+    "project_owner_ack_at_utc": "",
+    "final_report_sha256": "",
+    "final_report_storage_path": ""
+  }
+}

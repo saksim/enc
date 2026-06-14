@@ -22,6 +22,8 @@ For the current non-OCR GA release:
 For the next non-OCR GA post-release mainline:
 
 1. `docs/working/non_ocr_post_ga_trust_hardening_checklist.md`
+2. `docs/working/non_ocr_third_party_reverse_eval_plan.md`
+3. `docs/working/non_ocr_third_party_reverse_eval_template.md`
 
 For completed non-OCR GA governance history:
 
