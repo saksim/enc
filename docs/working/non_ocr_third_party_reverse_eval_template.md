@@ -13,6 +13,7 @@ Assessor name:
 Assessment window:
 Repository/tag under review:
 Release artifact source:
+Promotion artifact bundle path or URL:
 Promotion artifact bundle sha256:
 Landing gate report path or URL:
 ```

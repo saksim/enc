@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -159,6 +160,49 @@ def _completed_report() -> Dict[str, object]:
     return report
 
 
+
+def _write_evidence_file(root: Path, relative_path: str, payload: bytes) -> str:
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _completed_local_report(root: Path) -> Dict[str, object]:
+    report = _completed_report()
+    bundle_sha = _write_evidence_file(root, "evidence/promotion_artifact_bundle.zip", b"promotion-bundle")
+    _write_evidence_file(root, "evidence/non_ocr_ga_landing_gate_report.json", b"{}")
+    _write_evidence_file(root, "evidence/final_report.json", b"final-report")
+    sample_specs = [
+        ("sample-001", "encrypted-file", "samples/sample.enc", b"encrypted-file"),
+        ("sample-002", "protected-python-package", "samples/protected_package.zip", b"protected-package"),
+        ("sample-003", "native-runtime", "samples/native_runtime.pyd", b"native-runtime"),
+        ("sample-004", "release-bundle", "samples/release_bundle.json", b"release-bundle"),
+        ("sample-005", "promotion-bundle", "evidence/promotion_artifact_bundle.zip", b"promotion-bundle"),
+    ]
+    samples = []
+    for sample_id, artifact_type, relative_path, payload in sample_specs:
+        digest = _write_evidence_file(root, relative_path, payload)
+        samples.append(
+            {
+                "sample_id": sample_id,
+                "artifact_type": artifact_type,
+                "source_path_or_url": relative_path,
+                "sha256": digest,
+                "size_bytes": len(payload),
+                "selection_reason": "local evidence sample",
+            }
+        )
+    report["samples"] = samples
+    report["release_evidence"] = {
+        "release_tag": "v0.1.0-ga.1",
+        "promotion_artifact_bundle_path": "evidence/promotion_artifact_bundle.zip",
+        "promotion_artifact_bundle_sha256": bundle_sha,
+        "landing_gate_report": "evidence/non_ocr_ga_landing_gate_report.json",
+        "sample_hashes_verified": True,
+    }
+    report["approval"]["final_report_storage_path"] = "evidence/final_report.json"  # type: ignore[index]
+    return report
 def test_draft_template_passes_structure_gate_without_completed_claim() -> None:
     gate_report = validate_report(_draft_report())
 
@@ -205,6 +249,35 @@ def test_completed_gate_rejects_missing_minimum_sample_types() -> None:
     assert gate_report["passed"] is False
     assert any("samples must include completed assessment artifact types" in item for item in gate_report["failures"])
     assert any("encrypted-file" in item for item in gate_report["failures"])
+
+def test_completed_report_passes_local_evidence_gate(tmp_path: Path) -> None:
+    report = _completed_local_report(tmp_path)
+
+    gate_report = validate_report(
+        report,
+        require_completed=True,
+        require_local_evidence=True,
+        evidence_root=tmp_path,
+    )
+
+    assert gate_report["passed"] is True
+    assert gate_report["require_local_evidence"] is True
+    assert gate_report["failures"] == []
+
+
+def test_local_evidence_gate_rejects_sample_hash_mismatch(tmp_path: Path) -> None:
+    report = _completed_local_report(tmp_path)
+    report["samples"][0]["sha256"] = "b" * 64  # type: ignore[index]
+
+    gate_report = validate_report(
+        report,
+        require_completed=True,
+        require_local_evidence=True,
+        evidence_root=tmp_path,
+    )
+
+    assert gate_report["passed"] is False
+    assert "samples[0] sha256 mismatch" in gate_report["failures"]
 def test_gate_cli_writes_report_for_template(tmp_path: Path) -> None:
     report_path = tmp_path / "eval.json"
     report_path.write_text(json.dumps(_draft_report(), indent=2, sort_keys=True), encoding="utf-8")

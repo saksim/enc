@@ -25,6 +25,15 @@ on:
         description: "Optional completed third-party reverse-evaluation report JSON path to validate with --require-completed"
         required: false
         default: ""
+      require_local_evidence:
+        description: "Require completed report local evidence files to exist and match sha256"
+        required: false
+        default: false
+        type: boolean
+      evidence_root:
+        description: "Base directory for relative local evidence paths"
+        required: false
+        default: "."
 
 permissions:
   contents: read
@@ -74,10 +83,14 @@ jobs:
       - name: Validate Completed Report Input
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.completed_report_path != '' }}
         run: |
-          python -B scripts/non_ocr_third_party_reverse_eval_gate.py \
+          cmd=(python -B scripts/non_ocr_third_party_reverse_eval_gate.py \
             --report "${{ github.event.inputs.completed_report_path }}" \
             --require-completed \
-            --gate-report .tmp_ci/non_ocr_third_party_reverse_eval/completed_gate_report.json
+            --gate-report .tmp_ci/non_ocr_third_party_reverse_eval/completed_gate_report.json)
+          if [[ "${{ github.event.inputs.require_local_evidence }}" == "true" ]]; then
+            cmd+=(--require-local-evidence --evidence-root "${{ github.event.inputs.evidence_root }}")
+          fi
+          "${cmd[@]}"
 
       - name: Upload Reverse Evaluation Gate Reports
         if: ${{ always() }}

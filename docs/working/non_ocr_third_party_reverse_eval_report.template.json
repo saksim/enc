@@ -15,6 +15,7 @@
   },
   "release_evidence": {
     "release_tag": "v0.1.0-ga.1",
+    "promotion_artifact_bundle_path": "",
     "promotion_artifact_bundle_sha256": "",
     "landing_gate_report": "",
     "sample_hashes_verified": false

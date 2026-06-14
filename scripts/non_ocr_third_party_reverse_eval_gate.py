@@ -10,6 +10,7 @@ report contains the required approvals and conclusion fields.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -66,6 +67,56 @@ def _append_if_false(failures: List[str], condition: bool, message: str) -> None
         failures.append(message)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _resolve_local_evidence_path(value: object, *, evidence_root: Path) -> Optional[Path]:
+    if not isinstance(value, str) or not value.strip() or _is_url(value.strip()):
+        return None
+    candidate = Path(value.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = evidence_root / candidate
+    return candidate.resolve()
+
+
+def _validate_local_file_sha256(
+    *,
+    path_value: object,
+    expected_sha256: object,
+    evidence_root: Path,
+    label: str,
+    failures: List[str],
+    require_local_evidence: bool,
+) -> None:
+    if not require_local_evidence:
+        return
+    if not isinstance(path_value, str) or not path_value.strip():
+        failures.append("{0} path is required when --require-local-evidence is used".format(label))
+        return
+    if _is_url(path_value.strip()):
+        failures.append("{0} must be a local path when --require-local-evidence is used".format(label))
+        return
+    local_path = _resolve_local_evidence_path(path_value, evidence_root=evidence_root)
+    if local_path is None or not local_path.is_file():
+        failures.append("{0} local file missing: {1}".format(label, path_value))
+        return
+    if not _is_sha256(expected_sha256):
+        failures.append("{0} expected sha256 is required when --require-local-evidence is used".format(label))
+        return
+    actual = _sha256_file(local_path)
+    if actual != str(expected_sha256).strip():
+        failures.append("{0} sha256 mismatch".format(label))
+
+
 def _validate_claim_boundary(report: Mapping[str, object], failures: List[str], *, require_completed: bool) -> None:
     boundary = report.get("claim_boundary")
     if not isinstance(boundary, dict):
@@ -84,7 +135,7 @@ def _validate_claim_boundary(report: Mapping[str, object], failures: List[str], 
         _append_if_false(failures, boundary.get("accepted") is True, "claim_boundary.accepted must be true for completed reports")
 
 
-def _validate_release_evidence(report: Mapping[str, object], failures: List[str], *, require_completed: bool) -> None:
+def _validate_release_evidence(report: Mapping[str, object], failures: List[str], *, require_completed: bool, require_local_evidence: bool, evidence_root: Path) -> None:
     evidence = report.get("release_evidence")
     if not isinstance(evidence, dict):
         failures.append("release_evidence must be an object")
@@ -98,9 +149,21 @@ def _validate_release_evidence(report: Mapping[str, object], failures: List[str]
         )
         _append_if_false(failures, _non_empty_string(evidence.get("landing_gate_report")), "release_evidence.landing_gate_report is required for completed reports")
         _append_if_false(failures, evidence.get("sample_hashes_verified") is True, "release_evidence.sample_hashes_verified must be true for completed reports")
+    _validate_local_file_sha256(
+        path_value=evidence.get("promotion_artifact_bundle_path"),
+        expected_sha256=evidence.get("promotion_artifact_bundle_sha256"),
+        evidence_root=evidence_root,
+        label="release_evidence.promotion_artifact_bundle_path",
+        failures=failures,
+        require_local_evidence=require_local_evidence,
+    )
+    if require_local_evidence:
+        landing_path = _resolve_local_evidence_path(evidence.get("landing_gate_report"), evidence_root=evidence_root)
+        if landing_path is None or not landing_path.is_file():
+            failures.append("release_evidence.landing_gate_report local file missing")
 
 
-def _validate_samples(report: Mapping[str, object], failures: List[str], *, require_completed: bool) -> None:
+def _validate_samples(report: Mapping[str, object], failures: List[str], *, require_completed: bool, require_local_evidence: bool, evidence_root: Path) -> None:
     samples = report.get("samples")
     if not _non_empty_list(samples):
         failures.append("samples must be a non-empty list")
@@ -119,6 +182,14 @@ def _validate_samples(report: Mapping[str, object], failures: List[str], *, requ
             completed_sample_types.add(artifact_type)
         _append_if_false(failures, _non_empty_string(sample.get("source_path_or_url")) or not require_completed, "{0}.source_path_or_url is required for completed reports".format(label))
         _append_if_false(failures, _is_sha256(sample.get("sha256")) or not require_completed, "{0}.sha256 must be a lowercase sha256 for completed reports".format(label))
+        _validate_local_file_sha256(
+            path_value=sample.get("source_path_or_url"),
+            expected_sha256=sample.get("sha256"),
+            evidence_root=evidence_root,
+            label=label,
+            failures=failures,
+            require_local_evidence=require_local_evidence,
+        )
         size = sample.get("size_bytes")
         _append_if_false(failures, isinstance(size, int) and not isinstance(size, bool) and size >= 0, "{0}.size_bytes must be a non-negative integer".format(label))
         _append_if_false(failures, _non_empty_string(sample.get("selection_reason")) or not require_completed, "{0}.selection_reason is required for completed reports".format(label))
@@ -212,7 +283,7 @@ def _validate_conclusion(report: Mapping[str, object], failures: List[str], *, r
         _append_if_false(failures, conclusion.get("excluded_claims_respected") is True, "conclusion.excluded_claims_respected must be true for completed reports")
 
 
-def _validate_approval(report: Mapping[str, object], failures: List[str], *, require_completed: bool) -> None:
+def _validate_approval(report: Mapping[str, object], failures: List[str], *, require_completed: bool, require_local_evidence: bool, evidence_root: Path) -> None:
     approval = report.get("approval")
     if not isinstance(approval, dict):
         failures.append("approval must be an object")
@@ -221,9 +292,19 @@ def _validate_approval(report: Mapping[str, object], failures: List[str], *, req
         for key in ("assessor", "assessor_approved_at_utc", "project_owner", "project_owner_ack_at_utc", "final_report_storage_path"):
             _append_if_false(failures, _non_empty_string(approval.get(key)), "approval.{0} is required for completed reports".format(key))
         _append_if_false(failures, _is_sha256(approval.get("final_report_sha256")), "approval.final_report_sha256 must be a lowercase sha256 for completed reports")
+    if require_local_evidence:
+        storage_path = _resolve_local_evidence_path(approval.get("final_report_storage_path"), evidence_root=evidence_root)
+        if storage_path is None or not storage_path.is_file():
+            failures.append("approval.final_report_storage_path local file missing")
 
 
-def validate_report(report: Mapping[str, object], *, require_completed: bool = False) -> Dict[str, object]:
+def validate_report(
+    report: Mapping[str, object],
+    *,
+    require_completed: bool = False,
+    require_local_evidence: bool = False,
+    evidence_root: Optional[Path] = None,
+) -> Dict[str, object]:
     failures: List[str] = []
     if report.get("schema") != REPORT_SCHEMA:
         failures.append("schema mismatch: expected {0}".format(REPORT_SCHEMA))
@@ -233,21 +314,24 @@ def validate_report(report: Mapping[str, object], *, require_completed: bool = F
     if require_completed and status != "completed":
         failures.append("status must be completed when --require-completed is used")
     _append_if_false(failures, _non_empty_string(report.get("evaluation_id")), "evaluation_id is required")
+    root = evidence_root.resolve() if evidence_root is not None else Path.cwd().resolve()
 
     _validate_claim_boundary(report, failures, require_completed=require_completed)
-    _validate_release_evidence(report, failures, require_completed=require_completed)
-    _validate_samples(report, failures, require_completed=require_completed)
+    _validate_release_evidence(report, failures, require_completed=require_completed, require_local_evidence=require_local_evidence, evidence_root=root)
+    _validate_samples(report, failures, require_completed=require_completed, require_local_evidence=require_local_evidence, evidence_root=root)
     _validate_environment(report, failures, require_completed=require_completed)
     _validate_attack_budget(report, failures, require_completed=require_completed)
     _validate_findings(report, failures)
     _validate_retest(report, failures)
     _validate_conclusion(report, failures, require_completed=require_completed)
-    _validate_approval(report, failures, require_completed=require_completed)
+    _validate_approval(report, failures, require_completed=require_completed, require_local_evidence=require_local_evidence, evidence_root=root)
 
     return {
         "schema": "enc2sop-non-ocr-third-party-reverse-eval-gate/v1",
         "passed": not failures,
         "require_completed": bool(require_completed),
+        "require_local_evidence": bool(require_local_evidence),
+        "evidence_root": str(root),
         "summary": {"total_failures": len(failures)},
         "failures": failures,
     }
@@ -257,6 +341,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate a non-OCR third-party reverse-evaluation report.")
     parser.add_argument("--report", required=True, help="Evaluation report JSON to validate.")
     parser.add_argument("--require-completed", action="store_true", help="Require completed-report approvals and final conclusion fields.")
+    parser.add_argument("--require-local-evidence", action="store_true", help="Require local evidence paths to exist and match reported sha256 values.")
+    parser.add_argument("--evidence-root", help="Base directory for relative local evidence paths. Defaults to current working directory.")
     parser.add_argument("--gate-report", help="Optional gate report JSON output path.")
     return parser
 
@@ -265,7 +351,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     report_path = Path(args.report).expanduser().resolve()
     report = _load_json_object(report_path)
-    gate_report = validate_report(report, require_completed=bool(args.require_completed))
+    evidence_root = Path(args.evidence_root).expanduser().resolve() if args.evidence_root else Path.cwd().resolve()
+    gate_report = validate_report(report, require_completed=bool(args.require_completed), require_local_evidence=bool(args.require_local_evidence), evidence_root=evidence_root)
     if args.gate_report:
         output_path = Path(args.gate_report).expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
