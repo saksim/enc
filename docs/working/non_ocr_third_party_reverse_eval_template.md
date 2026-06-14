@@ -13,6 +13,7 @@ Assessor name:
 Assessment window:
 Repository/tag under review:
 Release artifact source:
+Promotion artifact bundle path or URL:
 Promotion artifact bundle sha256:
 Landing gate report path or URL:
 ```
@@ -165,3 +166,21 @@ Project owner acknowledgement
 Final report sha256
 Final report storage path
 ```
+## 11. Local Evidence Replay
+
+When the completed report is submitted with local evidence files, the gate should be run with:
+
+```powershell
+python -B scripts\non_ocr_third_party_reverse_eval_gate.py --report <completed-report.json> --require-completed --require-local-evidence --evidence-root <evidence-dir>
+```
+
+This replay verifies:
+
+```text
+sample files exist and match reported sha256 values
+promotion_artifact_bundle_path exists and matches promotion_artifact_bundle_sha256
+landing_gate_report exists and has passed=true
+final_report_storage_path exists and matches final_report_sha256
+```
+
+The final report sha256 must match the exact file stored at `final_report_storage_path`.

@@ -1,7 +1,8 @@
-# Non-OCR Third-Party Reverse Evaluation Plan
+﻿# Non-OCR Third-Party Reverse Evaluation Plan
 
 Date: 2026-06-13
-Status: working
+Archived: 2026-06-14
+Status: archived
 Parent: `docs/working/non_ocr_post_ga_trust_hardening_checklist.md`
 Scope item: third-party reverse-engineering evaluation template
 
@@ -72,6 +73,7 @@ Completed status without assessor and owner approval fails the gate.
 The gate must not mark any report as a completed third-party assessment unless --require-completed is explicitly used and all completion fields are present.
 Completed reports must cover the minimum sample set: encrypted file, protected Python package, native runtime, release bundle, and promotion bundle.
 CI must prove the draft template passes structure validation but fails the completed-report gate.
+Completed reports can be validated against local evidence files with --require-local-evidence and --evidence-root.
 ```
 
 ## Verification Commands
@@ -80,6 +82,7 @@ CI must prove the draft template passes structure validation but fails the compl
 python -B scripts\non_ocr_third_party_reverse_eval_gate.py --report docs\working\non_ocr_third_party_reverse_eval_report.template.json
 python -B -m pytest -q tests\test_non_ocr_third_party_reverse_eval_gate.py -p no:cacheprovider
 python -B scripts\non_ocr_third_party_reverse_eval_gate.py --report docs\working\non_ocr_third_party_reverse_eval_report.template.json --require-completed
+python -B scripts\non_ocr_third_party_reverse_eval_gate.py --report <completed-report.json> --require-completed --require-local-evidence --evidence-root <evidence-dir>
 ```
 
 ## Release Boundary
@@ -103,6 +106,7 @@ Draft template must fail --require-completed.
 Unit tests must pass.
 Optional workflow_dispatch completed_report_path can validate a real completed report with --require-completed.
 Gate reports are uploaded as workflow artifacts for 90 days.
+workflow_dispatch supports require_local_evidence and evidence_root for local evidence replay.
 ```
 
 Remaining before any public third-party claim:
@@ -110,6 +114,16 @@ Remaining before any public third-party claim:
 ```text
 A real third-party assessor must fill a completed report.
 The completed report must pass --require-completed.
+If local evidence files are provided, the completed report should also pass --require-local-evidence with matching sha256 values, final report sha256, and landing gate report passed=true.
 The final report sha256 and storage path must be recorded.
 Only then can a release document reference the third-party assessment as completed.
 ```
+Additional implementation in this round:
+
+```text
+Completed reports can now require local evidence replay.
+The gate verifies local sample files exist and match reported sha256 values.
+The gate verifies the local promotion artifact bundle path, landing gate report path, landing gate passed=true, and final report sha256 when --require-local-evidence is used.
+The workflow_dispatch path can opt into local evidence replay with require_local_evidence=true.
+```
+
